@@ -90,6 +90,28 @@ const migrations: Migration[] = [
       db.exec('ALTER TABLE identities ADD COLUMN sessions_revoked_at TEXT');
     },
   },
+  {
+    version: 4,
+    up: (db) => {
+      // ADR-0021: after bootstrap, Owners invite Administrators by email; the
+      // invitee sets their own password. The invitation is a single-use,
+      // expiring, stored-verifiable-only token bound to an Organization and a
+      // role (the Membership the invitee will receive). The inviter never
+      // chooses a credential, so no password material lives here.
+      db.exec(`CREATE TABLE administrator_invitations (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        email TEXT NOT NULL COLLATE NOCASE,
+        role TEXT NOT NULL CHECK (role IN ('owner', 'member')),
+        token_hash TEXT NOT NULL UNIQUE,
+        invited_by TEXT NOT NULL REFERENCES administrators(id),
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        expiry_audited_at TEXT,
+        created_at TEXT NOT NULL
+      )`);
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

@@ -116,6 +116,43 @@ export interface AuditEvent {
   occurredAt: string;
 }
 
+export type AdministratorRole = 'owner' | 'member';
+
+export interface InvitationInfo {
+  organizationName: string;
+  valid: boolean;
+  email: string | null;
+  role: AdministratorRole | null;
+}
+
+export async function fetchInvitationInfo(token: string | undefined): Promise<InvitationInfo> {
+  const query = token ? `?token=${encodeURIComponent(token)}` : '';
+  const res = await fetch(`/api/administrators/invitations${query}`);
+  if (!res.ok) throw new Error('invitation page unavailable');
+  return (await res.json()) as InvitationInfo;
+}
+
+export async function acceptInvitation(
+  body: { token: string; name: string; password: string },
+): Promise<Response> {
+  return fetch('/api/administrators/invitations/accept', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function inviteAdministrator(body: {
+  email: string;
+  role: AdministratorRole;
+}): Promise<Response> {
+  return fetch('/api/administrators/invitations', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 export function useSession(): { session: AdministratorSession | null; loading: boolean } {
   const [session, setSession] = useState<AdministratorSession | null>(null);
   const [loading, setLoading] = useState(true);

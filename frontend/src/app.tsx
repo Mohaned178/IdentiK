@@ -6,6 +6,7 @@ import { EndUserSignUpPage } from './pages/end-user-sign-up';
 import { VerifyEmailResultPage } from './pages/verify-email-result';
 import { ForgotPasswordPage } from './pages/forgot-password';
 import { ResetPasswordPage } from './pages/reset-password';
+import { AcceptInvitationPage } from './pages/accept-invitation';
 
 export function App(): React.JSX.Element {
   return (
@@ -13,6 +14,7 @@ export function App(): React.JSX.Element {
       <Routes>
         <Route path="/setup" element={<SetupPage />} />
         <Route path="/sign-in" element={<AdminSignInPage />} />
+        <Route path="/administrators/accept-invitation" element={<AcceptInvitationPage />} />
         <Route path="/end-users/sign-up" element={<EndUserSignUpPage />} />
         <Route path="/end-users/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/end-users/reset-password" element={<ResetPasswordPage />} />
