@@ -6,9 +6,28 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { IsOptional, IsString } from 'class-validator';
 import { AdministratorGuard } from '../administrators/administrator.guard';
 import type { AdministratorRequest } from '../administrators/administrators.controller';
-import { AuditEventView, AuditService } from './audit.service';
+import { AuditEventView, AuditFilters, AuditService } from './audit.service';
+
+class AuditQuery implements AuditFilters {
+  @IsOptional()
+  @IsString()
+  actor?: string;
+
+  @IsOptional()
+  @IsString()
+  kind?: string;
+
+  @IsOptional()
+  @IsString()
+  from?: string;
+
+  @IsOptional()
+  @IsString()
+  to?: string;
+}
 
 /**
  * The unified audit surface (ADR-0020, ADR-0023) — one Organization-scoped
@@ -24,13 +43,10 @@ export class AuditController {
   @Get()
   events(
     @Req() req: AdministratorRequest,
-    @Query('actor') actor?: string,
-    @Query('kind') kind?: string,
-    @Query('from') from?: string,
-    @Query('to') to?: string,
+    @Query() query: AuditQuery,
   ): { events: AuditEventView[] } {
     const session = req.administratorSession;
     if (!session) throw new UnauthorizedException();
-    return { events: this.audit.list(session.organizationId, { actor, kind, from, to }) };
+    return { events: this.audit.list(session.organizationId, query) };
   }
 }

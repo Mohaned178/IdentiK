@@ -289,6 +289,25 @@ describe('Unified audit surface', () => {
     expect(endUserEvents.some((event) => event.kind === 'identity.verification.completed')).toBe(
       true,
     );
+
+    // The actor the surface displays (their email) is also a valid filter.
+    const byEmail = await auditEvents(ownerCookie, { actor: OWNER.email });
+    expect(byEmail.map((event) => event.id)).toEqual(ownerEvents.map((event) => event.id));
+
+    const unknownActor = await auditEvents(ownerCookie, { actor: 'nobody@example.com' });
+    expect(unknownActor).toEqual([]);
+  });
+
+  it('treats blank filters as absent and refuses repeated values', async () => {
+    const all = await auditEvents(ownerCookie);
+    const blank = await auditEvents(ownerCookie, { actor: '  ', kind: '' });
+    expect(blank.map((event) => event.id)).toEqual(all.map((event) => event.id));
+
+    const repeated = await instance.request(
+      '/api/audit?kind=redirect_uri.added&kind=client_secret.generated',
+      { headers: { cookie: ownerCookie } },
+    );
+    expect(repeated.status).toBe(400);
   });
 
   it('filters by time range with inclusive bounds', async () => {
@@ -317,9 +336,22 @@ describe('Unified audit surface', () => {
     expect(exact.some((event) => event.id === inWindow.id)).toBe(true);
   });
 
-  it('refuses malformed or inverted time ranges instead of guessing', async () => {
+  it('refuses malformed, ambiguous, or inverted time ranges instead of guessing', async () => {
     const malformed = await audit(ownerCookie, { from: 'not-a-date' });
     expect(malformed.status).toBe(400);
+
+    // Parses as local time under `new Date()`, so it would select a different
+    // window per deployment; refused rather than silently reinterpreted.
+    const slashDate = await audit(ownerCookie, { from: '2026/01/02' });
+    expect(slashDate.status).toBe(400);
+
+    // ISO but offsetless: also server-local under `new Date()`.
+    const offsetless = await audit(ownerCookie, { from: '2026-09-11T02:42' });
+    expect(offsetless.status).toBe(400);
+
+    // A plain ISO date is unambiguous (UTC midnight) and accepted.
+    const dateOnly = await audit(ownerCookie, { from: '2026-09-11' });
+    expect(dateOnly.status).toBe(200);
 
     const inverted = await audit(ownerCookie, {
       from: '2026-01-02T00:00:00.000Z',
