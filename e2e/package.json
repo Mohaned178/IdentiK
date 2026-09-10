@@ -1,0 +1,14 @@
+{
+  "name": "@identik/e2e",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
