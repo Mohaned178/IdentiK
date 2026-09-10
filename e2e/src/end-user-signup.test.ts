@@ -184,40 +184,42 @@ describe('End-User sign-up with the email verification gate', () => {
     const events = await auditEvents();
     const refused = events.filter(
       (event) =>
-        event.kind === 'identity.signup.refused' &&
-        auditDetail(event).email === END_USER_EMAIL &&
-        auditDetail(event).outcome === 'already-verified',
+        event.kind === 'identity.signup.refused' && auditDetail(event).email === END_USER_EMAIL,
     );
     expect(refused).toHaveLength(1);
   });
 
-  it('a duplicate sign-up before verification re-sends the verification link (the reservation can still be claimed by its mailbox)', async () => {
+  it('a duplicate sign-up while the reservation is still unverified gets the same refusal — no fresh verification link is re-sent (pre-claim healing is the mailbox owner act, ticket 04)', async () => {
     await signUp('sara@example.com', END_USER_PASSWORD);
     let mails = (await emailsTo('sara@example.com')).filter((mail) =>
       mail.subject.includes('Verify'),
     );
     expect(mails).toHaveLength(1);
 
-    await signUp('sara@example.com', 'a different password 789');
-    mails = (await emailsTo('sara@example.com')).filter((mail) => mail.subject.includes('Verify'));
-    expect(mails).toHaveLength(2);
-    expect(
-      (await emailsTo('sara@example.com')).some((mail) =>
-        mail.body.includes('sign in instead'),
-      ),
-    ).toBe(false);
+    // A second sign-up with the same unclaimed email: refused identically.
+    const res = await signUp('sara@example.com', 'a different password 789');
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ status: 'check-your-mailbox' });
 
-    const click = await clickLink(linkFromBody(mails.at(-1)!.body));
-    expect(outcomeFrom(click.location)).toBe('verified');
+    // No fresh verification link — only the refusal reached the mailbox.
+    mails = (await emailsTo('sara@example.com')).filter((mail) => mail.subject.includes('Verify'));
+    expect(mails).toHaveLength(1);
+    const refusal = (await emailsTo('sara@example.com')).find((mail) =>
+      mail.subject.includes('already have an identity'),
+    );
+    expect(refusal).toBeDefined();
+    expect(refusal!.body).toContain('sign in instead');
 
     const events = await auditEvents();
-    const resent = events.filter(
+    const refused = events.filter(
       (event) =>
-        event.kind === 'identity.signup.refused' &&
-        auditDetail(event).email === 'sara@example.com' &&
-        auditDetail(event).outcome === 'verification-resent',
+        event.kind === 'identity.signup.refused' && auditDetail(event).email === 'sara@example.com',
     );
-    expect(resent).toHaveLength(1);
+    expect(refused).toHaveLength(1);
+
+    // The original link still works: one mailbox proof, one activation.
+    const click = await clickLink(linkFromBody(mails[0]!.body));
+    expect(outcomeFrom(click.location)).toBe('verified');
   });
 
   it('sign-up responses are uniform in shape whether the email exists or not', async () => {
@@ -267,6 +269,25 @@ describe('End-User sign-up with the email verification gate', () => {
         auditDetail(event).email === END_USER_EMAIL,
     );
     expect(reservations).toHaveLength(1);
+  });
+
+  it('the reservation is inert until verified: a duplicate sign-up cannot smuggle a fresh link to a pre-claimed email', async () => {
+    // An attacker pre-claims an email. The mailbox's true owner signs up and
+    // is refused — no verification link is re-sent for the attacker's
+    // reservation, so the owner's click can never activate the attacker's
+    // password. Healing is the owner's own reset-flow act (ticket 04).
+    await signUp('prey@example.com', 'attacker password 123');
+    const owner = await signUp('prey@example.com', 'owner password 456');
+    expect(owner.status).toBe(201);
+
+    const verification = (await emailsTo('prey@example.com')).filter((mail) =>
+      mail.subject.includes('Verify'),
+    );
+    expect(verification).toHaveLength(1);
+    const refusal = (await emailsTo('prey@example.com')).filter((mail) =>
+      mail.subject.includes('already have an identity'),
+    );
+    expect(refusal).toHaveLength(1);
   });
 });
 

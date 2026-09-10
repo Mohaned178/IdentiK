@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { hashPassword, hashToken, randomToken } from '../crypto/password';
 import { MailService } from '../mail/mail.service';
 import { DATABASE, Database } from '../storage/token';
@@ -7,13 +7,15 @@ import { uuid } from '../bootstrap/uuid';
 /**
  * Link base for outbound email. Derived from the Instance's own deployed URL,
  * held in deployment configuration (the Instance Operator's trust fabric per
- * ADR-0022) — never the Host header of an incoming request, which an
- * attacker controls and would use to smuggle verification links to their own
- * server.
+ * ADR-0022) — never the Host header of an incoming request, which an attacker
+ * controls and would use to smuggle verification links to their own server.
+ * Validated at boot so a misconfigured Instance fails closed, loudly.
  */
 @Injectable()
 export class LinkBaseService {
-  resolve(): string {
+  private readonly base: string;
+
+  constructor() {
     const raw = process.env.IDENTIK_BASE_URL;
     if (!raw) {
       throw new Error(
@@ -21,27 +23,24 @@ export class LinkBaseService {
           '(e.g. https://id.example.com) — it is the base for verification and reset links.',
       );
     }
-    return raw.replace(/\/+$/, '');
+    let parsed: URL;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      throw new Error(`IDENTIK_BASE_URL "${raw}" is not a valid absolute URL.`);
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`IDENTIK_BASE_URL "${raw}" must be an http(s) URL.`);
+    }
+    this.base = raw.replace(/\/+$/, '');
+  }
+
+  resolve(): string {
+    return this.base;
   }
 }
 
-export enum SignUpOutcome {
-  /** No Identity held the email: a fresh Unverified Reservation was created. */
-  ReservationCreated = 'reservation-created',
-  /** A verified Identity already held the email: the "sign in instead" refusal went out. */
-  AlreadyVerified = 'already-verified',
-  /**
-   * An unverified reservation already held the email: the verification link
-   * was re-sent (the mailbox's true owner can still claim it; ADR-0011).
-   */
-  VerificationResent = 'verification-resent',
-}
-
-export interface ReservationView {
-  id: string;
-  email: string;
-  emailVerified: boolean;
-}
+type ReservationInsert = { created: true; identityId: string } | { created: false };
 
 /**
  * The End-User sign-up boundary (ADR-0011): sign-up creates an inert
@@ -53,6 +52,14 @@ export interface ReservationView {
  * sign-up attempt performs the same work (password hash + one outbound
  * email) and returns the same response, whatever the outcome; the
  * accepted/refused distinction travels to the mailbox only.
+ *
+ * A duplicate email — verified or not — is refused identically: the mailbox
+ * gets "an identity with this email already exists — sign in instead". A
+ * pre-claimed reservation is NEVER re-sent a verification link on a
+ * duplicate attempt: whoever clicked it would activate the Identity with
+ * the original (possibly attacker-chosen) password. The mailbox's true owner
+ * heals through the forgot-password flow instead, which sets their own
+ * password while proving the mailbox (ticket 04, ADR-0011).
  */
 @Injectable()
 export class IdentitiesService {
@@ -62,111 +69,94 @@ export class IdentitiesService {
     private readonly links: LinkBaseService,
   ) {}
 
-  async signUp(
-    organizationId: string,
-    organizationName: string,
-    input: { email: string; password: string },
-  ): Promise<SignUpOutcome> {
+  /**
+   * The Organization this Instance's hosted End-User pages serve. One
+   * Organization per Instance today (ADR-0001); hosted mode selects by host
+   * later.
+   */
+  hostedOrganization(): { id: string; name: string } {
+    const row = this.db
+      .prepare('SELECT id, name FROM organizations ORDER BY created_at LIMIT 1')
+      .get() as { id: string; name: string } | undefined;
+    if (!row) throw new NotFoundException('no organization exists on this Instance');
+    return row;
+  }
+
+  async signUp(input: { email: string; password: string }): Promise<void> {
+    const organization = this.hostedOrganization();
     const email = input.email.trim().toLowerCase();
+    // Uniform work: every path hashes a password and sends exactly one email.
     const passwordHash = await hashPassword(input.password);
 
-    const outcome = this.insertReservation(organizationId, email, passwordHash);
+    const reservation = this.insertReservation(organization.id, email, passwordHash);
 
-    switch (outcome) {
-      case SignUpOutcome.ReservationCreated:
-        await this.audit(organizationId, 'identity.reservation.created', { email });
-        await this.sendVerificationEmail(email, organizationName);
-        break;
-      case SignUpOutcome.VerificationResent: {
-        const identity = this.identityByEmail(email);
-        if (!identity) throw new Error('reservation vanished before re-send');
-        const token = this.issueTokenFor(identity.id);
-        await this.audit(organizationId, 'identity.signup.refused', {
-          email,
-          outcome: 'verification-resent',
-        });
-        await this.sendVerificationEmail(email, organizationName, token);
-        break;
-      }
-      case SignUpOutcome.AlreadyVerified:
-        await this.audit(organizationId, 'identity.signup.refused', {
-          email,
-          outcome: 'already-verified',
-        });
-        await this.sendAlreadyRegisteredEmail(email, organizationName);
-        break;
+    if (reservation.created) {
+      this.audit(organization.id, 'identity.reservation.created', { email });
+      const token = this.issueTokenFor(reservation.identityId);
+      await this.sendVerificationEmail(email, organization.name, token);
+    } else {
+      this.audit(organization.id, 'identity.signup.refused', { email });
+      await this.sendAlreadyRegisteredEmail(email, organization.name);
     }
-
-    return outcome;
   }
 
   /**
    * Clicking the verification link: proof of mailbox control, single-use and
    * expiring. Success marks the email verified, activating the Identity;
-   * failure returns null so the caller can render the invalid outcome.
+   * failure returns false so the caller renders the invalid outcome —
+   * without saying whether the token was expired, used, or never existed.
    */
-  async verifyEmail(token: string): Promise<ReservationView | null> {    const now = new Date().toISOString();
+  async verifyEmail(token: string): Promise<boolean> {
+    const tokenHash = await hashToken(token);
+    const now = new Date().toISOString();
     const consumed = this.db
       .prepare(
         `UPDATE identity_tokens SET consumed_at = ?
          WHERE token_hash = ? AND kind = 'email_verification' AND consumed_at IS NULL AND expires_at > ?
          RETURNING identity_id`,
       )
-      .get(await hashToken(token), await hashToken(token), now) as
-      | { identity_id: string }
-      | undefined;
-    if (!consumed) return null;
+      .get(now, tokenHash, now) as { identity_id: string } | undefined;
+    if (!consumed) return false;
 
-    const verified = this.db
+    const activated = this.db
       .prepare('UPDATE identities SET email_verified = 1 WHERE id = ? AND email_verified = 0')
       .run(consumed.identity_id);
-    if (verified.changes !== 1) return null;
+    if (activated.changes !== 1) return false;
 
     const identity = this.db
-      .prepare('SELECT id, email, email_verified FROM identities WHERE id = ?')
-      .get(consumed.identity_id) as { id: string; email: string; email_verified: number } | undefined;
-    if (!identity) return null;
+      .prepare('SELECT organization_id, email FROM identities WHERE id = ?')
+      .get(consumed.identity_id) as { organization_id: string; email: string } | undefined;
+    if (!identity) return false;
 
-    const organizationId = this.organizationOf(identity.id);
-    if (organizationId) {
-      await this.audit(organizationId, 'identity.verification.completed', {
-        identityId: identity.id,
-        email: identity.email,
-      });
-    }
-    return { id: identity.id, email: identity.email, emailVerified: identity.email_verified === 1 };
+    this.audit(identity.organization_id, 'identity.verification.completed', {
+      identityId: consumed.identity_id,
+      email: identity.email,
+    });
+    return true;
   }
 
   /**
-   * Creates the reservation, or reports which refusal applies. The UNIQUE
-   * (organization_id, email) constraint is the race-free arbiter: a violation
-   * (including a lost race) maps to the same already-registered refusal.
+   * Creates the reservation, or reports the email is held. The UNIQUE
+   * (organization_id, email) constraint is the race-free arbiter: any
+   * violation (including a lost race) is the same already-registered refusal.
    */
   private insertReservation(
     organizationId: string,
     email: string,
     passwordHash: string,
-  ): SignUpOutcome {
-    const now = new Date().toISOString();
+  ): ReservationInsert {
+    const identityId = uuid();
     try {
       this.db
         .prepare(
           'INSERT INTO identities (id, organization_id, email, email_verified, password_hash, created_at) VALUES (?, ?, ?, 0, ?, ?)',
         )
-        .run(uuid(), organizationId, email, passwordHash, now);
-      return SignUpOutcome.ReservationCreated;
+        .run(identityId, organizationId, email, passwordHash, new Date().toISOString());
+      return { created: true, identityId };
     } catch (error) {
       if (!this.isUniqueViolation(error)) throw error;
+      return { created: false };
     }
-
-    const existing = this.db
-      .prepare(
-        'SELECT email_verified FROM identities WHERE organization_id = ? AND email = ?',
-      )
-      .get(organizationId, email) as { email_verified: number } | undefined;
-    return existing?.email_verified === 1
-      ? SignUpOutcome.AlreadyVerified
-      : SignUpOutcome.VerificationResent;
   }
 
   private isUniqueViolation(error: unknown): boolean {
@@ -177,15 +167,7 @@ export class IdentitiesService {
     );
   }
 
-  private identityByEmail(email: string): { id: string } | null {
-    return (
-      (this.db.prepare('SELECT id FROM identities WHERE email = ?').get(email) as
-        | { id: string }
-        | undefined) ?? null
-    );
-  }
-
-  /** A fresh mailbox-proof token for the Identity holding this email. */
+  /** A fresh mailbox-proof token for one Identity. */
   private issueTokenFor(identityId: string): string {
     const token = randomToken(32);
     const expiresAt = new Date(Date.now() + this.verificationTtlMs());
@@ -200,15 +182,9 @@ export class IdentitiesService {
   private async sendVerificationEmail(
     email: string,
     organizationName: string,
-    token?: string,
+    token: string,
   ): Promise<void> {
-    let verificationToken = token;
-    if (!verificationToken) {
-      const identity = this.identityByEmail(email);
-      if (!identity) throw new Error('identity vanished before token issuance');
-      verificationToken = this.issueTokenFor(identity.id);
-    }
-    const link = `${this.links.resolve()}/api/end-users/verify-email?token=${encodeURIComponent(verificationToken)}`;
+    const link = `${this.links.resolve()}/api/end-users/verify-email?token=${encodeURIComponent(token)}`;
     await this.mail.send({
       to: email,
       subject: `Verify your email — ${organizationName}`,
@@ -231,18 +207,7 @@ export class IdentitiesService {
     });
   }
 
-  private organizationOf(identityId: string): string | null {
-    const row = this.db
-      .prepare('SELECT organization_id FROM identities WHERE id = ?')
-      .get(identityId) as { organization_id: string } | undefined;
-    return row?.organization_id ?? null;
-  }
-
-  private async audit(
-    organizationId: string,
-    kind: string,
-    detail: Record<string, unknown>,
-  ): Promise<void> {
+  private audit(organizationId: string, kind: string, detail: Record<string, unknown>): void {
     this.db
       .prepare(
         'INSERT INTO audit_events (id, organization_id, kind, actor, detail, occurred_at) VALUES (?, ?, ?, ?, ?, ?)',

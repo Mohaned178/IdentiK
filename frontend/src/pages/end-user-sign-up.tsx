@@ -32,8 +32,9 @@ export function EndUserSignUpPage(): React.JSX.Element {
           </div>
           <h1>Check your mailbox</h1>
           <p className="auth-sub">
-            If {email} can sign up at {organizationName ?? 'this Organization'}, a message with
-            the next step is on its way. Already have an identity here? Sign in instead.
+            If {email} can start a new identity here, a message with the next step is on its way.
+            An identity with this email may already exist — in that case the message says so and
+            you can sign in instead.
           </p>
         </section>
       </main>
