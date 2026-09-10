@@ -155,6 +155,7 @@ async function waitUntilHealthy(url: string, child: ChildProcess): Promise<void>
 }
 
 function onceExit(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve) => child.once('exit', () => resolve()));
 }
 

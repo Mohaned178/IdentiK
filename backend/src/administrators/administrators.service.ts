@@ -18,7 +18,7 @@ export interface AdministratorSignInResult {
   session?: { token: string } & AdministratorSessionInfo;
 }
 
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+export const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 /**
  * The dedicated Administrator sign-in (ADR-0002): a separate population from
@@ -57,7 +57,7 @@ export class AdministratorsService {
 
     const token = randomToken(32);
     const now = new Date();
-    const expires = new Date(now.getTime() + SESSION_TTL_MS);
+    const expires = new Date(now.getTime() + ADMIN_SESSION_TTL_MS);
     this.db
       .prepare(
         'INSERT INTO admin_sessions (id, membership_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',

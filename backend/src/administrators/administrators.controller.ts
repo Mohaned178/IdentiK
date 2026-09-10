@@ -13,12 +13,13 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
-import type { Request, Response } from 'express';
+import type { Request, Response, CookieOptions } from 'express';
 import { IsEmail, IsIn, IsOptional, IsString, MinLength } from 'class-validator';
-import { AdministratorsService } from './administrators.service';
+import { ADMIN_SESSION_TTL_MS, AdministratorsService } from './administrators.service';
 import { AdministratorGuard } from './administrator.guard';
 import { OwnerGuard } from './owner.guard';
 import { InvitationsService } from './invitations.service';
+import { LinkBaseService } from '../config/link-base.service';
 
 class SignInBody {
   @IsEmail()
@@ -53,7 +54,6 @@ class AcceptInvitationBody {
 }
 
 export const SESSION_COOKIE = 'identik_admin_session';
-const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 export interface AdministratorRequest extends Request {
   administratorSession?: AdministratorSessionInfo;
@@ -74,6 +74,7 @@ export class AdministratorsController {
   constructor(
     private readonly administrators: AdministratorsService,
     private readonly invitations: InvitationsService,
+    private readonly links: LinkBaseService,
   ) {}
 
   @Post('sign-in')
@@ -84,10 +85,8 @@ export class AdministratorsController {
       throw new UnauthorizedException();
     }
     res.cookie(SESSION_COOKIE, result.session.token, {
-      httpOnly: true,
-      sameSite: 'lax',
-      path: '/',
-      maxAge: SESSION_MAX_AGE_MS,
+      ...this.sessionCookieOptions(),
+      maxAge: ADMIN_SESSION_TTL_MS,
     });
     return {
       administratorId: result.session.administratorId,
@@ -103,7 +102,7 @@ export class AdministratorsController {
     if (token) {
       await this.administrators.signOut(token);
     }
-    res.clearCookie(SESSION_COOKIE);
+    res.clearCookie(SESSION_COOKIE, this.sessionCookieOptions());
   }
 
   @Get('session')
@@ -172,6 +171,19 @@ export class AdministratorsController {
       organizationName: result.organizationName,
       email: result.email,
       role: result.role,
+    };
+  }
+
+  /**
+   * Derived from the deployment's configured base URL, never the request, so
+   * the flag matches the scheme the Instance is actually served under.
+   */
+  private sessionCookieOptions(): CookieOptions {
+    return {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: this.links.resolve().startsWith('https'),
+      path: '/',
     };
   }
 }

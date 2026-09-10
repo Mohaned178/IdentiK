@@ -5,7 +5,14 @@ import { DevMailController } from './dev-mail.controller';
 import { MAIL_TRANSPORT, MailTransport } from './mail-transport';
 
 /** Binding the Instance Operator selected for outbound mail. */
-const binding = process.env.MAIL_TRANSPORT_BINDING ?? 'capture';
+const binding = process.env.MAIL_TRANSPORT_BINDING;
+
+if (!binding) {
+  throw new Error(
+    'MAIL_TRANSPORT_BINDING must be set to "capture" or "smtp" — the captured-mail ' +
+      'transport is never selected implicitly because its /dev/mail surface is unauthenticated.',
+  );
+}
 
 if (binding !== 'capture' && binding !== 'smtp') {
   throw new Error(

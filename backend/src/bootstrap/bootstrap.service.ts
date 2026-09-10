@@ -107,6 +107,17 @@ export class BootstrapService implements OnModuleInit {
 
     this.db.exec('BEGIN');
     try {
+      // The claim itself is the race-free arbiter: whichever request inserts
+      // this row first completes the ceremony; every later request loses.
+      const claimed = this.db
+        .prepare(
+          "INSERT OR IGNORE INTO instance_state (key, value) VALUES ('bootstrap', 'completed')",
+        )
+        .run();
+      if (claimed.changes !== 1) {
+        this.db.exec('ROLLBACK');
+        return { ok: false, reason: CeremonyRefusedReason.AlreadyCompleted };
+      }
       this.db
         .prepare('INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)')
         .run(organizationId, input.organizationName, now);
@@ -135,9 +146,6 @@ export class BootstrapService implements OnModuleInit {
           }),
           now,
         );
-      this.db
-        .prepare('INSERT OR REPLACE INTO instance_state (key, value) VALUES (?, ?)')
-        .run('bootstrap', 'completed');
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
