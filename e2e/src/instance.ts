@@ -56,6 +56,7 @@ export class Instance {
         ...process.env,
         PORT: String(port),
         IDENTIK_STATE_DIR: stateDir,
+        IDENTIK_BASE_URL: url,
         MAIL_TRANSPORT_BINDING: 'capture',
         ...env,
       },

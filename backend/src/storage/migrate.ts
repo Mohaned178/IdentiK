@@ -50,6 +50,35 @@ const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    version: 2,
+    up: (db) => {
+      // ADR-0004: one Identity per person per Organization, credentials on the
+      // Identity. ADR-0005: email uniquely identifies it within the
+      // Organization (stored normalized; NOCASE collation is the backstop).
+      db.exec(`CREATE TABLE identities (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        email TEXT NOT NULL COLLATE NOCASE,
+        email_verified INTEGER NOT NULL DEFAULT 0 CHECK (email_verified IN (0, 1)),
+        password_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (organization_id, email)
+      )`);
+      // ADR-0011: one mailbox-proof concept, two entry points — the
+      // verification link (ticket 03) and the password-reset link (ticket 04)
+      // both land here. Single-use, expiring, stored verifiable-only.
+      db.exec(`CREATE TABLE identity_tokens (
+        id TEXT PRIMARY KEY,
+        identity_id TEXT NOT NULL REFERENCES identities(id),
+        kind TEXT NOT NULL CHECK (kind IN ('email_verification', 'password_reset')),
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
+      )`);
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

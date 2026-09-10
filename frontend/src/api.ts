@@ -49,6 +49,31 @@ export async function adminSignOut(): Promise<void> {
   await fetch('/api/administrators/sign-out', { method: 'POST' });
 }
 
+export async function fetchSignUpInfo(): Promise<{ organizationName: string }> {
+  const res = await fetch('/api/end-users/sign-up');
+  if (!res.ok) throw new Error('sign-up page unavailable');
+  return (await res.json()) as { organizationName: string };
+}
+
+export async function endUserSignUp(body: { email: string; password: string }): Promise<Response> {
+  return fetch('/api/end-users/sign-up', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export type VerificationOutcome = 'verified' | 'invalid';
+
+export async function fetchVerificationOutcome(
+  outcome: string | undefined,
+): Promise<VerificationOutcome | null> {
+  if (outcome !== 'verified' && outcome !== 'invalid') return null;
+  const res = await fetch(`/api/end-users/verify-email/result?outcome=${outcome}`);
+  if (!res.ok) return null;
+  return outcome;
+}
+
 export interface AuditEvent {
   id: string;
   kind: string;
