@@ -219,7 +219,7 @@ describe('Redirect URI configuration and exact-match validation', () => {
       'https://zotac.example.com/*',
       'https://zotac.example.com/callback/*',
       'https://zotac.example.com/*/callback',
-      'https://zotac.example.com/callback?tenant=*',
+      'https://zotac.example.com/callback?organization=*',
     ]) {
       const res = await addRedirectUri(ownerCookie, uri);
       expect(res.status, `expected ${uri} to be refused`).toBe(400);
@@ -234,12 +234,20 @@ describe('Redirect URI configuration and exact-match validation', () => {
       'https://zotac.example.com:99999/callback',
       'https://user:password@zotac.example.com/callback',
       'https://zotac.example.com/callback#fragment',
+      'https://zotac.example.com/callback#',
       '',
     ]) {
       const res = await addRedirectUri(ownerCookie, uri);
       expect(res.status, `expected ${JSON.stringify(uri)} to be refused`).toBe(400);
     }
     expect(await storedUris()).toEqual(before);
+  });
+
+  it('an empty query delimiter is normalized away instead of becoming a distinct match target', async () => {
+    const res = await addRedirectUri(ownerCookie, 'https://zotac.example.com/empty-query?');
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { redirectUri: RedirectUriView };
+    expect(body.redirectUri.uri).toBe('https://zotac.example.com/empty-query');
   });
 
   it('plain HTTP is accepted only for loopback hosts', async () => {

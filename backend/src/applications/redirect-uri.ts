@@ -8,6 +8,11 @@ import { isIP } from 'node:net';
  * here and are refused at the door. The returned string is the canonical
  * form exact matching compares against, so equivalent spellings cannot
  * enter the store twice.
+ *
+ * The match target is the whole canonical URI — scheme, host, port, path,
+ * and any query string. Equality on more components than the rule names is
+ * strictly safe: it can never let a URI through that the four-component
+ * comparison would refuse.
  */
 export function validateRedirectUri(value: string): string {
   const candidate = value.trim();
@@ -30,7 +35,9 @@ export function validateRedirectUri(value: string): string {
   if (parsed.username !== '' || parsed.password !== '') {
     throw new BadRequestException('a redirect URI must not embed credentials');
   }
-  if (parsed.hash !== '') {
+  // Check the raw text, not `parsed.hash`: an empty fragment (`...#`) is
+  // still a fragment, and OAuth forbids fragments on redirect URIs outright.
+  if (candidate.includes('#')) {
     throw new BadRequestException('a redirect URI must not contain a fragment');
   }
   if (parsed.protocol === 'http:') {
@@ -43,7 +50,9 @@ export function validateRedirectUri(value: string): string {
     throw new BadRequestException('a redirect URI must use HTTPS');
   }
 
-  return parsed.href;
+  // An empty query (`...?`) is not a component with content; drop the
+  // delimiter so it cannot pose as a distinct match target.
+  return parsed.search === '' && parsed.href.endsWith('?') ? parsed.href.slice(0, -1) : parsed.href;
 }
 
 /** localhost, the whole 127.0.0.0/8 loopback block, and IPv6 ::1. */

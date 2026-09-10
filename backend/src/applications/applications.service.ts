@@ -229,17 +229,27 @@ export class ApplicationsService {
 
     const id = uuid();
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO redirect_uris (id, application_id, uri, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(id, application.id, uri, input.actor, now);
-    this.audit(input.organizationId, input.actor, 'redirect_uri.added', {
-      applicationId: application.id,
-      uriId: id,
-      uri,
-    });
+    // The change and its audit event are one unit: a persisted redirect URI
+    // with no event beside it is the silent code-interception primitive
+    // ADR-0010 exists to prevent.
+    this.db.exec('BEGIN');
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO redirect_uris (id, application_id, uri, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(id, application.id, uri, input.actor, now);
+      this.audit(input.organizationId, input.actor, 'redirect_uri.added', {
+        applicationId: application.id,
+        uriId: id,
+        uri,
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
     return { id, uri, createdAt: now, updatedAt: null };
   }
 
@@ -262,15 +272,22 @@ export class ApplicationsService {
 
     this.refuseDuplicateRedirectUri(application.id, uri, row.id);
     const now = new Date().toISOString();
-    this.db
-      .prepare('UPDATE redirect_uris SET uri = ?, updated_by = ?, updated_at = ? WHERE id = ?')
-      .run(uri, input.actor, now, row.id);
-    this.audit(input.organizationId, input.actor, 'redirect_uri.updated', {
-      applicationId: application.id,
-      uriId: row.id,
-      previousUri: row.uri,
-      uri,
-    });
+    this.db.exec('BEGIN');
+    try {
+      this.db
+        .prepare('UPDATE redirect_uris SET uri = ?, updated_by = ?, updated_at = ? WHERE id = ?')
+        .run(uri, input.actor, now, row.id);
+      this.audit(input.organizationId, input.actor, 'redirect_uri.updated', {
+        applicationId: application.id,
+        uriId: row.id,
+        previousUri: row.uri,
+        uri,
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
     return { id: row.id, uri, createdAt: row.created_at, updatedAt: now };
   }
 
@@ -283,14 +300,21 @@ export class ApplicationsService {
   }): RedirectUriView {
     const application = this.requireApplication(input.organizationId, input.applicationId);
     const row = this.requireRedirectUri(application.id, input.uriId);
-    this.db
-      .prepare('DELETE FROM redirect_uris WHERE id = ? AND application_id = ?')
-      .run(row.id, application.id);
-    this.audit(input.organizationId, input.actor, 'redirect_uri.removed', {
-      applicationId: application.id,
-      uriId: row.id,
-      uri: row.uri,
-    });
+    this.db.exec('BEGIN');
+    try {
+      this.db
+        .prepare('DELETE FROM redirect_uris WHERE id = ? AND application_id = ?')
+        .run(row.id, application.id);
+      this.audit(input.organizationId, input.actor, 'redirect_uri.removed', {
+        applicationId: application.id,
+        uriId: row.id,
+        uri: row.uri,
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
     return this.redirectUriView(row);
   }
 
