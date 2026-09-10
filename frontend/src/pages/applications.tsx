@@ -8,16 +8,7 @@ import {
   type Application,
   type ApplicationType,
 } from '../api';
-
-function OneTimeSecret({ value }: { value: string }): React.JSX.Element {
-  return (
-    <p className="form-success">
-      Copy this Client Secret now — it will never be shown again:
-      <br />
-      <code className="client-secret">{value}</code>
-    </p>
-  );
-}
+import { stamp } from '../format';
 
 /**
  * Application registration and Client credential lifecycle (ADR-0009,
@@ -26,7 +17,16 @@ function OneTimeSecret({ value }: { value: string }): React.JSX.Element {
  * generation and can never be read back; a SPA/Mobile Application is a public
  * client and is never offered a secret. Secret actions are Owner-only.
  */
-function ApplicationCard({
+function OneTimeSecret({ value }: { value: string }): React.JSX.Element {
+  return (
+    <p className="form-success">
+      Copy this Client Secret now — it is never shown again:
+      <code className="client-secret">{value}</code>
+    </p>
+  );
+}
+
+function ApplicationEntry({
   application,
   isOwner,
   onChanged,
@@ -37,6 +37,7 @@ function ApplicationCard({
 }): React.JSX.Element {
   const [label, setLabel] = useState('');
   const [oneTimeSecret, setOneTimeSecret] = useState<string | null>(null);
+  const [cut, setCut] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -67,8 +68,12 @@ function ApplicationCard({
     setError(null);
     try {
       const res = await revokeClientSecret(application.id, secretId);
-      if (res.status === 200) onChanged();
-      else setError('The Client Secret could not be revoked.');
+      if (res.status === 200) {
+        setCut(new Date().toISOString());
+        onChanged();
+      } else {
+        setError('The Client Secret could not be revoked.');
+      }
     } catch {
       setError('The Client Secret could not be revoked right now.');
     } finally {
@@ -81,18 +86,17 @@ function ApplicationCard({
       <header className="application-head">
         <h3>{application.name}</h3>
         <span className="application-type">
-          {isPublic ? 'SPA/Mobile (public client)' : 'Web Application (confidential client)'}
+          {isPublic ? 'Public client · SPA/Mobile' : 'Confidential client · Web'}
         </span>
       </header>
 
       <div className="field">
-        <label>Client ID</label>
+        <label>Client ID · public, permanent</label>
         <code className="client-id">{application.clientId}</code>
-        <p className="hint">Public and permanent. Safe to put in URLs and logs; never rotated.</p>
+        <p className="hint">Safe to put in URLs and logs. It is never rotated.</p>
       </div>
 
       {error && <p className="form-error">{error}</p>}
-
       {oneTimeSecret && <OneTimeSecret value={oneTimeSecret} />}
 
       {isPublic ? (
@@ -101,28 +105,34 @@ function ApplicationCard({
         </p>
       ) : (
         <>
-          <h4>Client Secrets</h4>
+          <h4>Client secrets</h4>
           {application.secrets.length === 0 ? (
-            <p className="empty-note">No Client Secrets yet.</p>
+            <p className="empty-note">No Client Secrets issued.</p>
           ) : (
             <ul className="secret-list">
               {application.secrets.map((secret) => (
-                <li key={secret.id}>
+                <li key={secret.id} className={secret.revokedAt ? 'revoked' : ''}>
+                  <span className="secret-ink" aria-hidden="true" />
                   <span className="audit-kind">{secret.label}</span>
                   <span className="audit-when">
                     {secret.revokedAt
-                      ? `revoked ${new Date(secret.revokedAt).toLocaleString()}`
-                      : `active since ${new Date(secret.createdAt).toLocaleString()}`}
+                      ? `revoked ${stamp(secret.revokedAt)}`
+                      : `active since ${stamp(secret.createdAt)}`}
                   </span>
-                  {isOwner && !secret.revokedAt && (
-                    <button className="button button-quiet" disabled={busy} onClick={() => revoke(secret.id)}>
-                      Revoke
-                    </button>
+                  {isOwner && !secret.revokedAt ? (
+                    <span className="btn-cell">
+                      <button className="button button-quiet" disabled={busy} onClick={() => revoke(secret.id)}>
+                        Revoke
+                      </button>
+                    </span>
+                  ) : (
+                    <span />
                   )}
                 </li>
               ))}
             </ul>
           )}
+          {cut && <p className="cut-note">Cut recorded in the revision log · {stamp(cut)}</p>}
 
           {isOwner ? (
             <form
@@ -187,7 +197,10 @@ export function ApplicationsPage(): React.JSX.Element {
 
   return (
     <div>
-      <h2>Register an Application</h2>
+      <div className="section-head">
+        <h2>Register an application</h2>
+        <span className="section-note">Confidential or public</span>
+      </div>
       <p className="auth-sub">
         A Web Application is a confidential client and receives a Client Secret. A SPA/Mobile
         Application is a public client and never does.
@@ -242,18 +255,21 @@ export function ApplicationsPage(): React.JSX.Element {
           </select>
         </div>
         <button className="button" type="submit" disabled={busy || name.trim() === ''}>
-          {busy ? 'Registering…' : 'Register Application'}
+          {busy ? 'Registering…' : 'Register application'}
         </button>
       </form>
 
-      <h2>Applications</h2>
+      <div className="section-head">
+        <h2>Attached applications</h2>
+        <span className="section-note">{applications?.length ?? 0} registered</span>
+      </div>
       {applications === null ? (
-        <p className="loading-notice">Loading Applications…</p>
+        <p className="loading-notice">Reading applications…</p>
       ) : applications.length === 0 ? (
         <p className="empty-note">No Applications registered yet.</p>
       ) : (
         applications.map((application) => (
-          <ApplicationCard
+          <ApplicationEntry
             key={application.id}
             application={application}
             isOwner={isOwner}

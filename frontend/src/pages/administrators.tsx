@@ -35,7 +35,10 @@ export function AdministratorsPage(): React.JSX.Element {
 
   return (
     <div>
-      <h2>Invite an Administrator</h2>
+      <div className="section-head">
+        <h2>Invite an Administrator</h2>
+        <span className="section-note">Owner-only</span>
+      </div>
       <p className="auth-sub">
         They will receive an email and choose their own password. You never see or set it.
       </p>
