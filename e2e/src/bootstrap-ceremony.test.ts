@@ -246,6 +246,15 @@ describe('Dashboard shell SPA', () => {
       const home = await instance.request('/');
       expect(home.status).toBe(200);
       expect(home.headers.get('content-type')).toContain('text/html');
+
+      // A fallback-only shell returns index.html for the bundle too, which
+      // loads as a blank page. The built assets must be served as themselves.
+      const html = await home.text();
+      const scriptPath = html.match(/src="([^"]*\.js)"/)?.[1];
+      expect(scriptPath).toBeTruthy();
+      const script = await instance.request(scriptPath!);
+      expect(script.status).toBe(200);
+      expect(script.headers.get('content-type') ?? '').toMatch(/javascript/);
     } finally {
       await instance.stop();
     }
