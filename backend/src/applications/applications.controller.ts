@@ -57,7 +57,7 @@ export class ApplicationsController {
     }
     return this.applications.register({
       organizationId: session.organizationId,
-      createdBy: session.administratorId,
+      actor: session.administratorId,
       name: body.name,
       type: body.type,
     });
@@ -89,7 +89,7 @@ export class ApplicationsController {
     return this.applications.issueSecret({
       organizationId: session.organizationId,
       applicationId: id,
-      createdBy: session.administratorId,
+      actor: session.administratorId,
       label: body.label,
     });
   }

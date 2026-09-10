@@ -309,7 +309,7 @@ describe('Application registration and Client credential lifecycle', () => {
     const appId = created.application.id;
 
     const generated = (await (
-      await generateSecret(ownerCookie, appId, { label: 'audited-key' })
+      await generateSecret(ownerCookie, appId, { label: 'audited-secret' })
     ).json()) as { secret: SecretView };
 
     const revoke = await revokeSecret(ownerCookie, appId, generated.secret.id);
@@ -330,14 +330,14 @@ describe('Application registration and Client credential lifecycle', () => {
         event.detail.secretId === generated.secret.id,
     );
     expect(issued).toHaveLength(1);
-    expect(issued[0]!.detail).toMatchObject({ applicationId: appId, label: 'audited-key' });
+    expect(issued[0]!.detail).toMatchObject({ applicationId: appId, label: 'audited-secret' });
 
     const revoked = events.filter(
       (event) =>
         event.kind === 'client_secret.revoked' && event.detail.secretId === generated.secret.id,
     );
     expect(revoked).toHaveLength(1);
-    expect(revoked[0]!.detail).toMatchObject({ applicationId: appId, label: 'audited-key' });
+    expect(revoked[0]!.detail).toMatchObject({ applicationId: appId, label: 'audited-secret' });
   });
 
   it('the Management API is Administrator-only and Organization-scoped', async () => {

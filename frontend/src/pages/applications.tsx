@@ -9,6 +9,16 @@ import {
   type ApplicationType,
 } from '../api';
 
+function OneTimeSecret({ value }: { value: string }): React.JSX.Element {
+  return (
+    <p className="form-success">
+      Copy this Client Secret now — it will never be shown again:
+      <br />
+      <code className="client-secret">{value}</code>
+    </p>
+  );
+}
+
 /**
  * Application registration and Client credential lifecycle (ADR-0009,
  * ADR-0010), through the Management API — the dashboard is its first client
@@ -83,13 +93,7 @@ function ApplicationCard({
 
       {error && <p className="form-error">{error}</p>}
 
-      {oneTimeSecret && (
-        <p className="form-success">
-          Copy this Client Secret now — it will never be shown again:
-          <br />
-          <code className="client-secret">{oneTimeSecret}</code>
-        </p>
-      )}
+      {oneTimeSecret && <OneTimeSecret value={oneTimeSecret} />}
 
       {isPublic ? (
         <p className="empty-note">
@@ -190,13 +194,7 @@ export function ApplicationsPage(): React.JSX.Element {
       </p>
 
       {error && <p className="form-error">{error}</p>}
-      {oneTimeSecret && (
-        <p className="form-success">
-          Copy this Client Secret now — it will never be shown again:
-          <br />
-          <code className="client-secret">{oneTimeSecret}</code>
-        </p>
-      )}
+      {oneTimeSecret && <OneTimeSecret value={oneTimeSecret} />}
 
       <form
         onSubmit={async (event) => {

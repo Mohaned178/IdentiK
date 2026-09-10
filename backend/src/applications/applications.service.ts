@@ -56,7 +56,7 @@ export class ApplicationsService {
    */
   register(input: {
     organizationId: string;
-    createdBy: string;
+    actor: string;
     name: string;
     type: ApplicationType;
   }): { application: ApplicationView; clientSecret: string | null } {
@@ -65,31 +65,41 @@ export class ApplicationsService {
     const id = uuid();
     const clientId = randomToken(16);
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO applications (id, organization_id, name, type, client_id, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(id, input.organizationId, name, input.type, clientId, input.createdBy, now);
 
-    this.audit(input.organizationId, input.createdBy, 'application.registered', {
-      applicationId: id,
-      name,
-      type: input.type,
-      clientId,
-    });
+    // Registration and the confidential client's first secret are one unit:
+    // a Web Application must never exist without the credential that makes it
+    // useful, and a failed issuance must not leave a half-registered row.
+    this.db.exec('BEGIN');
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO applications (id, organization_id, name, type, client_id, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, input.organizationId, name, input.type, clientId, input.actor, now);
 
-    let clientSecret: string | null = null;
-    if (input.type === 'web') {
-      clientSecret = this.issueSecret({
-        organizationId: input.organizationId,
+      this.audit(input.organizationId, input.actor, 'application.registered', {
         applicationId: id,
-        createdBy: input.createdBy,
-        label: 'default',
-      }).clientSecret;
-    }
+        name,
+        type: input.type,
+        clientId,
+      });
 
-    return { application: this.view(input.organizationId, id), clientSecret };
+      let clientSecret: string | null = null;
+      if (input.type === 'web') {
+        clientSecret = this.issueSecret({
+          organizationId: input.organizationId,
+          applicationId: id,
+          actor: input.actor,
+          label: 'default',
+        }).clientSecret;
+      }
+      this.db.exec('COMMIT');
+      return { application: this.view(input.organizationId, id), clientSecret };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   list(organizationId: string): ApplicationView[] {
@@ -113,7 +123,7 @@ export class ApplicationsService {
   issueSecret(input: {
     organizationId: string;
     applicationId: string;
-    createdBy: string;
+    actor: string;
     label: string;
   }): { secret: SecretView; clientSecret: string } {
     const application = this.requireApplication(input.organizationId, input.applicationId);
@@ -133,9 +143,9 @@ export class ApplicationsService {
         `INSERT INTO client_secrets (id, application_id, label, secret_hash, created_by, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(secretId, input.applicationId, label, hashToken(clientSecret), input.createdBy, now);
+      .run(secretId, input.applicationId, label, hashToken(clientSecret), input.actor, now);
 
-    this.audit(input.organizationId, input.createdBy, 'client_secret.generated', {
+    this.audit(input.organizationId, input.actor, 'client_secret.generated', {
       applicationId: input.applicationId,
       secretId,
       label,
