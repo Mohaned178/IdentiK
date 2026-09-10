@@ -49,20 +49,37 @@ export class Instance {
 
     const instance = new Instance(url, stateDir);
     instance.child = child;
-    await waitUntilHealthy(url, child);
+    try {
+      await waitUntilHealthy(url, child);
+    } catch (error) {
+      await instance.stop();
+      throw error;
+    }
     return instance;
   }
 
   async request(
     path: string,
-    init?: Omit<RequestInit, 'body'> & { query?: Record<string, string>; body?: unknown },
+    init?: {
+      method?: string;
+      headers?: Record<string, string>;
+      query?: Record<string, string>;
+      body?: unknown;
+    },
   ): Promise<Response> {
     const url = new URL(path, this.url);
     for (const [k, v] of Object.entries(init?.query ?? {})) {
       url.searchParams.set(k, v);
     }
-    const init2: RequestInit = { ...init, body: init?.body as never };
-    return fetch(url, init2);
+    const serialized = init?.body === undefined ? undefined : JSON.stringify(init.body);
+    return fetch(url, {
+      method: init?.method ?? 'GET',
+      headers:
+        serialized === undefined
+          ? init?.headers
+          : { 'content-type': 'application/json', ...init?.headers },
+      body: serialized,
+    });
   }
 
   async getJson<T>(path: string): Promise<T> {
@@ -89,7 +106,7 @@ export class Instance {
     const child = this.child;
     this.child = undefined;
     child.kill();
-    await onceExit(child).catch(() => {});
+    await onceExit(child);
     rmSync(this.stateDir, { recursive: true, force: true });
   }
 }

@@ -8,4 +8,8 @@ async function bootstrap(): Promise<void> {
   const port = Number(process.env.PORT ?? 3000);
   await app.listen(port);
 }
-void bootstrap();
+
+bootstrap().catch((error: unknown) => {
+  console.error(error);
+  process.exit(1);
+});

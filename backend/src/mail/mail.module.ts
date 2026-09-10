@@ -4,8 +4,14 @@ import { InMemoryMailTransport } from './in-memory-mail.transport';
 import { DevMailController } from './dev-mail.controller';
 import { MAIL_TRANSPORT, MailTransport } from './mail-transport';
 
-/** True when the Instance Operator configured real SMTP (production mode). */
-const smtpConfigured = process.env.MAIL_TRANSPORT_BINDING === 'smtp';
+/** Binding the Instance Operator selected for outbound mail. */
+const binding = process.env.MAIL_TRANSPORT_BINDING ?? 'capture';
+
+if (binding !== 'capture' && binding !== 'smtp') {
+  throw new Error(
+    `Unknown MAIL_TRANSPORT_BINDING "${binding}" — expected "capture" or "smtp".`,
+  );
+}
 
 @Module({
   providers: [
@@ -15,7 +21,7 @@ const smtpConfigured = process.env.MAIL_TRANSPORT_BINDING === 'smtp';
       provide: MAIL_TRANSPORT,
       inject: [InMemoryMailTransport],
       useFactory: (capture: InMemoryMailTransport): MailTransport =>
-        smtpConfigured
+        binding === 'smtp'
           ? // Production SMTP binding arrives in ticket 20; until then an
             // SMTP-configured instance fails fast rather than silently capturing.
             (() => {
@@ -27,7 +33,7 @@ const smtpConfigured = process.env.MAIL_TRANSPORT_BINDING === 'smtp';
           : capture,
     },
   ],
-  controllers: smtpConfigured ? [] : [DevMailController],
+  controllers: binding === 'capture' ? [DevMailController] : [],
   exports: [MailService],
 })
 export class MailModule {}

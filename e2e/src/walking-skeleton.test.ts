@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { backendDistFromWorkspaceRoot, Instance, WORKSPACE_ROOT } from './instance';
 
+const BACKEND_DIST = backendDistFromWorkspaceRoot(WORKSPACE_ROOT);
+
 /**
  * Ticket 01 — walking skeleton. These tests are the repository's testing
  * pattern made real: black-box conversations with a live Instance through
@@ -10,7 +12,7 @@ describe('Instance walking skeleton', () => {
   let instance: Instance;
 
   beforeAll(async () => {
-    instance = await Instance.start(backendDistFromWorkspaceRoot(WORKSPACE_ROOT));
+    instance = await Instance.start(BACKEND_DIST);
   });
 
   afterAll(async () => {
@@ -30,20 +32,14 @@ describe('Instance walking skeleton', () => {
   });
 
   describe('Seam 2 — captured outbound email', () => {
-    it('starts with an empty capture', async () => {
-      const emails = await instance.capturedEmails();
-      expect(emails).toEqual([]);
-    });
-
     it('captures a sent email with recipient, subject, and body', async () => {
       const res = await instance.request('/dev/mail', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
+        body: {
           to: 'mohamed@example.com',
           subject: 'Verify your email',
           body: 'Welcome to Zotac. Click: https://example.test/verify?token=abc',
-        }),
+        },
       });
       expect(res.status).toBe(201);
 
@@ -55,15 +51,17 @@ describe('Instance walking skeleton', () => {
   });
 
   describe('instance-per-run isolation', () => {
-    it('has no memory of a previous Instance (fresh state, fresh capture)', async () => {
+    it('a fresh Instance has an empty capture, unaffected by another Instance sending mail', async () => {
       const first = instance;
-      const second = await Instance.start(backendDistFromWorkspaceRoot(WORKSPACE_ROOT));
+      await first.request('/dev/mail', {
+        method: 'POST',
+        body: { to: 'sara@example.com', subject: 'first', body: 'from the first instance' },
+      });
+
+      const second = await Instance.start(BACKEND_DIST);
       try {
         const emails = await second.capturedEmails();
         expect(emails).toEqual([]);
-        const health = await second.getJson<{ status: string }>('/health');
-        expect(health.status).toBe('ok');
-        // The two Instances are distinct and independent.
         expect(second.url).not.toBe(first.url);
       } finally {
         await second.stop();
