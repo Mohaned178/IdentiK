@@ -21,6 +21,20 @@ class SignUpBody {
   password!: string;
 }
 
+class ForgotPasswordBody {
+  @IsEmail()
+  email!: string;
+}
+
+class ResetPasswordBody {
+  @IsString()
+  token!: string;
+
+  @IsString()
+  @MinLength(8)
+  password!: string;
+}
+
 /**
  * The hosted End-User sign-up boundary. GET is the hosted page's data (the
  * page carries the Organization's name — full branding arrives with ticket
@@ -72,6 +86,51 @@ export class EndUsersController {
   resultPageInfo(@Query('outcome') outcome: string | undefined): { outcome: string } {
     if (outcome === 'verified' || outcome === 'invalid') return { outcome };
     throw new BadRequestException('outcome must be "verified" or "invalid"');
+  }
+
+  @Get('forgot-password')
+  forgotPasswordPageInfo(): { organizationName: string } {
+    return { organizationName: this.identities.hostedOrganization().name };
+  }
+
+  /**
+   * The "forgot password" form target. Uniform by design (ADR-0005/0020): the
+   * same status and shape whether or not the email exists; the accepted/
+   * refused distinction reaches the mailbox only.
+   */
+  @Post('forgot-password')
+  @HttpCode(202)
+  async forgotPassword(@Body() body: ForgotPasswordBody): Promise<{ status: 'check-your-mailbox' }> {
+    await this.identities.requestPasswordReset(body);
+    return { status: 'check-your-mailbox' };
+  }
+
+  /**
+   * The reset page's data: is this link still live, and which Organization's
+   * page is it? Never consumes the token — only completing the reset does.
+   */
+  @Get('reset-password')
+  resetPasswordPageInfo(@Query('token') token: string | undefined): {
+    organizationName: string;
+    valid: boolean;
+  } {
+    const organizationName = this.identities.hostedOrganization().name;
+    const valid =
+      typeof token === 'string' && token.length > 0 && this.identities.validateResetToken(token);
+    return { organizationName, valid };
+  }
+
+  /**
+   * Completing a reset: sets the new password, proves mailbox control, and
+   * revokes every Session. A dead token is the only failure — the page already
+   * told the visitor the link was invalid, so there is nothing left to hide.
+   */
+  @Post('reset-password')
+  @HttpCode(200)
+  async resetPassword(@Body() body: ResetPasswordBody): Promise<{ status: 'password-reset' }> {
+    const ok = await this.identities.resetPassword(body.token, body.password);
+    if (!ok) throw new BadRequestException('this reset link is invalid or has expired');
+    return { status: 'password-reset' };
   }
 
   private resultPath(outcome: 'verified' | 'invalid'): string {

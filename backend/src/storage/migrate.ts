@@ -79,6 +79,21 @@ const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    version: 3,
+    up: (db) => {
+      // ADR-0013: a password reset is a security event that revokes every
+      // Session of the Identity. Sessions themselves arrive in ticket 09; the
+      // watermark lives on the Identity now so any Session created at or
+      // before it is treated as revoked, and so a reset can never be undone by
+      // a Session that predates it.
+      db.exec('ALTER TABLE identities ADD COLUMN sessions_revoked_at TEXT');
+      // ADR-0006: suspension blocks all authentication Organization-wide.
+      // Ticket 13 owns the levers; recovery must never clear the flag, so no
+      // proof-of-mailbox flow can hand a suspended Identity back its access.
+      db.exec('ALTER TABLE identities ADD COLUMN suspended_at TEXT');
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

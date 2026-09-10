@@ -74,6 +74,40 @@ export async function fetchVerificationOutcome(
   return outcome;
 }
 
+export async function fetchForgotPasswordInfo(): Promise<{ organizationName: string }> {
+  const res = await fetch('/api/end-users/forgot-password');
+  if (!res.ok) throw new Error('forgot-password page unavailable');
+  return (await res.json()) as { organizationName: string };
+}
+
+export async function forgotPassword(email: string): Promise<Response> {
+  return fetch('/api/end-users/forgot-password', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+}
+
+export interface ResetPasswordInfo {
+  organizationName: string;
+  valid: boolean;
+}
+
+export async function fetchResetPasswordInfo(token: string | undefined): Promise<ResetPasswordInfo> {
+  const query = token ? `?token=${encodeURIComponent(token)}` : '';
+  const res = await fetch(`/api/end-users/reset-password${query}`);
+  if (!res.ok) throw new Error('reset page unavailable');
+  return (await res.json()) as ResetPasswordInfo;
+}
+
+export async function resetPassword(token: string, password: string): Promise<Response> {
+  return fetch('/api/end-users/reset-password', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token, password }),
+  });
+}
+
 export interface AuditEvent {
   id: string;
   kind: string;

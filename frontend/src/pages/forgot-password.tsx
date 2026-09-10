@@ -1,23 +1,21 @@
 import { useEffect, useState } from 'react';
-import { endUserSignUp, fetchSignUpInfo } from '../api';
+import { fetchForgotPasswordInfo, forgotPassword } from '../api';
 
 /**
- * The hosted End-User sign-up page (ADR-0018): the Organization's own page,
- * carrying its name (full per-Organization branding arrives with ticket 18).
- * Whatever happens — accepted or refused — the visitor sees the same
- * "check your mailbox" outcome; the accepted/refused distinction travels to
- * the mailbox, never the page (ADR-0005).
+ * The hosted "forgot password" page (ADR-0018). Whatever happens — an
+ * Identity exists or not — the visitor sees the same "check your mailbox"
+ * outcome; the distinction travels to the mailbox, never the page
+ * (ADR-0005/0020).
  */
-export function EndUserSignUpPage(): React.JSX.Element {
+export function ForgotPasswordPage(): React.JSX.Element {
   const [organizationName, setOrganizationName] = useState<string | null>(null);
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
 
   useEffect(() => {
-    fetchSignUpInfo()
+    fetchForgotPasswordInfo()
       .then((info) => setOrganizationName(info.organizationName))
       .catch(() => setOrganizationName(null));
   }, []);
@@ -32,9 +30,8 @@ export function EndUserSignUpPage(): React.JSX.Element {
           </div>
           <h1>Check your mailbox</h1>
           <p className="auth-sub">
-            If {email} can start a new identity here, a message with the next step is on its way.
-            An identity with this email may already exist — in that case the message says so and
-            you can sign in instead.
+            If an identity exists for {email}, a message with a reset link is on its way. The link
+            lets you choose a new password.
           </p>
         </section>
       </main>
@@ -48,10 +45,10 @@ export function EndUserSignUpPage(): React.JSX.Element {
           <div className="brand-mark" aria-hidden="true">IK</div>
           <span className="brand-name">IdentiK</span>
         </div>
-        <h1>Sign up</h1>
+        <h1>Forgot password</h1>
         <p className="auth-sub">
-          Create your identity{organizationName ? ` at ${organizationName}` : ''} with your email
-          and a password. We will send a verification link before it becomes active.
+          Enter your email{organizationName ? ` for ${organizationName}` : ''} and we will send a
+          link to choose a new password.
         </p>
 
         {error && <p className="form-error">{error}</p>}
@@ -62,14 +59,14 @@ export function EndUserSignUpPage(): React.JSX.Element {
             setSubmitting(true);
             setError(null);
             try {
-              const res = await endUserSignUp({ email, password });
-              if (res.status === 201) {
+              const res = await forgotPassword(email);
+              if (res.status === 202) {
                 setDone(true);
               } else {
-                setError('Sign-up was refused. Check the form and try again.');
+                setError('That email does not look right. Check it and try again.');
               }
             } catch {
-              setError('Sign-up is unavailable right now. Try again in a moment.');
+              setError('Recovery is unavailable right now. Try again in a moment.');
             } finally {
               setSubmitting(false);
             }
@@ -87,27 +84,10 @@ export function EndUserSignUpPage(): React.JSX.Element {
               onChange={(e) => setEmail(e.target.value)}
             />
           </div>
-          <div className="field">
-            <label htmlFor="password">Password</label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              autoComplete="new-password"
-              required
-              minLength={8}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-            <p className="hint">At least 8 characters. You will use it to sign in.</p>
-          </div>
           <button className="button" type="submit" disabled={submitting}>
-            {submitting ? 'Creating…' : 'Sign up'}
+            {submitting ? 'Sending…' : 'Send reset link'}
           </button>
         </form>
-        <p className="hint" style={{ marginTop: 16, textAlign: 'center' }}>
-          Already have an identity? <a href="/end-users/forgot-password">Forgot your password?</a>
-        </p>
       </section>
     </main>
   );
