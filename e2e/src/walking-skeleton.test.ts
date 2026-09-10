@@ -26,9 +26,12 @@ describe('Instance walking skeleton', () => {
     expect(body.status).toBe('ok');
   });
 
-  it('exposes nothing else yet (unknown routes are 404, not 500)', async () => {
-    const res = await instance.request('/definitely-not-a-route');
-    expect(res.status).toBe(404);
+  it('unknown API routes are 404; non-API routes fall through to the dashboard SPA', async () => {
+    const api = await instance.request('/api/definitely-not-a-route');
+    expect(api.status).toBe(404);
+    const spa = await instance.request('/definitely-not-a-page');
+    expect(spa.status).toBe(200);
+    expect(spa.headers.get('content-type')).toContain('text/html');
   });
 
   describe('Seam 2 — captured outbound email', () => {

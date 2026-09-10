@@ -4,14 +4,14 @@
 
 **Blocked by:** 01 (walking skeleton).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] First boot of a fresh Instance surfaces the one-time setup flow, initiated from the install process
-- [ ] Completing the ceremony creates the default Organization and the first Owner (self-chosen password, stored verifiable-only)
-- [ ] The setup flow expires: an untouched Instance past its expiry window cannot be claimed, and the expiry is enforced without an Administrator existing
-- [ ] A completed bootstrap cannot be re-run; second visit to the setup route is refused
-- [ ] The Owner signs in via a dedicated Administrator sign-in distinct from any End-User flow, and receives an Administrator session (separate session type)
-- [ ] A minimal dashboard shell renders for the signed-in Owner, scoped to their Organization
-- [ ] The audit store exists and records the completed bootstrap (who/what/when)
-- [ ] Administrator credentials never exist in recoverable form
-- [ ] Black-box tests cover: ceremony happy path, expiry, re-run refusal, Owner sign-in success and failure — all over HTTP only
+- [x] First boot of a fresh Instance surfaces the one-time setup flow, initiated from the install process
+- [x] Completing the ceremony creates the default Organization and the first Owner (self-chosen password, stored verifiable-only)
+- [x] The setup flow expires: an untouched Instance past its expiry window cannot be claimed, and the expiry is enforced without an Administrator existing
+- [x] A completed bootstrap cannot be re-run; second visit to the setup route is refused
+- [x] The Owner signs in via a dedicated Administrator sign-in distinct from any End-User flow, and receives an Administrator session (separate session type)
+- [x] A minimal dashboard shell renders for the signed-in Owner, scoped to their Organization
+- [x] The audit store exists and records the completed bootstrap (who/what/when)
+- [x] Administrator credentials never exist in recoverable form
+- [x] Black-box tests cover: ceremony happy path, expiry, re-run refusal, Owner sign-in success and failure — all over HTTP only

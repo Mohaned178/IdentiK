@@ -16,21 +16,36 @@ export interface CapturedEmail {
  * A live IdentiK Instance under test. Everything the harness does to the
  * Instance goes through its HTTP surface (Seam 1) and the captured-email
  * surface (Seam 2) — never storage, token internals, or module structure.
+ * The Instance's own console output is observable to the harness (the
+ * bootstrap ceremony reveals its one-time token there).
  */
 export class Instance {
   private child?: ChildProcess;
   private disposed = false;
+  private readonly consoleOutput: string[] = [];
 
   private constructor(
     readonly url: string,
     private readonly stateDir: string,
   ) {}
 
-  static async start(backendDist: string): Promise<Instance> {
+  static async start(backendDist: string, env: Record<string, string> = {}): Promise<Instance> {
     const stateDir = join(
       tmpdir(),
       `identik-state-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
+    return Instance.startAt(backendDist, stateDir, env);
+  }
+
+  /**
+   * Starts an Instance rooted at an existing state directory — used to test
+   * durable behavior across restarts (same storage, new process).
+   */
+  static async startAt(
+    backendDist: string,
+    stateDir: string,
+    env: Record<string, string> = {},
+  ): Promise<Instance> {
     mkdirSync(stateDir, { recursive: true });
 
     const port = await freePort();
@@ -42,6 +57,7 @@ export class Instance {
         PORT: String(port),
         IDENTIK_STATE_DIR: stateDir,
         MAIL_TRANSPORT_BINDING: 'capture',
+        ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -49,6 +65,8 @@ export class Instance {
 
     const instance = new Instance(url, stateDir);
     instance.child = child;
+    child.stdout?.on('data', (chunk) => instance.consoleOutput.push(String(chunk)));
+    child.stderr?.on('data', (chunk) => instance.consoleOutput.push(String(chunk)));
     try {
       await waitUntilHealthy(url, child);
     } catch (error) {
@@ -56,6 +74,11 @@ export class Instance {
       throw error;
     }
     return instance;
+  }
+
+  /** Everything the Instance has printed to stdout/stderr so far. */
+  consoleLog(): string {
+    return this.consoleOutput.join('');
   }
 
   async request(
@@ -100,28 +123,24 @@ export class Instance {
     return body.emails;
   }
 
-  async stop(): Promise<void> {
+  async stop(options: { keepState?: boolean } = {}): Promise<void> {
     if (this.disposed || !this.child) return;
     this.disposed = true;
     const child = this.child;
     this.child = undefined;
     child.kill();
     await onceExit(child);
-    rmSync(this.stateDir, { recursive: true, force: true });
+    if (!options.keepState) {
+      rmSync(this.stateDir, { recursive: true, force: true });
+    }
   }
 }
 
 async function waitUntilHealthy(url: string, child: ChildProcess): Promise<void> {
-  const output: string[] = [];
-  child.stdout?.on('data', (chunk) => output.push(String(chunk)));
-  child.stderr?.on('data', (chunk) => output.push(String(chunk)));
-
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
-      throw new Error(
-        `Instance exited before becoming healthy (code ${child.exitCode}). Output:\n${output.join('')}`,
-      );
+      throw new Error(`Instance exited before becoming healthy (code ${child.exitCode})`);
     }
     try {
       const res = await fetch(new URL('/health', url));
@@ -131,7 +150,7 @@ async function waitUntilHealthy(url: string, child: ChildProcess): Promise<void>
     }
     await sleep(250);
   }
-  throw new Error(`Instance did not become healthy within 30s. Output:\n${output.join('')}`);
+  throw new Error('Instance did not become healthy within 30s');
 }
 
 function onceExit(child: ChildProcess): Promise<void> {

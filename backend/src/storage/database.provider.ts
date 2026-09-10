@@ -1,0 +1,26 @@
+import { Provider } from '@nestjs/common';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
+import { migrate } from './migrate';
+import { DATABASE } from './token';
+
+/**
+ * Opens (or creates) the Instance's SQLite database under the state dir and
+ * runs migrations. Organization-owned tables are Organization-scoped from
+ * day one (ADR-0001); platform-population tables (administrators, their
+ * sessions) are Instance-global per ADR-0002/0021.
+ */
+export const databaseProvider: Provider = {
+  provide: DATABASE,
+  useFactory: (): DatabaseSync => {
+    const stateDir = process.env.IDENTIK_STATE_DIR;
+    if (!stateDir || !isAbsolute(stateDir)) {
+      throw new Error('IDENTIK_STATE_DIR must be set to an absolute path');
+    }
+    mkdirSync(stateDir, { recursive: true });
+    const db = new DatabaseSync(join(stateDir, 'identik.db'));
+    migrate(db);
+    return db;
+  },
+};
