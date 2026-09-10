@@ -1,0 +1,3 @@
+# Email uniquely identifies an Identity within its Organization
+
+Email is the unique handle of an Identity within its Organization. Sign-up with an existing email is refused ("an identity with this email already exists — sign in instead"); signing in at a new Application authenticates and enrolls in one act. No linking ever happens on sign-up, so an unverified email can never be linked into — the account-takeover-by-pre-claim class is dead structurally. Accepted cost: the refusal confirms the email is registered (an enumeration leak inherent to unique emails), mitigated by uniform messaging and rate limiting (ADR-0020) — the uniqueness decision stands regardless.

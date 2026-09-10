@@ -1,0 +1,3 @@
+# Mandatory Organization ownership of Applications
+
+An Application belongs to exactly one Organization, forever. First boot of an Instance creates a default Organization and a first Owner via the Bootstrap Ceremony, so a solo Administrator never *feels* the Organization, but structurally nothing is ever owned by a person. Rejected: Administrator-owned personal apps (dual ownership paths forever, painful migration to hosted mode); multi-Organization applications (makes "who may suspend this app's users" permanently ambiguous). Consequence: the terms Customer and Developer are banned — the customer entity *is* the Organization, the human is an Administrator.

@@ -1,0 +1,3 @@
+# MFA deferred, designed-for via attachable factors
+
+MFA is not in the first release. It is designed-for from day one: MFA factors are attachable authentication methods on the Identity — the same pattern as External Identity credentials — so TOTP arrives post-MVP as a purely additive increment. The roadmap answer to the Keycloak comparison is "first release after," not "no." Rationale: a rushed recovery-code system is worse than none — it is the account-takeover backdoor — and the MVP coherence loop (register Application → sign up → verify → sign in → manage) never touches MFA. MVP authenticators: password only (social arrives as the second increment; see ADR-0023).
