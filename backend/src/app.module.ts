@@ -7,6 +7,7 @@ import { BootstrapModule } from './bootstrap/bootstrap.module';
 import { AdministratorsModule } from './administrators/administrators.module';
 import { IdentitiesModule } from './identities/identities.module';
 import { SpaModule } from './spa/spa.module';
+import { ApplicationsModule } from './applications/applications.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { SpaModule } from './spa/spa.module';
     BootstrapModule,
     AdministratorsModule,
     IdentitiesModule,
+    ApplicationsModule,
     SpaModule,
   ],
 })

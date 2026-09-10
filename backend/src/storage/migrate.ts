@@ -112,6 +112,38 @@ const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    version: 5,
+    up: (db) => {
+      // ADR-0009: an Application belongs to exactly one Organization forever
+      // and is either a Web (confidential) or SPA/Mobile (public) client.
+      // The Client ID is public and permanent (ADR-0010) — it appears in URLs
+      // and logs, so it is generated once at registration and never rotated.
+      db.exec(`CREATE TABLE applications (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        name TEXT NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('web', 'spa')),
+        client_id TEXT NOT NULL UNIQUE,
+        created_by TEXT NOT NULL REFERENCES administrators(id),
+        created_at TEXT NOT NULL
+      )`);
+      // ADR-0010: Client Secrets are stored verifiable-only (no read-back
+      // path), displayed exactly once at generation, and support multiple
+      // concurrent labeled, timestamped secrets with individual revocation so
+      // rotation is zero-downtime. A public client never gets a row here.
+      db.exec(`CREATE TABLE client_secrets (
+        id TEXT PRIMARY KEY,
+        application_id TEXT NOT NULL REFERENCES applications(id),
+        label TEXT NOT NULL,
+        secret_hash TEXT NOT NULL UNIQUE,
+        created_by TEXT NOT NULL REFERENCES administrators(id),
+        created_at TEXT NOT NULL,
+        revoked_at TEXT,
+        revoked_by TEXT REFERENCES administrators(id)
+      )`);
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

@@ -13,6 +13,6 @@ import { MailModule } from '../mail/mail.module';
   imports: [StorageModule, MailModule],
   controllers: [AdministratorsController, OrganizationController, AuditController],
   providers: [AdministratorsService, AdministratorGuard, OwnerGuard, InvitationsService],
-  exports: [AdministratorsService, AdministratorGuard],
+  exports: [AdministratorsService, AdministratorGuard, OwnerGuard],
 })
 export class AdministratorsModule {}

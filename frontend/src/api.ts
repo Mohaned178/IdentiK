@@ -153,6 +153,62 @@ export async function inviteAdministrator(body: {
   });
 }
 
+export type ApplicationType = 'web' | 'spa';
+
+export interface ClientSecret {
+  id: string;
+  label: string;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
+export interface Application {
+  id: string;
+  name: string;
+  type: ApplicationType;
+  clientId: string;
+  createdAt: string;
+  secrets: ClientSecret[];
+}
+
+export async function fetchApplications(): Promise<Application[]> {
+  const res = await fetch('/api/applications');
+  if (!res.ok) throw new Error('applications unavailable');
+  return ((await res.json()) as { applications: Application[] }).applications;
+}
+
+export async function registerApplication(body: {
+  name: string;
+  type: ApplicationType;
+}): Promise<Response> {
+  return fetch('/api/applications', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function generateClientSecret(
+  applicationId: string,
+  label: string,
+): Promise<Response> {
+  return fetch(`/api/applications/${encodeURIComponent(applicationId)}/secrets`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ label }),
+  });
+}
+
+export async function revokeClientSecret(
+  applicationId: string,
+  secretId: string,
+): Promise<Response> {
+  return fetch(
+    `/api/applications/${encodeURIComponent(applicationId)}/secrets/${encodeURIComponent(secretId)}/revoke`,
+    { method: 'POST' },
+  );
+}
+
 export function useSession(): { session: AdministratorSession | null; loading: boolean } {
   const [session, setSession] = useState<AdministratorSession | null>(null);
   const [loading, setLoading] = useState(true);
