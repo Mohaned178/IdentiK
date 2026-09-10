@@ -1,10 +1,12 @@
 import {
   Body,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   HttpCode,
   Param,
+  Patch,
   Post,
   Req,
   UnauthorizedException,
@@ -14,7 +16,13 @@ import { IsIn, IsString, MinLength } from 'class-validator';
 import { AdministratorGuard } from '../administrators/administrator.guard';
 import { OwnerGuard } from '../administrators/owner.guard';
 import type { AdministratorRequest } from '../administrators/administrators.controller';
-import { ApplicationsService, type ApplicationType, type ApplicationView, type SecretView } from './applications.service';
+import {
+  ApplicationsService,
+  type ApplicationType,
+  type ApplicationView,
+  type RedirectUriView,
+  type SecretView,
+} from './applications.service';
 
 class RegisterApplicationBody {
   @IsString()
@@ -29,6 +37,12 @@ class GenerateSecretBody {
   @IsString()
   @MinLength(1)
   label!: string;
+}
+
+class RedirectUriBody {
+  @IsString()
+  @MinLength(1)
+  uri!: string;
 }
 
 /**
@@ -108,6 +122,62 @@ export class ApplicationsController {
         organizationId: session.organizationId,
         applicationId: id,
         secretId,
+        actor: session.administratorId,
+      }),
+    };
+  }
+
+  @Post(':id/redirect-uris')
+  @UseGuards(OwnerGuard)
+  addRedirectUri(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Body() body: RedirectUriBody,
+  ): { redirectUri: RedirectUriView } {
+    const session = this.requireSession(req);
+    return {
+      redirectUri: this.applications.addRedirectUri({
+        organizationId: session.organizationId,
+        applicationId: id,
+        actor: session.administratorId,
+        uri: body.uri,
+      }),
+    };
+  }
+
+  @Patch(':id/redirect-uris/:uriId')
+  @UseGuards(OwnerGuard)
+  updateRedirectUri(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Param('uriId') uriId: string,
+    @Body() body: RedirectUriBody,
+  ): { redirectUri: RedirectUriView } {
+    const session = this.requireSession(req);
+    return {
+      redirectUri: this.applications.updateRedirectUri({
+        organizationId: session.organizationId,
+        applicationId: id,
+        uriId,
+        actor: session.administratorId,
+        uri: body.uri,
+      }),
+    };
+  }
+
+  @Delete(':id/redirect-uris/:uriId')
+  @UseGuards(OwnerGuard)
+  removeRedirectUri(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Param('uriId') uriId: string,
+  ): { redirectUri: RedirectUriView } {
+    const session = this.requireSession(req);
+    return {
+      redirectUri: this.applications.removeRedirectUri({
+        organizationId: session.organizationId,
+        applicationId: id,
+        uriId,
         actor: session.administratorId,
       }),
     };

@@ -144,6 +144,26 @@ const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    version: 6,
+    up: (db) => {
+      // ADR-0010: a redirect URI is one concrete, absolute URL — HTTPS, or
+      // plain HTTP for loopback development only — matched exactly on scheme +
+      // host + port + path. The unique constraint makes the exact-match target
+      // unambiguous per Application; wildcard/prefix forms never enter here
+      // because the configuration API refuses them before insert.
+      db.exec(`CREATE TABLE redirect_uris (
+        id TEXT PRIMARY KEY,
+        application_id TEXT NOT NULL REFERENCES applications(id),
+        uri TEXT NOT NULL,
+        created_by TEXT NOT NULL REFERENCES administrators(id),
+        created_at TEXT NOT NULL,
+        updated_by TEXT REFERENCES administrators(id),
+        updated_at TEXT,
+        UNIQUE (application_id, uri)
+      )`);
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

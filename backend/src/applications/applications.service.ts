@@ -1,8 +1,15 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { hashToken, randomToken } from '../crypto/password';
 import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
+import { validateRedirectUri } from './redirect-uri';
 
 export type ApplicationType = 'web' | 'spa';
 
@@ -13,6 +20,13 @@ export interface SecretView {
   revokedAt: string | null;
 }
 
+export interface RedirectUriView {
+  id: string;
+  uri: string;
+  createdAt: string;
+  updatedAt: string | null;
+}
+
 export interface ApplicationView {
   id: string;
   name: string;
@@ -20,6 +34,7 @@ export interface ApplicationView {
   clientId: string;
   createdAt: string;
   secrets: SecretView[];
+  redirectUris: RedirectUriView[];
 }
 
 interface ApplicationRow {
@@ -35,6 +50,13 @@ interface SecretRow {
   label: string;
   created_at: string;
   revoked_at: string | null;
+}
+
+interface RedirectUriRow {
+  id: string;
+  uri: string;
+  created_at: string;
+  updated_at: string | null;
 }
 
 /**
@@ -189,6 +211,119 @@ export class ApplicationsService {
     return { id: row.id, label: row.label, createdAt: row.created_at, revokedAt: row.revoked_at };
   }
 
+  /**
+   * Add a redirect URI (ADR-0010). The value is validated into its canonical
+   * absolute form and then stored verbatim: the exact-match target the
+   * authorization endpoint will later compare against. Duplicates are refused
+   * so a URI has at most one identity per Application.
+   */
+  addRedirectUri(input: {
+    organizationId: string;
+    applicationId: string;
+    actor: string;
+    uri: string;
+  }): RedirectUriView {
+    const application = this.requireApplication(input.organizationId, input.applicationId);
+    const uri = validateRedirectUri(input.uri);
+    this.refuseDuplicateRedirectUri(application.id, uri);
+
+    const id = uuid();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO redirect_uris (id, application_id, uri, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(id, application.id, uri, input.actor, now);
+    this.audit(input.organizationId, input.actor, 'redirect_uri.added', {
+      applicationId: application.id,
+      uriId: id,
+      uri,
+    });
+    return { id, uri, createdAt: now, updatedAt: null };
+  }
+
+  /**
+   * Replace a redirect URI's value. Validation and the duplicate rule are the
+   * same as for an addition; the prior value rides along in the audit event so
+   * the exact change is answerable after the fact.
+   */
+  updateRedirectUri(input: {
+    organizationId: string;
+    applicationId: string;
+    uriId: string;
+    actor: string;
+    uri: string;
+  }): RedirectUriView {
+    const application = this.requireApplication(input.organizationId, input.applicationId);
+    const row = this.requireRedirectUri(application.id, input.uriId);
+    const uri = validateRedirectUri(input.uri);
+    if (uri === row.uri) return this.redirectUriView(row);
+
+    this.refuseDuplicateRedirectUri(application.id, uri, row.id);
+    const now = new Date().toISOString();
+    this.db
+      .prepare('UPDATE redirect_uris SET uri = ?, updated_by = ?, updated_at = ? WHERE id = ?')
+      .run(uri, input.actor, now, row.id);
+    this.audit(input.organizationId, input.actor, 'redirect_uri.updated', {
+      applicationId: application.id,
+      uriId: row.id,
+      previousUri: row.uri,
+      uri,
+    });
+    return { id: row.id, uri, createdAt: row.created_at, updatedAt: now };
+  }
+
+  /** Remove a redirect URI. There is no prefix or wildcard echo to clean up. */
+  removeRedirectUri(input: {
+    organizationId: string;
+    applicationId: string;
+    uriId: string;
+    actor: string;
+  }): RedirectUriView {
+    const application = this.requireApplication(input.organizationId, input.applicationId);
+    const row = this.requireRedirectUri(application.id, input.uriId);
+    this.db
+      .prepare('DELETE FROM redirect_uris WHERE id = ? AND application_id = ?')
+      .run(row.id, application.id);
+    this.audit(input.organizationId, input.actor, 'redirect_uri.removed', {
+      applicationId: application.id,
+      uriId: row.id,
+      uri: row.uri,
+    });
+    return this.redirectUriView(row);
+  }
+
+  private requireRedirectUri(applicationId: string, uriId: string): RedirectUriRow {
+    const row = this.db
+      .prepare(
+        'SELECT id, uri, created_at, updated_at FROM redirect_uris WHERE id = ? AND application_id = ?',
+      )
+      .get(uriId, applicationId) as RedirectUriRow | undefined;
+    if (!row) throw new NotFoundException('no such redirect URI');
+    return row;
+  }
+
+  private refuseDuplicateRedirectUri(applicationId: string, uri: string, exceptId?: string): void {
+    const duplicate = exceptId
+      ? this.db
+          .prepare('SELECT id FROM redirect_uris WHERE application_id = ? AND uri = ? AND id <> ?')
+          .get(applicationId, uri, exceptId)
+      : this.db
+          .prepare('SELECT id FROM redirect_uris WHERE application_id = ? AND uri = ?')
+          .get(applicationId, uri);
+    if (duplicate) throw new ConflictException('this redirect URI is already registered');
+  }
+
+  private redirectUriView(row: RedirectUriRow): RedirectUriView {
+    return {
+      id: row.id,
+      uri: row.uri,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
   private requireApplication(organizationId: string, id: string): ApplicationRow {
     const row = this.db
       .prepare(
@@ -209,6 +344,11 @@ export class ApplicationsService {
         'SELECT id, label, created_at, revoked_at FROM client_secrets WHERE application_id = ? ORDER BY created_at, id',
       )
       .all(row.id) as unknown as SecretRow[];
+    const redirectUris = this.db
+      .prepare(
+        'SELECT id, uri, created_at, updated_at FROM redirect_uris WHERE application_id = ? ORDER BY created_at, id',
+      )
+      .all(row.id) as unknown as RedirectUriRow[];
     return {
       id: row.id,
       name: row.name,
@@ -221,6 +361,7 @@ export class ApplicationsService {
         createdAt: secret.created_at,
         revokedAt: secret.revoked_at,
       })),
+      redirectUris: redirectUris.map((entry) => this.redirectUriView(entry)),
     };
   }
 
