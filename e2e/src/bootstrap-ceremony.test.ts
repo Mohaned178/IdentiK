@@ -237,38 +237,3 @@ describe('Bootstrap Ceremony expiry', () => {
     }
   });
 });
-
-describe('Dashboard shell SPA', () => {
-  it('serves the dashboard at / and unknown client routes fall through to it', async () => {
-    const instance = await Instance.start(BACKEND_DIST);
-    try {
-      await completeCeremonyViaConsole(instance);
-      const home = await instance.request('/');
-      expect(home.status).toBe(200);
-      expect(home.headers.get('content-type')).toContain('text/html');
-
-      // A fallback-only shell returns index.html for the bundle too, which
-      // loads as a blank page. The built assets must be served as themselves.
-      const html = await home.text();
-      const scriptPath = html.match(/src="([^"]*\.js)"/)?.[1];
-      expect(scriptPath).toBeTruthy();
-      const script = await instance.request(scriptPath!);
-      expect(script.status).toBe(200);
-      expect(script.headers.get('content-type') ?? '').toMatch(/javascript/);
-    } finally {
-      await instance.stop();
-    }
-  });
-
-  async function completeCeremonyViaConsole(inst: Instance): Promise<void> {
-    const log = inst.consoleLog();
-    const match = [...log.matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
-    await completeCeremony(inst, match[1], {
-      organizationName: 'SPA Org',
-      email: 'spa@example.com',
-      password: 'spa password 123',
-      name: 'SPA Owner',
-    });
-  }
-});

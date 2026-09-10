@@ -126,11 +126,7 @@ describe('Administrator invitation and Owner/Member roles', () => {
     expect(link).toContain('/administrators/accept-invitation?token=');
   });
 
-  it('the hosted acceptance page and its data endpoint are reachable over HTTP', async () => {
-    const page = await instance.request('/administrators/accept-invitation');
-    expect(page.status).toBe(200);
-    expect(page.headers.get('content-type')).toContain('text/html');
-
+  it('the invitation data endpoint is reachable over HTTP', async () => {
     const issued = await invite(ownerCookie, { email: 'probe@example.com', role: 'member' });
     expect(issued.status).toBe(201);
     const mails = await invitationMails('probe@example.com');

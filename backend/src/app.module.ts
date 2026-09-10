@@ -6,7 +6,6 @@ import { StorageModule } from './storage/storage.module';
 import { BootstrapModule } from './bootstrap/bootstrap.module';
 import { AdministratorsModule } from './administrators/administrators.module';
 import { IdentitiesModule } from './identities/identities.module';
-import { SpaModule } from './spa/spa.module';
 import { ApplicationsModule } from './applications/applications.module';
 
 @Module({
@@ -19,7 +18,6 @@ import { ApplicationsModule } from './applications/applications.module';
     AdministratorsModule,
     IdentitiesModule,
     ApplicationsModule,
-    SpaModule,
   ],
 })
 export class AppModule {}
