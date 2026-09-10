@@ -115,8 +115,10 @@ describe('Forgot password, reset, and pre-claimed email healing', () => {
   });
 
   it('forgot-password responds with identical shape whether the email exists or not', async () => {
-    const known = await forgotPassword('exists@example.com');
-    const unknown = await forgotPassword('nobody@example.com');
+    await signUp('shape-known@example.com', 'original password 123');
+
+    const known = await forgotPassword('shape-known@example.com');
+    const unknown = await forgotPassword('shape-unknown@example.com');
 
     expect(known.status).toBe(202);
     expect(unknown.status).toBe(202);
@@ -126,13 +128,17 @@ describe('Forgot password, reset, and pre-claimed email healing', () => {
   });
 
   it('forgot-password responds with uniform timing whether the email exists or not', async () => {
-    // Warm both paths before measuring (module init, sqlite pages, hashing).
+    // Warm both paths before measuring (module init, sqlite pages). Every known
+    // address is a real Identity so the exists branch is actually exercised.
+    await signUp('timing-warmup-known@example.com', 'original password 123');
     await forgotPassword('timing-warmup-known@example.com');
     await forgotPassword('timing-warmup-unknown@example.com');
 
     const known: number[] = [];
     const unknown: number[] = [];
     for (let i = 0; i < 5; i++) {
+      await signUp(`timing-known-${i}@example.com`, 'original password 123');
+
       const knownStart = performance.now();
       expect((await forgotPassword(`timing-known-${i}@example.com`)).status).toBe(202);
       known.push(performance.now() - knownStart);

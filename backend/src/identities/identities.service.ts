@@ -46,9 +46,9 @@ type IdentityTokenKind = 'email_verification' | 'password_reset';
 
 interface IdentityRow {
   id: string;
+  organization_id: string;
   email: string;
   email_verified: number;
-  suspended_at: string | null;
 }
 
 /**
@@ -69,6 +69,11 @@ interface IdentityRow {
  * the original (possibly attacker-chosen) password. The mailbox's true owner
  * heals through the forgot-password flow instead, which sets their own
  * password while proving the mailbox (ticket 04, ADR-0011).
+ *
+ * Recovery is the second mailbox-proof entry point. It answers uniformly
+ * whether or not an Identity exists, and it only ever sets a credential: it
+ * cannot un-suspend, so it is never a path back to access for a suspended
+ * Identity (ADR-0006, gated at authentication in ticket 09/13).
  */
 @Injectable()
 export class IdentitiesService {
@@ -120,29 +125,21 @@ export class IdentitiesService {
    * without saying whether the token was expired, used, or never existed.
    */
   async verifyEmail(token: string): Promise<boolean> {
-    const tokenHash = await hashToken(token);
-    const now = new Date().toISOString();
-    const consumed = this.db
-      .prepare(
-        `UPDATE identity_tokens SET consumed_at = ?
-         WHERE token_hash = ? AND kind = 'email_verification' AND consumed_at IS NULL AND expires_at > ?
-         RETURNING identity_id`,
-      )
-      .get(now, tokenHash, now) as { identity_id: string } | undefined;
-    if (!consumed) return false;
+    const identityId = this.consumeToken('email_verification', token);
+    if (!identityId) return false;
 
     const activated = this.db
       .prepare('UPDATE identities SET email_verified = 1 WHERE id = ? AND email_verified = 0')
-      .run(consumed.identity_id);
+      .run(identityId);
     if (activated.changes !== 1) return false;
 
     const identity = this.db
       .prepare('SELECT organization_id, email FROM identities WHERE id = ?')
-      .get(consumed.identity_id) as { organization_id: string; email: string } | undefined;
+      .get(identityId) as { organization_id: string; email: string } | undefined;
     if (!identity) return false;
 
     this.audit(identity.organization_id, 'identity.verification.completed', {
-      identityId: consumed.identity_id,
+      identityId,
       email: identity.email,
     });
     return true;
@@ -150,26 +147,27 @@ export class IdentitiesService {
 
   /**
    * "Forgot password" initiation (ticket 04). The response is deliberately
-   * uniform (ADR-0005/0020): every request performs the same work and sends
-   * exactly one email, so the HTTP layer never confirms whether an Identity
-   * exists. Where one does, the mailbox receives a reset link; where it does
-   * not, the mailbox receives a notice — the distinction travels to the
-   * mailbox, never the response.
+   * uniform (ADR-0005/0020): every request performs the same work (one
+   * initiation audit + exactly one email), so neither shape nor timing
+   * confirms whether an Identity exists. Where one does, the mailbox receives
+   * a reset link; where it does not, the mailbox receives a notice — the
+   * distinction travels to the mailbox, never the response.
    */
   async requestPasswordReset(input: { email: string }): Promise<void> {
     const organization = this.hostedOrganization();
     const email = input.email.trim().toLowerCase();
     const identity = this.findIdentityByEmail(organization.id, email);
 
+    this.audit(organization.id, 'identity.password_reset.requested', {
+      ...(identity ? { identityId: identity.id } : {}),
+      email,
+    });
+
     if (!identity) {
       await this.sendNoIdentityEmail(email, organization.name);
       return;
     }
 
-    this.audit(organization.id, 'identity.password_reset.requested', {
-      identityId: identity.id,
-      email,
-    });
     const token = this.issueToken(identity.id, 'password_reset', this.resetTtlMs());
     await this.sendPasswordResetEmail(email, organization.name, token);
   }
@@ -180,14 +178,7 @@ export class IdentitiesService {
    * token — only completing the reset does.
    */
   validateResetToken(token: string): boolean {
-    const now = new Date().toISOString();
-    const row = this.db
-      .prepare(
-        `SELECT 1 FROM identity_tokens
-         WHERE token_hash = ? AND kind = 'password_reset' AND consumed_at IS NULL AND expires_at > ?`,
-      )
-      .get(hashToken(token), now);
-    return row !== undefined;
+    return this.peekToken('password_reset', token);
   }
 
   /**
@@ -195,32 +186,20 @@ export class IdentitiesService {
    * Consumes the single-use token, sets the new password, marks the email
    * verified (so an Unverified Reservation heals to its true owner in the same
    * act), and revokes every Session by advancing the Identity's revocation
-   * watermark (ADR-0013). Suspension is deliberately left untouched: a
-   * suspended Identity may reset, but recovery never restores its access
-   * (ADR-0006). Failure returns false without revealing why.
+   * watermark (ADR-0013). Recovery touches nothing but the credential: it can
+   * never restore a suspended Identity's access, which the authentication
+   * boundary (ticket 09) and suspension (ticket 13) gate. Failure returns
+   * false without revealing why.
    */
   async resetPassword(token: string, password: string): Promise<boolean> {
     const passwordHash = await hashPassword(password);
-    const now = new Date().toISOString();
+    const identityId = this.consumeToken('password_reset', token);
+    if (!identityId) return false;
 
-    const consumed = this.db
-      .prepare(
-        `UPDATE identity_tokens SET consumed_at = ?
-         WHERE token_hash = ? AND kind = 'password_reset' AND consumed_at IS NULL AND expires_at > ?
-         RETURNING identity_id`,
-      )
-      .get(now, hashToken(token), now) as { identity_id: string } | undefined;
-    if (!consumed) return false;
-
-    const identity = this.db
-      .prepare(
-        'SELECT id, organization_id, email, email_verified, suspended_at FROM identities WHERE id = ?',
-      )
-      .get(consumed.identity_id) as
-      | (IdentityRow & { organization_id: string })
-      | undefined;
+    const identity = this.findIdentityById(identityId);
     if (!identity) return false;
 
+    const now = new Date().toISOString();
     this.db
       .prepare(
         'UPDATE identities SET password_hash = ?, email_verified = 1, sessions_revoked_at = ? WHERE id = ?',
@@ -289,9 +268,45 @@ export class IdentitiesService {
   private findIdentityByEmail(organizationId: string, email: string): IdentityRow | undefined {
     return this.db
       .prepare(
-        'SELECT id, email, email_verified, suspended_at FROM identities WHERE organization_id = ? AND email = ?',
+        'SELECT id, organization_id, email, email_verified FROM identities WHERE organization_id = ? AND email = ?',
       )
       .get(organizationId, email) as IdentityRow | undefined;
+  }
+
+  private findIdentityById(identityId: string): IdentityRow | undefined {
+    return this.db
+      .prepare(
+        'SELECT id, organization_id, email, email_verified FROM identities WHERE id = ?',
+      )
+      .get(identityId) as IdentityRow | undefined;
+  }
+
+  /**
+   * Consume a live mailbox-proof token of one kind, returning its Identity, or
+   * undefined if it is missing, already used, or expired. The WHERE clause is
+   * the race-free single-use arbiter.
+   */
+  private consumeToken(kind: IdentityTokenKind, token: string): string | undefined {
+    const now = new Date().toISOString();
+    const row = this.db
+      .prepare(
+        `UPDATE identity_tokens SET consumed_at = ?
+         WHERE token_hash = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ?
+         RETURNING identity_id`,
+      )
+      .get(now, hashToken(token), kind, now) as { identity_id: string } | undefined;
+    return row?.identity_id;
+  }
+
+  /** Whether a live mailbox-proof token of one kind exists — without consuming it. */
+  private peekToken(kind: IdentityTokenKind, token: string): boolean {
+    const now = new Date().toISOString();
+    const row = this.db
+      .prepare(
+        'SELECT 1 FROM identity_tokens WHERE token_hash = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ?',
+      )
+      .get(hashToken(token), kind, now);
+    return row !== undefined;
   }
 
   private async sendVerificationEmail(
@@ -357,12 +372,15 @@ export class IdentitiesService {
   }
 
   private verificationTtlMs(): number {
-    const raw = Number(process.env.IDENTIK_VERIFICATION_TOKEN_TTL_MS);
-    return Number.isFinite(raw) && raw > 0 ? raw : 24 * 60 * 60 * 1000;
+    return this.ttlFromEnv('IDENTIK_VERIFICATION_TOKEN_TTL_MS', 24 * 60 * 60 * 1000);
   }
 
   private resetTtlMs(): number {
-    const raw = Number(process.env.IDENTIK_RESET_TOKEN_TTL_MS);
-    return Number.isFinite(raw) && raw > 0 ? raw : 60 * 60 * 1000;
+    return this.ttlFromEnv('IDENTIK_RESET_TOKEN_TTL_MS', 60 * 60 * 1000);
+  }
+
+  private ttlFromEnv(name: string, fallbackMs: number): number {
+    const raw = Number(process.env[name]);
+    return Number.isFinite(raw) && raw > 0 ? raw : fallbackMs;
   }
 }
