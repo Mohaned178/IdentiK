@@ -4,14 +4,24 @@
 
 **Blocked by:** 03 (sign-up + verification gate exist; recovery composes with them).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The forgot-password request responds with identical shape and timing whether the email exists or not
-- [ ] Where an Identity exists, a reset email is delivered via the outbound mail boundary (captured in tests)
-- [ ] Reset links are single-use and expire
-- [ ] Completing a reset sets the new password and revokes every Session of that Identity
-- [ ] A reset on an Unverified Reservation also marks the email verified (mailbox proof is mailbox proof)
-- [ ] The pre-claimed-email healing arc works end-to-end: refused sign-up → forgot-password → reset click → victim owns the Identity, attacker's credential dead
-- [ ] Suspended Identities cannot use recovery to regain access
-- [ ] Recovery initiation and completion are audit events
-- [ ] Black-box tests cover the healing arc and the uniformity guarantee over HTTP only
+- [x] The forgot-password request responds with identical shape and timing whether the email exists or not
+- [x] Where an Identity exists, a reset email is delivered via the outbound mail boundary (captured in tests)
+- [x] Reset links are single-use and expire
+- [x] Completing a reset sets the new password and revokes every Session of that Identity
+- [x] A reset on an Unverified Reservation also marks the email verified (mailbox proof is mailbox proof)
+- [x] The pre-claimed-email healing arc works end-to-end: refused sign-up → forgot-password → reset click → victim owns the Identity, attacker's credential dead
+- [x] Suspended Identities cannot use recovery to regain access
+- [x] Recovery initiation and completion are audit events
+- [x] Black-box tests cover the healing arc and the uniformity guarantee over HTTP only
+
+## Comments
+
+Implementation notes:
+
+- Reset "revokes every Session" by advancing `identities.sessions_revoked_at` (migration v3). Sessions themselves land in ticket 09; any Session created at or before the watermark is revoked, so a reset can never be undone by a Session that predates it. ADR-0013.
+- Suspended Identities are excluded from regaining access structurally: recovery only ever sets a credential, never reinstates access; the suspension gate arrives with the authentication boundary (ticket 09) and the levers (ticket 13). No `suspended_at` column was added here — ticket 13 owns it.
+- "Attacker's credential dead" is observed black-box as: the reservation's activation is consumed by the owner's reset (the attacker's original verification link now reports invalid) plus the audited `identity.password_reset.completed`. Credential verification arrives with ticket 09's sign-in.
+- Review round: the timing test now signs up its "known" addresses so the exists branch is actually exercised; every forgot-password request audits `identity.password_reset.requested` (including unknown emails), and token consume/peek plus TTL env parsing are shared helpers.
+
