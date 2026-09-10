@@ -1,20 +1,24 @@
-import type { AdministratorSessionInfo } from './administrators.service';
+import type { AdministratorRole, AdministratorSessionInfo } from './administrators.service';
 
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
   HttpCode,
   Post,
+  Query,
   Req,
   Res,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { IsEmail, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsIn, IsOptional, IsString, MinLength } from 'class-validator';
 import { AdministratorsService } from './administrators.service';
 import { AdministratorGuard } from './administrator.guard';
+import { OwnerGuard } from './owner.guard';
+import { InvitationsService } from './invitations.service';
 
 class SignInBody {
   @IsEmail()
@@ -22,6 +26,29 @@ class SignInBody {
 
   @IsString()
   @MinLength(1)
+  password!: string;
+}
+
+class InviteAdministratorBody {
+  @IsEmail()
+  email!: string;
+
+  @IsOptional()
+  @IsIn(['owner', 'member'])
+  role?: AdministratorRole;
+}
+
+class AcceptInvitationBody {
+  @IsString()
+  @MinLength(1)
+  token!: string;
+
+  @IsString()
+  @MinLength(1)
+  name!: string;
+
+  @IsString()
+  @MinLength(8)
   password!: string;
 }
 
@@ -44,7 +71,10 @@ export function sessionTokenFrom(req: Request): string | null {
 
 @Controller('api/administrators')
 export class AdministratorsController {
-  constructor(private readonly administrators: AdministratorsService) {}
+  constructor(
+    private readonly administrators: AdministratorsService,
+    private readonly invitations: InvitationsService,
+  ) {}
 
   @Post('sign-in')
   @HttpCode(200)
@@ -81,5 +111,67 @@ export class AdministratorsController {
   session(@Req() req: AdministratorRequest): AdministratorSessionInfo {
     if (!req.administratorSession) throw new UnauthorizedException();
     return req.administratorSession;
+  }
+
+  /**
+   * Owner-only (ADR-0016/0021): an Owner invites an Administrator by email.
+   * The request carries a role but never a credential — the invitee sets their
+   * own password through the invitation link.
+   */
+  @Post('invitations')
+  @UseGuards(AdministratorGuard, OwnerGuard)
+  invite(
+    @Req() req: AdministratorRequest,
+    @Body() body: InviteAdministratorBody,
+  ): Promise<{ invitationId: string; email: string; role: AdministratorRole }> {
+    const session = req.administratorSession;
+    if (!session) throw new UnauthorizedException();
+    return this.invitations.invite({
+      organizationId: session.organizationId,
+      invitedBy: session.administratorId,
+      email: body.email,
+      role: body.role ?? 'member',
+    });
+  }
+
+  /**
+   * The hosted acceptance page's data: is this invitation link live, and which
+   * Organization does it belong to? Never consumes the token — only accepting
+   * does.
+   */
+  @Get('invitations')
+  invitationInfo(@Query('token') token: string | undefined): {
+    organizationName: string;
+    valid: boolean;
+    email: string | null;
+    role: AdministratorRole | null;
+  } {
+    if (typeof token !== 'string' || token.length === 0) {
+      return this.invitations.inspect('');
+    }
+    return this.invitations.inspect(token);
+  }
+
+  /**
+   * Accepting an invitation: the invitee sets their own password and receives
+   * the Organization-scoped Membership with the invited role. The only failure
+   * is a dead (invalid, consumed, or expired) link, so nothing is hidden by
+   * broadening the message.
+   */
+  @Post('invitations/accept')
+  async acceptInvitation(@Body() body: AcceptInvitationBody): Promise<{
+    administratorId: string;
+    organizationName: string;
+    email: string;
+    role: AdministratorRole;
+  }> {
+    const result = await this.invitations.accept(body);
+    if (!result.ok) throw new BadRequestException('this invitation link is invalid or has expired');
+    return {
+      administratorId: result.administratorId,
+      organizationName: result.organizationName,
+      email: result.email,
+      role: result.role,
+    };
   }
 }

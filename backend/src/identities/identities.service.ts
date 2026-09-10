@@ -1,44 +1,12 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { hashPassword, hashToken, randomToken } from '../crypto/password';
+import { parseTtlMs } from '../config/env';
+import { LinkBaseService } from '../config/link-base.service';
 import { MailService } from '../mail/mail.service';
+import { recordAuditEvent } from '../storage/audit';
+import { isUniqueViolation } from '../storage/sqlite';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
-
-/**
- * Link base for outbound email. Derived from the Instance's own deployed URL,
- * held in deployment configuration (the Instance Operator's trust fabric per
- * ADR-0022) — never the Host header of an incoming request, which an attacker
- * controls and would use to smuggle verification links to their own server.
- * Validated at boot so a misconfigured Instance fails closed, loudly.
- */
-@Injectable()
-export class LinkBaseService {
-  private readonly base: string;
-
-  constructor() {
-    const raw = process.env.IDENTIK_BASE_URL;
-    if (!raw) {
-      throw new Error(
-        'IDENTIK_BASE_URL must be set to the externally reachable URL of this Instance ' +
-          '(e.g. https://id.example.com) — it is the base for verification and reset links.',
-      );
-    }
-    let parsed: URL;
-    try {
-      parsed = new URL(raw);
-    } catch {
-      throw new Error(`IDENTIK_BASE_URL "${raw}" is not a valid absolute URL.`);
-    }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      throw new Error(`IDENTIK_BASE_URL "${raw}" must be an http(s) URL.`);
-    }
-    this.base = raw.replace(/\/+$/, '');
-  }
-
-  resolve(): string {
-    return this.base;
-  }
-}
 
 type ReservationInsert = { created: true; identityId: string } | { created: false };
 
@@ -240,17 +208,9 @@ export class IdentitiesService {
         .run(identityId, organizationId, email, passwordHash, new Date().toISOString());
       return { created: true, identityId };
     } catch (error) {
-      if (!this.isUniqueViolation(error)) throw error;
+      if (!isUniqueViolation(error)) throw error;
       return { created: false };
     }
-  }
-
-  private isUniqueViolation(error: unknown): boolean {
-    return (
-      error instanceof Error &&
-      (error as { code?: unknown }).code === 'ERR_SQLITE_ERROR' &&
-      error.message.includes('UNIQUE constraint failed')
-    );
   }
 
   /** A fresh mailbox-proof token for one Identity. */
@@ -364,23 +324,14 @@ export class IdentitiesService {
   }
 
   private audit(organizationId: string, kind: string, detail: Record<string, unknown>): void {
-    this.db
-      .prepare(
-        'INSERT INTO audit_events (id, organization_id, kind, actor, detail, occurred_at) VALUES (?, ?, ?, ?, ?, ?)',
-      )
-      .run(uuid(), organizationId, kind, 'end-user', JSON.stringify(detail), new Date().toISOString());
+    recordAuditEvent(this.db, { organizationId, actor: 'end-user', kind, detail });
   }
 
   private verificationTtlMs(): number {
-    return this.ttlFromEnv('IDENTIK_VERIFICATION_TOKEN_TTL_MS', 24 * 60 * 60 * 1000);
+    return parseTtlMs('IDENTIK_VERIFICATION_TOKEN_TTL_MS', 24 * 60 * 60 * 1000);
   }
 
   private resetTtlMs(): number {
-    return this.ttlFromEnv('IDENTIK_RESET_TOKEN_TTL_MS', 60 * 60 * 1000);
-  }
-
-  private ttlFromEnv(name: string, fallbackMs: number): number {
-    const raw = Number(process.env[name]);
-    return Number.isFinite(raw) && raw > 0 ? raw : fallbackMs;
+    return parseTtlMs('IDENTIK_RESET_TOKEN_TTL_MS', 60 * 60 * 1000);
   }
 }

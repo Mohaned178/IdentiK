@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Route, Routes } from 'react-router-dom';
 import { adminSignOut, useSession, type AuditEvent } from '../api';
+import { AdministratorsPage } from './administrators';
 
 function Overview(): React.JSX.Element {
   const { session, loading } = useSession();
@@ -65,6 +66,9 @@ export function DashboardPage(): React.JSX.Element {
           <NavLink to="/applications" className="side-nav-link">
             Applications
           </NavLink>
+          <NavLink to="/administrators" className="side-nav-link">
+            Administrators
+          </NavLink>
           <NavLink to="/audit" className="side-nav-link">
             Audit
           </NavLink>
@@ -100,6 +104,7 @@ export function DashboardPage(): React.JSX.Element {
             path="/applications"
             element={<p className="empty-note">Applications arrive with ticket 06.</p>}
           />
+          <Route path="/administrators" element={<AdministratorsPage />} />
           <Route
             path="/audit"
             element={<p className="empty-note">The full audit viewer arrives with ticket 08.</p>}

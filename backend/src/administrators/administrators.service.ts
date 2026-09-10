@@ -3,9 +3,11 @@ import { DUMMY_PASSWORD_HASH, hashToken, randomToken, verifyPassword } from '../
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 
+export type AdministratorRole = 'owner' | 'member';
+
 export interface AdministratorSessionInfo {
   membershipId: string;
-  role: string;
+  role: AdministratorRole;
   organizationId: string;
   organizationName: string;
   administratorId: string;
@@ -76,7 +78,7 @@ export class AdministratorsService {
         administratorId: admin.id,
         organizationId: membership.organization_id,
         organizationName: membership.organization_name,
-        role: membership.role,
+        role: membership.role as AdministratorRole,
       },
     };
   }
@@ -107,7 +109,7 @@ export class AdministratorsService {
     if (new Date(row.expires_at).getTime() < Date.now()) return null;
     return {
       membershipId: row.membership_id,
-      role: row.role,
+      role: row.role as AdministratorRole,
       organizationId: row.organization_id,
       organizationName: row.organization_name,
       administratorId: row.administrator_id,
