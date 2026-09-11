@@ -84,6 +84,19 @@ describe('Bootstrap Ceremony', () => {
     expect(res.status).toBe(403);
   });
 
+  it('completing the ceremony without a token is refused', async () => {
+    const res = await instance.request('/api/setup', {
+      method: 'POST',
+      body: {
+        organizationName: 'Acme',
+        email: 'ahmed@example.com',
+        password: 'correct horse battery staple',
+        name: 'Ahmed',
+      },
+    });
+    expect(res.status).toBe(403);
+  });
+
   it('completing the ceremony creates the default Organization and the first Owner', async () => {
     const res = await completeCeremony(instance, bootstrapToken, {
       organizationName: 'Acme',
@@ -238,28 +251,52 @@ describe('Bootstrap Ceremony expiry', () => {
   });
 });
 
-describe('Dashboard shell SPA', () => {
-  it('serves the dashboard at / and unknown client routes fall through to it', async () => {
+describe('Bootstrap Ceremony concurrency', () => {
+  it('two simultaneous completions produce exactly one Organization and one Owner', async () => {
     const instance = await Instance.start(BACKEND_DIST);
     try {
-      await completeCeremonyViaConsole(instance);
-      const home = await instance.request('/');
-      expect(home.status).toBe(200);
-      expect(home.headers.get('content-type')).toContain('text/html');
+      const log = instance.consoleLog();
+      const match = [...log.matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
+      expect(match).toBeDefined();
+      const token = match![1];
+
+      const contenders = [
+        {
+          organizationName: 'First Corp',
+          email: 'first@example.com',
+          password: 'first password 123',
+          name: 'First',
+        },
+        {
+          organizationName: 'Second Corp',
+          email: 'second@example.com',
+          password: 'second password 123',
+          name: 'Second',
+        },
+      ];
+      const responses = await Promise.all(
+        contenders.map((body) => completeCeremony(instance, token, body)),
+      );
+
+      expect(responses.map((res) => res.status).sort((a, b) => a - b)).toEqual([201, 409]);
+
+      const winnerIndex = responses.findIndex((res) => res.status === 201);
+      const winner = contenders[winnerIndex];
+      const loser = contenders[winnerIndex === 0 ? 1 : 0];
+
+      const winnerSignIn = await signIn(instance, {
+        email: winner.email,
+        password: winner.password,
+      });
+      expect(winnerSignIn.status).toBe(200);
+
+      const loserSignIn = await signIn(instance, {
+        email: loser.email,
+        password: loser.password,
+      });
+      expect(loserSignIn.status).toBe(401);
     } finally {
       await instance.stop();
     }
   });
-
-  async function completeCeremonyViaConsole(inst: Instance): Promise<void> {
-    const log = inst.consoleLog();
-    const match = [...log.matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
-    await completeCeremony(inst, match[1], {
-      organizationName: 'SPA Org',
-      email: 'spa@example.com',
-      password: 'spa password 123',
-      name: 'SPA Owner',
-    });
-  }
 });

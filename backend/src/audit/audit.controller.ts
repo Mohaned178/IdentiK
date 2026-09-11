@@ -1,52 +1,52 @@
 import {
   Controller,
   Get,
-  Inject,
+  Query,
   Req,
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { IsOptional, IsString } from 'class-validator';
 import { AdministratorGuard } from '../administrators/administrator.guard';
 import type { AdministratorRequest } from '../administrators/administrators.controller';
-import { DATABASE, Database } from '../storage/token';
+import { AuditEventView, AuditFilters, AuditService } from './audit.service';
 
-export interface AuditEventView {
-  id: string;
-  kind: string;
-  actor: string;
-  detail: unknown;
-  occurredAt: string;
+class AuditQuery implements AuditFilters {
+  @IsOptional()
+  @IsString()
+  actor?: string;
+
+  @IsOptional()
+  @IsString()
+  kind?: string;
+
+  @IsOptional()
+  @IsString()
+  from?: string;
+
+  @IsOptional()
+  @IsString()
+  to?: string;
 }
 
-/** The unified audit surface (born in ticket 02, viewer matures in ticket 08). */
+/**
+ * The unified audit surface (ADR-0020, ADR-0023) — one Organization-scoped
+ * list every Administrator can read, the dashboard included (ADR-0019).
+ * Filters are optional and combine; nothing here is Owner-only, because
+ * seeing the record is not a destructive act.
+ */
 @Controller('api/audit')
 @UseGuards(AdministratorGuard)
 export class AuditController {
-  constructor(@Inject(DATABASE) private readonly db: Database) {}
+  constructor(private readonly audit: AuditService) {}
 
   @Get()
-  audit(@Req() req: AdministratorRequest): { events: AuditEventView[] } {
+  events(
+    @Req() req: AdministratorRequest,
+    @Query() query: AuditQuery,
+  ): { events: AuditEventView[] } {
     const session = req.administratorSession;
     if (!session) throw new UnauthorizedException();
-    const rows = this.db
-      .prepare(
-        'SELECT id, kind, actor, detail, occurred_at FROM audit_events WHERE organization_id = ? ORDER BY occurred_at DESC',
-      )
-      .all(session.organizationId) as Array<{
-      id: string;
-      kind: string;
-      actor: string;
-      detail: string;
-      occurred_at: string;
-    }>;
-    return {
-      events: rows.map((row) => ({
-        id: row.id,
-        kind: row.kind,
-        actor: row.actor,
-        detail: JSON.parse(row.detail),
-        occurredAt: row.occurred_at,
-      })),
-    };
+    return { events: this.audit.list(session.organizationId, query) };
   }
 }

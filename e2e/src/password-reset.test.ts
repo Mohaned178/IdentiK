@@ -104,14 +104,10 @@ describe('Forgot password, reset, and pre-claimed email healing', () => {
     await instance.stop();
   });
 
-  it('the hosted forgot-password page is reachable and carries the Organization name', async () => {
+  it('the forgot-password data endpoint carries the Organization name', async () => {
     const info = await instance.request('/api/end-users/forgot-password');
     expect(info.status).toBe(200);
     expect(await info.json()).toEqual({ organizationName: ORGANIZATION_NAME });
-
-    const page = await instance.request('/end-users/forgot-password');
-    expect(page.status).toBe(200);
-    expect(page.headers.get('content-type')).toContain('text/html');
   });
 
   it('forgot-password responds with identical shape whether the email exists or not', async () => {

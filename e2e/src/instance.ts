@@ -89,6 +89,7 @@ export class Instance {
       headers?: Record<string, string>;
       query?: Record<string, string>;
       body?: unknown;
+      redirect?: 'follow' | 'error' | 'manual';
     },
   ): Promise<Response> {
     const url = new URL(path, this.url);
@@ -98,6 +99,7 @@ export class Instance {
     const serialized = init?.body === undefined ? undefined : JSON.stringify(init.body);
     return fetch(url, {
       method: init?.method ?? 'GET',
+      redirect: init?.redirect ?? 'follow',
       headers:
         serialized === undefined
           ? init?.headers
@@ -155,6 +157,7 @@ async function waitUntilHealthy(url: string, child: ChildProcess): Promise<void>
 }
 
 function onceExit(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve) => child.once('exit', () => resolve()));
 }
 

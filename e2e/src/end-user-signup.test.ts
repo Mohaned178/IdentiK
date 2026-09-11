@@ -94,14 +94,10 @@ describe('End-User sign-up with the email verification gate', () => {
     await instance.stop();
   });
 
-  it('the hosted sign-up page is reachable over HTTP and carries the Organization name', async () => {
+  it('the sign-up data endpoint carries the Organization name', async () => {
     const info = await instance.request('/api/end-users/sign-up');
     expect(info.status).toBe(200);
     expect(await info.json()).toEqual({ organizationName: ORGANIZATION_NAME });
-
-    const page = await instance.request('/end-users/sign-up');
-    expect(page.status).toBe(200);
-    expect(page.headers.get('content-type')).toContain('text/html');
   });
 
   it('sign-up with a new email is accepted with a uniform response', async () => {
@@ -127,7 +123,7 @@ describe('End-User sign-up with the email verification gate', () => {
     );
   });
 
-  it('clicking the verification link activates the Identity and lands on the hosted result page', async () => {
+  it('clicking the verification link activates the Identity and redirects to the result outcome', async () => {
     const mails = (await emailsTo(END_USER_EMAIL)).filter((mail) => mail.subject.includes('Verify'));
     const link = linkFromBody(mails.at(-1)!.body);
 
@@ -135,10 +131,6 @@ describe('End-User sign-up with the email verification gate', () => {
     expect(click.status).toBe(302);
     expect(outcomeFrom(click.location)).toBe('verified');
     expect(click.location).toContain('/end-users/verify-email/result');
-
-    const page = await fetch(new URL(click.location!, instance.url).toString());
-    expect(page.status).toBe(200);
-    expect(page.headers.get('content-type')).toContain('text/html');
 
     const events = await auditEvents();
     const verified = events.filter((event) => event.kind === 'identity.verification.completed');

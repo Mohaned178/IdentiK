@@ -40,7 +40,7 @@ export function randomToken(bytes = 32): string {
 }
 
 /**
- * Tokens are high-entropy random values, not user-chosen secrets: a plain
+ * Tokens are high-entropy random values, not caller-chosen secrets: a plain
  * SHA-256 suffices for stored-token lookup (no stretching needed) and keeps
  * per-request session resolution cheap.
  */

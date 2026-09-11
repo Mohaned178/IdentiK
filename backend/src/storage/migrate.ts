@@ -112,6 +112,109 @@ const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    version: 5,
+    up: (db) => {
+      // ADR-0009: an Application belongs to exactly one Organization forever
+      // and is either a Web (confidential) or SPA/Mobile (public) client.
+      // The Client ID is public and permanent (ADR-0010) — it appears in URLs
+      // and logs, so it is generated once at registration and never rotated.
+      db.exec(`CREATE TABLE applications (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        name TEXT NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('web', 'spa')),
+        client_id TEXT NOT NULL UNIQUE,
+        created_by TEXT NOT NULL REFERENCES administrators(id),
+        created_at TEXT NOT NULL
+      )`);
+      // ADR-0010: Client Secrets are stored verifiable-only (no read-back
+      // path), displayed exactly once at generation, and support multiple
+      // concurrent labeled, timestamped secrets with individual revocation so
+      // rotation is zero-downtime. A public client never gets a row here.
+      db.exec(`CREATE TABLE client_secrets (
+        id TEXT PRIMARY KEY,
+        application_id TEXT NOT NULL REFERENCES applications(id),
+        label TEXT NOT NULL,
+        secret_hash TEXT NOT NULL UNIQUE,
+        created_by TEXT NOT NULL REFERENCES administrators(id),
+        created_at TEXT NOT NULL,
+        revoked_at TEXT,
+        revoked_by TEXT REFERENCES administrators(id)
+      )`);
+    },
+  },
+  {
+    version: 6,
+    up: (db) => {
+      // ADR-0010: a redirect URI is one concrete, absolute URL — HTTPS, or
+      // plain HTTP for loopback development only — matched exactly on scheme +
+      // host + port + path. The unique constraint makes the exact-match target
+      // unambiguous per Application; wildcard/prefix forms never enter here
+      // because the configuration API refuses them before insert.
+      db.exec(`CREATE TABLE redirect_uris (
+        id TEXT PRIMARY KEY,
+        application_id TEXT NOT NULL REFERENCES applications(id),
+        uri TEXT NOT NULL,
+        created_by TEXT NOT NULL REFERENCES administrators(id),
+        created_at TEXT NOT NULL,
+        updated_by TEXT REFERENCES administrators(id),
+        updated_at TEXT,
+        UNIQUE (application_id, uri)
+      )`);
+    },
+  },
+  {
+    version: 7,
+    up: (db) => {
+      // ADR-0006: suspension is a state lever on the Identity and on the
+      // Enrollment. The columns land with ticket 09's authentication gates;
+      // ticket 13 adds the actions that set them.
+      db.exec('ALTER TABLE identities ADD COLUMN suspended_at TEXT');
+      db.exec(`CREATE TABLE enrollments (
+        id TEXT PRIMARY KEY,
+        identity_id TEXT NOT NULL REFERENCES identities(id),
+        application_id TEXT NOT NULL REFERENCES applications(id),
+        created_at TEXT NOT NULL,
+        suspended_at TEXT,
+        UNIQUE (identity_id, application_id)
+      )`);
+      // ADR-0013: a Session is the durable record of one authentication — the
+      // signed-in device. It parents the SSO cookie and, from ticket 10,
+      // every refresh token minted through any Application's flow. The token
+      // is stored verifiable-only; device metadata makes it recognizable.
+      db.exec(`CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        identity_id TEXT NOT NULL REFERENCES identities(id),
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        sso_token_hash TEXT NOT NULL UNIQUE,
+        user_agent TEXT,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT
+      )`);
+      // The authorization code ticket 09 issues and ticket 10 consumes:
+      // single-use by the consumed_at arbiter, short-lived by expires_at,
+      // bound to the Session whose child its refresh tokens will be, and
+      // carrying the PKCE challenge and nonce the exchange will verify.
+      db.exec(`CREATE TABLE authorization_codes (
+        id TEXT PRIMARY KEY,
+        code_hash TEXT NOT NULL UNIQUE,
+        application_id TEXT NOT NULL REFERENCES applications(id),
+        identity_id TEXT NOT NULL REFERENCES identities(id),
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        redirect_uri TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        code_challenge TEXT,
+        code_challenge_method TEXT,
+        nonce TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT
+      )`);
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {
