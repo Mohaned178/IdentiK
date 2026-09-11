@@ -11,7 +11,7 @@ import {
 } from '../applications/applications.service';
 import { canonicalRedirectUri } from '../applications/redirect-uri';
 import { IdentitiesService, IdentityAuthentication } from '../identities/identities.service';
-import { SessionsService } from '../sessions/sessions.service';
+import { SessionsService, SsoSession } from '../sessions/sessions.service';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
 
 const SUPPORTED_SCOPES = new Set(['openid', 'email', 'profile']);
@@ -67,6 +67,13 @@ interface ValidatedRequest {
   codeChallengeMethod?: string;
 }
 
+/** The Session a code is bound to, as the enrollment and code writers need it. */
+interface ActingDevice {
+  sessionId: string;
+  identityId: string;
+  email: string;
+}
+
 type Validation =
   | { kind: 'ok'; request: ValidatedRequest }
   | { kind: 'invalid'; outcome: AuthorizeOutcome };
@@ -98,7 +105,7 @@ export class AuthorizeService {
 
     const session = this.reusableSession(validated.request, ssoToken);
     if (!session) return { kind: 'page', page: this.page(validated.request) };
-    return this.complete(validated.request, session.identityId, session.id, session.email);
+    return this.complete(validated.request, deviceOf(session));
   }
 
   /**
@@ -117,7 +124,7 @@ export class AuthorizeService {
 
     const existing = this.reusableSession(validated.request, ssoToken);
     if (existing) {
-      return this.complete(validated.request, existing.identityId, existing.id, existing.email);
+      return this.complete(validated.request, deviceOf(existing));
     }
 
     const email = credentials.email.trim().toLowerCase();
@@ -131,7 +138,11 @@ export class AuthorizeService {
       return { kind: 'invalid-credentials' };
     }
 
-    const denied = this.enrollmentDenial(validated.request, authentication.identity.id, email);
+    const denied = this.enrollmentDenial(
+      validated.request,
+      authentication.identity.id,
+      authentication.identity.email,
+    );
     if (denied) return denied;
 
     const session = this.sessions.create({
@@ -151,12 +162,13 @@ export class AuthorizeService {
 
   /**
    * A Session is only reusable for an Application in its own Organization
-   * (ADR-0001). Single tenant today, but the scope is enforced from day one.
+   * (ADR-0001). Single Organization per Instance today, but the scope is
+   * enforced from day one.
    */
   private reusableSession(
     request: ValidatedRequest,
     ssoToken: string | null,
-  ): ReturnType<SessionsService['resolve']> {
+  ): SsoSession | null {
     if (!ssoToken) return null;
     const session = this.sessions.resolve(ssoToken);
     if (!session) return null;
@@ -165,24 +177,23 @@ export class AuthorizeService {
   }
 
   /** Enrollment gate plus code issuance for an already-authenticated Identity. */
-  private complete(
-    request: ValidatedRequest,
-    identityId: string,
-    sessionId: string,
-    email: string,
-  ): AuthorizeOutcome {
-    const denied = this.enrollmentDenial(request, identityId, email);
+  private complete(request: ValidatedRequest, device: ActingDevice): AuthorizeOutcome {
+    const denied = this.enrollmentDenial(request, device.identityId, device.email);
     if (denied) return denied;
     return {
       kind: 'redirect',
-      location: this.successRedirect(request, this.issueCode(request, identityId, sessionId)),
+      location: this.successRedirect(
+        request,
+        this.issueCode(request, device.identityId, device.sessionId),
+      ),
     };
   }
 
   /**
    * The silent Enrollment happens here (ADR-0014): first authentication
    * through an Application creates it without a consent screen. A suspended
-   * Enrollment refuses this Application only.
+   * Enrollment refuses this Application only, and the refusal is audited so
+   * attempts against a suspended Enrollment stay visible.
    */
   private enrollmentDenial(
     request: ValidatedRequest,
@@ -196,6 +207,18 @@ export class AuthorizeService {
       email,
     });
     if (enrollment.allowed) return null;
+
+    recordAuditEvent(this.db, {
+      organizationId: request.application.organizationId,
+      actor: 'end-user',
+      kind: 'identity.authorization.refused',
+      detail: {
+        identityId,
+        applicationId: request.application.id,
+        email,
+        reason: enrollment.reason,
+      },
+    });
     return this.errorRedirect(
       request,
       'access_denied',
@@ -226,32 +249,40 @@ export class AuthorizeService {
 
     const responseType = this.text(request.responseType);
     if (!responseType) {
-      return this.invalid(this.errorRedirect(base, 'invalid_request', 'response_type is required'));
+      return {
+        kind: 'invalid',
+        outcome: this.errorRedirect(base, 'invalid_request', 'response_type is required'),
+      };
     }
     if (responseType !== 'code') {
-      return this.invalid(
-        this.errorRedirect(
+      return {
+        kind: 'invalid',
+        outcome: this.errorRedirect(
           base,
           'unsupported_response_type',
           'only response_type=code is supported',
         ),
-      );
+      };
     }
 
     const scope = this.parseScope(request.scope);
     if (!scope) {
-      return this.invalid(
-        this.errorRedirect(
+      return {
+        kind: 'invalid',
+        outcome: this.errorRedirect(
           base,
           'invalid_scope',
           'scope must include openid and only the supported scopes',
         ),
-      );
+      };
     }
 
     const pkceProblem = this.pkceProblem(application.type, codeChallenge, codeChallengeMethod);
     if (pkceProblem) {
-      return this.invalid(this.errorRedirect(base, 'invalid_request', pkceProblem));
+      return {
+        kind: 'invalid',
+        outcome: this.errorRedirect(base, 'invalid_request', pkceProblem),
+      };
     }
 
     return {
@@ -269,12 +300,18 @@ export class AuthorizeService {
     return scopes;
   }
 
+  /**
+   * A public client has nothing but PKCE, so the challenge is required. A
+   * confidential client may rely on its secret (PKCE "replaces the secret",
+   * ADR-0009), but any challenge it does present must be S256 and complete.
+   */
   private pkceProblem(
     type: ApplicationType,
     challenge: string | undefined,
     method: string | undefined,
   ): string | null {
     if (!challenge) {
+      if (method !== undefined) return 'code_challenge_method requires a code_challenge';
       return type === 'spa' ? 'public clients must present a PKCE code_challenge' : null;
     }
     if (method !== 'S256') return 'only code_challenge_method=S256 is supported';
@@ -374,16 +411,10 @@ export class AuthorizeService {
   }
 
   private errorPage(error: string, description: string): Validation {
-    return this.invalid({
-      kind: 'error-page',
-      status: 400,
-      error,
-      errorDescription: description,
-    });
-  }
-
-  private invalid(outcome: AuthorizeOutcome): Validation {
-    return { kind: 'invalid', outcome };
+    return {
+      kind: 'invalid',
+      outcome: { kind: 'error-page', status: 400, error, errorDescription: description },
+    };
   }
 
   private text(value: string | undefined): string | undefined {
@@ -396,4 +427,8 @@ export class AuthorizeService {
   private verbatim(value: string | undefined): string | undefined {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
   }
+}
+
+function deviceOf(session: SsoSession): ActingDevice {
+  return { sessionId: session.id, identityId: session.identityId, email: session.email };
 }

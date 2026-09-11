@@ -65,13 +65,6 @@ function linkFromBody(body: string): string {
   return match[0];
 }
 
-function tokenFromLink(link: string): string {
-  const parsed = new URL(link);
-  const token = parsed.searchParams.get('token');
-  if (!token) throw new Error(`no token in link: ${link}`);
-  return token;
-}
-
 function cookieFrom(res: Response): string {
   return (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
 }
@@ -286,11 +279,30 @@ describe('Authorization endpoint, SSO Session, silent Enrollment', () => {
   });
 
   it('the S256 challenge shape is enforced for confidential clients too when presented', async () => {
-    const res = await authorize(
+    const plain = await authorize(
       zotacRequest({ code_challenge: PKCE_CHALLENGE, code_challenge_method: 'plain' }),
     );
-    expect(res.status).toBe(302);
-    expect(locationParams(res).get('error')).toBe('invalid_request');
+    expect(plain.status).toBe(302);
+    expect(locationParams(plain).get('error')).toBe('invalid_request');
+
+    const orphanMethod = await authorize(
+      zotacRequest({ code_challenge_method: 'S256' }),
+    );
+    expect(orphanMethod.status).toBe(302);
+    expect(locationParams(orphanMethod).get('error')).toBe('invalid_request');
+  });
+
+  it('an equivalent canonical spelling matches the registered redirect URI', async () => {
+    const res = await authorize(
+      zotacRequest({
+        redirect_uri: 'HTTPS://ZOTAC.example.com/oidc/callback',
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const emptyQuery = await authorize(zotacRequest({ redirect_uri: `${ZOTAC_REDIRECT}?` }));
+    expect(emptyQuery.status).toBe(200);
+    expect(((await emptyQuery.json()) as SignInPage).request.redirectUri).toBe(ZOTAC_REDIRECT);
   });
 
   it('an invalid SSO cookie is treated as no session', async () => {

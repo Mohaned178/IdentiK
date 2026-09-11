@@ -23,6 +23,11 @@ export interface SsoSession {
 export class SessionsService {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
+  /**
+   * Instance-wide default for now; per-Organization session timeout is
+   * Organization-scoped policy (ADR-0022) and arrives with the settings
+   * surface in ticket 18.
+   */
   ttlMs(): number {
     return parseTtlMs('IDENTIK_SESSION_TTL_MS', 30 * 24 * 60 * 60 * 1000);
   }

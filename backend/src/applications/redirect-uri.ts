@@ -48,9 +48,7 @@ export function validateRedirectUri(value: string): string {
     throw new BadRequestException('a redirect URI must use HTTPS');
   }
 
-  // An empty query (`...?`) is not a component with content; drop the
-  // delimiter so it cannot pose as a distinct match target.
-  return parsed.search === '' && parsed.href.endsWith('?') ? parsed.href.slice(0, -1) : parsed.href;
+  return canonicalHref(parsed);
 }
 
 /**
@@ -60,7 +58,8 @@ export function validateRedirectUri(value: string): string {
  * stored URI is.
  */
 export function canonicalRedirectUri(value: string): string | null {
-  return parseAbsoluteUrl(value)?.href ?? null;
+  const parsed = parseAbsoluteUrl(value);
+  return parsed ? canonicalHref(parsed) : null;
 }
 
 function parseAbsoluteUrl(value: string): URL | null {
@@ -69,6 +68,15 @@ function parseAbsoluteUrl(value: string): URL | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The one canonical form configuration stores and matching compares. An empty
+ * query delimiter (`...?`) is not a component with content, so it is dropped
+ * rather than becoming a distinct match target.
+ */
+function canonicalHref(parsed: URL): string {
+  return parsed.search === '' && parsed.href.endsWith('?') ? parsed.href.slice(0, -1) : parsed.href;
 }
 
 /** localhost, the whole 127.0.0.0/8 loopback block, and IPv6 ::1. */

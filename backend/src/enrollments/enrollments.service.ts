@@ -4,9 +4,7 @@ import { isUniqueViolation } from '../storage/sqlite';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 
-export type EnrollmentGate =
-  | { allowed: true; enrollmentId: string; created: boolean }
-  | { allowed: false; reason: 'suspended' };
+export type EnrollmentGate = { allowed: true } | { allowed: false; reason: 'suspended' };
 
 /**
  * An Enrollment is an Identity's membership in one Application, created
@@ -30,38 +28,20 @@ export class EnrollmentsService {
     applicationId: string;
     email: string;
   }): EnrollmentGate {
-    const existing = this.db
-      .prepare(
-        'SELECT id, suspended_at FROM enrollments WHERE identity_id = ? AND application_id = ?',
-      )
-      .get(input.identityId, input.applicationId) as
-      | { id: string; suspended_at: string | null }
-      | undefined;
+    const existing = this.find(input.identityId, input.applicationId);
+    if (existing) return this.gate(existing);
 
-    if (existing) {
-      if (existing.suspended_at !== null) return { allowed: false, reason: 'suspended' };
-      return { allowed: true, enrollmentId: existing.id, created: false };
-    }
-
-    const id = uuid();
     try {
       this.db
         .prepare(
           'INSERT INTO enrollments (id, identity_id, application_id, created_at) VALUES (?, ?, ?, ?)',
         )
-        .run(id, input.identityId, input.applicationId, new Date().toISOString());
+        .run(uuid(), input.identityId, input.applicationId, new Date().toISOString());
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
-      const raced = this.db
-        .prepare(
-          'SELECT id, suspended_at FROM enrollments WHERE identity_id = ? AND application_id = ?',
-        )
-        .get(input.identityId, input.applicationId) as
-        | { id: string; suspended_at: string | null }
-        | undefined;
+      const raced = this.find(input.identityId, input.applicationId);
       if (!raced) throw error;
-      if (raced.suspended_at !== null) return { allowed: false, reason: 'suspended' };
-      return { allowed: true, enrollmentId: raced.id, created: false };
+      return this.gate(raced);
     }
 
     recordAuditEvent(this.db, {
@@ -74,6 +54,19 @@ export class EnrollmentsService {
         email: input.email,
       },
     });
-    return { allowed: true, enrollmentId: id, created: true };
+    return { allowed: true };
+  }
+
+  private find(
+    identityId: string,
+    applicationId: string,
+  ): { suspended_at: string | null } | undefined {
+    return this.db
+      .prepare('SELECT suspended_at FROM enrollments WHERE identity_id = ? AND application_id = ?')
+      .get(identityId, applicationId) as { suspended_at: string | null } | undefined;
+  }
+
+  private gate(row: { suspended_at: string | null }): EnrollmentGate {
+    return row.suspended_at === null ? { allowed: true } : { allowed: false, reason: 'suspended' };
   }
 }
