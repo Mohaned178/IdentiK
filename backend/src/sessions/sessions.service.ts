@@ -26,7 +26,11 @@ export interface SessionSummary {
 }
 
 /** Why a Session was revoked, carried in the audit detail. */
-export type SessionRevocationReason = 'account_center' | 'sign_out';
+export type SessionRevocationReason =
+  | 'account_center'
+  | 'sign_out'
+  | 'suspension'
+  | 'administrator';
 
 interface SessionRow {
   id: string;
@@ -175,29 +179,85 @@ export class SessionsService {
     if (!row) return false;
     if (row.revoked_at !== null) return true;
 
-    const now = new Date().toISOString();
     this.db.exec('BEGIN');
     try {
-      this.db
-        .prepare('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
-        .run(now, row.id);
-      this.db
-        .prepare(
-          'UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL',
-        )
-        .run(now, row.id);
-      recordAuditEvent(this.db, {
-        organizationId: row.organization_id,
-        actor: 'end-user',
-        kind: 'session.revoked',
-        detail: { identityId: row.identity_id, sessionId: row.id, reason: input.reason },
-      });
+      this.revokeRow(row, input.reason, 'end-user');
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
     }
     return true;
+  }
+
+  /**
+   * Revoke every Session of one Identity in one unit (ADR-0006): the devices
+   * die, their descendant refresh tokens die, each death is a `session.revoked`
+   * event, and one `identity.sessions.revoked` event records the collection
+   * action itself — so a revoke-all with zero live devices is still visible.
+   * Identity suspension and Enrollment suspension both walk this path: the
+   * platform Session is Organization-scoped, so any suspension that loses an
+   * Identity at platform scope kills it wherever it was created.
+   */
+  revokeAllForIdentity(input: {
+    identityId: string;
+    organizationId: string;
+    reason: SessionRevocationReason;
+    actor: string;
+  }): number {
+    const rows = this.db
+      .prepare(
+        `SELECT id, identity_id, organization_id FROM sessions
+         WHERE identity_id = ? AND organization_id = ? AND revoked_at IS NULL`,
+      )
+      .all(input.identityId, input.organizationId) as unknown as Array<{
+        id: string;
+        identity_id: string;
+        organization_id: string;
+      }>;
+
+    this.db.exec('BEGIN');
+    try {
+      for (const row of rows) {
+        this.revokeRow(row, input.reason, input.actor);
+      }
+      recordAuditEvent(this.db, {
+        organizationId: input.organizationId,
+        actor: input.actor,
+        kind: 'identity.sessions.revoked',
+        detail: { identityId: input.identityId, count: rows.length, reason: input.reason },
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return rows.length;
+  }
+
+  /**
+   * One Session's death is one unit (ADR-0013): the row, its descendant
+   * refresh tokens, and its audit event — never a revoked Session whose
+   * tokens outlive it. Callers own the transaction.
+   */
+  private revokeRow(
+    row: { id: string; identity_id: string; organization_id: string },
+    reason: SessionRevocationReason,
+    actor: string,
+  ): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+      .run(now, row.id);
+    this.db
+      .prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL')
+      .run(now, row.id);
+    recordAuditEvent(this.db, {
+      organizationId: row.organization_id,
+      actor,
+      kind: 'session.revoked',
+      detail: { identityId: row.identity_id, sessionId: row.id, reason },
+    });
   }
 
   private toSummary(row: SessionRow): SessionSummary {

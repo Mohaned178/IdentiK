@@ -9,6 +9,7 @@ import {
 import { parseTtlMs } from '../config/env';
 import { LinkBaseService } from '../config/link-base.service';
 import { MailService } from '../mail/mail.service';
+import { SessionsService } from '../sessions/sessions.service';
 import { recordAuditEvent } from '../storage/audit';
 import { isUniqueViolation } from '../storage/sqlite';
 import { DATABASE, Database } from '../storage/token';
@@ -23,6 +24,12 @@ interface IdentityRow {
   organization_id: string;
   email: string;
   email_verified: number;
+}
+
+interface SuspensionRow {
+  id: string;
+  organization_id: string;
+  email: string;
 }
 
 export interface AuthenticatedIdentity {
@@ -65,6 +72,7 @@ export class IdentitiesService {
     @Inject(DATABASE) private readonly db: Database,
     private readonly mail: MailService,
     private readonly links: LinkBaseService,
+    private readonly sessions: SessionsService,
   ) {}
 
   /**
@@ -253,6 +261,71 @@ export class IdentitiesService {
   }
 
   /**
+   * Suspend an Identity Organization-wide (ADR-0006): new authentication is
+   * refused at the credential gate, and every live platform Session dies in
+   * the same action, carrying its descendant refresh tokens with it. The
+   * Organization scope is part of the lookup, so a foreign id is "not found",
+   * never a cross-Organization lever.
+   */
+  suspend(input: { organizationId: string; identityId: string; actor: string }): void {
+    const identity = this.requireIdentity(input.organizationId, input.identityId);
+    const changed = this.db
+      .prepare('UPDATE identities SET suspended_at = ? WHERE id = ? AND suspended_at IS NULL')
+      .run(new Date().toISOString(), identity.id);
+    if (changed.changes !== 1) return;
+
+    this.sessions.revokeAllForIdentity({
+      identityId: identity.id,
+      organizationId: identity.organization_id,
+      reason: 'suspension',
+      actor: input.actor,
+    });
+    this.adminAudit(identity.organization_id, input.actor, 'identity.suspended', {
+      identityId: identity.id,
+      email: identity.email,
+    });
+  }
+
+  /**
+   * Unsuspend is the reverse lever, but not an undo of the cascade: the
+   * Identity may authenticate again, while the Sessions killed by suspension
+   * stay dead. Advancing the revocation watermark keeps a Session that slipped
+   * through the suspension race from coming back to life here.
+   */
+  unsuspend(input: { organizationId: string; identityId: string; actor: string }): void {
+    const identity = this.requireIdentity(input.organizationId, input.identityId);
+    const changed = this.db
+      .prepare(
+        'UPDATE identities SET suspended_at = NULL, sessions_revoked_at = ? WHERE id = ? AND suspended_at IS NOT NULL',
+      )
+      .run(new Date().toISOString(), identity.id);
+    if (changed.changes === 1) {
+      this.adminAudit(identity.organization_id, input.actor, 'identity.unsuspended', {
+        identityId: identity.id,
+        email: identity.email,
+      });
+    }
+  }
+
+  /**
+   * Revoke every Session of one Identity without touching its state — the
+   * device-eviction lever, distinct from suspension's "this actor is done".
+   */
+  revokeAllSessions(input: {
+    organizationId: string;
+    identityId: string;
+    actor: string;
+  }): number {
+    const identity = this.requireIdentity(input.organizationId, input.identityId);
+    return this.sessions.revokeAllForIdentity({
+      identityId: identity.id,
+      organizationId: identity.organization_id,
+      reason: 'administrator',
+      actor: input.actor,
+    });
+  }
+
+  /**
    * Creates the reservation, or reports the email is held. The UNIQUE
    * (organization_id, email) constraint is the race-free arbiter: any
    * violation (including a lost race) is the same already-registered refusal.
@@ -302,6 +375,17 @@ export class IdentitiesService {
         'SELECT id, organization_id, email, email_verified FROM identities WHERE id = ?',
       )
       .get(identityId) as IdentityRow | undefined;
+  }
+
+  /** The suspension levers' Organization-scoped target, or a 404. */
+  private requireIdentity(organizationId: string, identityId: string): SuspensionRow {
+    const row = this.db
+      .prepare(
+        'SELECT id, organization_id, email FROM identities WHERE id = ? AND organization_id = ?',
+      )
+      .get(identityId, organizationId) as SuspensionRow | undefined;
+    if (!row) throw new NotFoundException('no such Identity');
+    return row;
   }
 
   /**
@@ -388,6 +472,16 @@ export class IdentitiesService {
 
   private audit(organizationId: string, kind: string, detail: Record<string, unknown>): void {
     recordAuditEvent(this.db, { organizationId, actor: 'end-user', kind, detail });
+  }
+
+  /** An Administrator's state lever, attributed to the Administrator. */
+  private adminAudit(
+    organizationId: string,
+    actor: string,
+    kind: string,
+    detail: Record<string, unknown>,
+  ): void {
+    recordAuditEvent(this.db, { organizationId, actor, kind, detail });
   }
 
   private verificationTtlMs(): number {

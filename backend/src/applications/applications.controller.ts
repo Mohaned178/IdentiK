@@ -116,6 +116,43 @@ export class ApplicationsController {
     };
   }
 
+  /** Suspend from Application: lose one Application, not the Organization. */
+  @Post(':id/enrollments/:identityId/suspend')
+  @HttpCode(200)
+  suspendEnrollment(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Param('identityId') identityId: string,
+  ): { enrollment: ApplicationEnrollmentView } {
+    const session = requireAdministratorSession(req);
+    return {
+      enrollment: this.enrollments.suspendForApplication({
+        organizationId: session.organizationId,
+        applicationId: id,
+        identityId,
+        actor: session.administratorId,
+      }),
+    };
+  }
+
+  @Post(':id/enrollments/:identityId/unsuspend')
+  @HttpCode(200)
+  unsuspendEnrollment(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Param('identityId') identityId: string,
+  ): { enrollment: ApplicationEnrollmentView } {
+    const session = requireAdministratorSession(req);
+    return {
+      enrollment: this.enrollments.unsuspendForApplication({
+        organizationId: session.organizationId,
+        applicationId: id,
+        identityId,
+        actor: session.administratorId,
+      }),
+    };
+  }
+
   @Post(':id/secrets')
   @UseGuards(OwnerGuard)
   issueSecret(

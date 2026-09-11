@@ -6,6 +6,7 @@ import { canonicalRedirectUri } from '../applications/redirect-uri';
 import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
+import { EnrollmentsService } from '../enrollments/enrollments.service';
 import { SessionsService, type LiveSession } from '../sessions/sessions.service';
 import type { AuthenticatedClient } from './client-authentication.service';
 import { IssuerService } from './issuer.service';
@@ -112,6 +113,7 @@ export class TokenService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
     private readonly sessions: SessionsService,
+    private readonly enrollments: EnrollmentsService,
     private readonly signing: SigningKeysService,
     private readonly issuer: IssuerService,
   ) {}
@@ -177,6 +179,9 @@ export class TokenService {
     const identity = this.findIdentity(row.identity_id);
     if (!identity || !this.isLive(identity)) {
       return invalidGrant('the Identity is no longer permitted to authenticate');
+    }
+    if (!this.enrollments.allows(row.identity_id, row.application_id)) {
+      return invalidGrant('the Identity is not permitted to use this Application');
     }
 
     const body = await this.mint({
@@ -245,6 +250,9 @@ export class TokenService {
     const identity = this.findIdentity(row.identity_id);
     if (!identity || !this.isLive(identity)) {
       return invalidGrant('the Identity is no longer permitted to authenticate');
+    }
+    if (!this.enrollments.allows(row.identity_id, row.application_id)) {
+      return invalidGrant('the Identity is not permitted to use this Application');
     }
 
     // A refresh may narrow its scopes, never widen them (RFC 6749 §6).
@@ -448,7 +456,7 @@ export class TokenService {
       const now = new Date().toISOString();
       if (row.revoked_at === null && row.rotated_at === null && row.expires_at > now) {
         const session = this.sessions.resolveById(row.session_id);
-        if (session) {
+        if (session && this.enrollments.allows(row.identity_id, row.application_id)) {
           return {
             active: true,
             scope: row.scope,
