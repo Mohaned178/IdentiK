@@ -73,7 +73,9 @@ describe('Short-lived authorization codes and access tokens', () => {
   beforeAll(async () => {
     instance = await Instance.start(BACKEND_DIST, {
       IDENTIK_AUTHORIZATION_CODE_TTL_MS: '1000',
-      IDENTIK_ACCESS_TOKEN_TTL_MS: '1000',
+      // Two seconds, not one: the immediate userinfo assertion below races a
+      // one-second TTL under full-suite load.
+      IDENTIK_ACCESS_TOKEN_TTL_MS: '2000',
     });
 
     const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
@@ -147,7 +149,7 @@ describe('Short-lived authorization codes and access tokens', () => {
       });
     expect((await userinfo(tokens.access_token)).status).toBe(200);
 
-    await sleep(1200);
+    await sleep(2200);
     expect((await userinfo(tokens.access_token)).status).toBe(401);
 
     const verdict = await instance.request('/api/oidc/introspect', {

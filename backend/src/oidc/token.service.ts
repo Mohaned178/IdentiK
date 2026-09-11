@@ -179,16 +179,15 @@ export class TokenService {
       return invalidGrant('the Identity is no longer permitted to authenticate');
     }
 
-    return {
-      status: 200,
-      body: await this.mint({
-        client,
-        identity,
-        session,
-        scopes: splitScope(row.scope),
-        ...(row.nonce !== null ? { nonce: row.nonce } : {}),
-      }),
-    };
+    const body = await this.mint({
+      client,
+      identity,
+      session,
+      scopes: splitScope(row.scope),
+      ...(row.nonce !== null ? { nonce: row.nonce } : {}),
+    });
+    if (!body) return invalidGrant('the Session that authorized this code is no longer valid');
+    return { status: 200, body };
   }
 
   /**
@@ -271,10 +270,9 @@ export class TokenService {
       return invalidGrant('the refresh token has already been used');
     }
 
-    return {
-      status: 200,
-      body: await this.mint({ client, identity, session, scopes }),
-    };
+    const body = await this.mint({ client, identity, session, scopes });
+    if (!body) return invalidGrant('the Session that issued this refresh token is no longer valid');
+    return { status: 200, body };
   }
 
   /**
@@ -308,7 +306,7 @@ export class TokenService {
     session: LiveSession;
     scopes: string[];
     nonce?: string;
-  }): Promise<TokenSuccess> {
+  }): Promise<TokenSuccess | null> {
     const nowMs = Date.now();
     const iat = Math.floor(nowMs / 1000);
     const accessExpiresMs = nowMs + this.accessTtlMs();
@@ -354,6 +352,10 @@ export class TokenService {
       nowMs + this.refreshTtlMs(),
       new Date(input.session.expiresAt).getTime(),
     );
+    // The parent is re-checked with no await between check and insert, so a
+    // revocation that landed while the tokens were being signed cannot leave a
+    // live refresh token under a dead Session (ADR-0013).
+    if (!this.sessions.resolveById(input.session.id)) return null;
     this.db
       .prepare(
         `INSERT INTO refresh_tokens

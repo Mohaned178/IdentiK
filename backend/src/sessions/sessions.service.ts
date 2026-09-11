@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { hashToken, randomToken } from '../crypto/password';
 import { parseTtlMs } from '../config/env';
+import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 
@@ -16,11 +17,24 @@ export interface LiveSession extends SsoSession {
   expiresAt: string;
 }
 
+/** A recognizable device row for the Account Center's Session list. */
+export interface SessionSummary {
+  id: string;
+  device: string | null;
+  createdAt: string;
+  lastSeenAt: string;
+}
+
+/** Why a Session was revoked, carried in the audit detail. */
+export type SessionRevocationReason = 'account_center' | 'sign_out';
+
 interface SessionRow {
   id: string;
   identity_id: string;
   organization_id: string;
+  user_agent: string | null;
   created_at: string;
+  last_seen_at: string;
   expires_at: string;
   revoked_at: string | null;
   email: string;
@@ -29,8 +43,9 @@ interface SessionRow {
   sessions_revoked_at: string | null;
 }
 
-const SESSION_ROW_COLUMNS = `s.id, s.identity_id, s.organization_id, s.created_at, s.expires_at,
-        s.revoked_at, i.email, i.email_verified, i.suspended_at, i.sessions_revoked_at`;
+const SESSION_ROW_COLUMNS = `s.id, s.identity_id, s.organization_id, s.user_agent, s.created_at,
+        s.last_seen_at, s.expires_at, s.revoked_at, i.email, i.email_verified, i.suspended_at,
+        i.sessions_revoked_at`;
 
 /**
  * A Session is the durable record of one authentication of one Identity — the
@@ -84,10 +99,14 @@ export class SessionsService {
   resolve(token: string): SsoSession | null {
     const row = this.findRow('s.sso_token_hash = ?', hashToken(token));
     if (!row) return null;
+    const session = this.toSession(row);
+    // Only live Sessions record activity: a dead cookie must not refresh the
+    // last-seen time of a device the End User already revoked.
+    if (!session) return null;
     this.db
       .prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?')
       .run(new Date().toISOString(), row.id);
-    return this.toSession(row);
+    return session;
   }
 
   /**
@@ -102,6 +121,92 @@ export class SessionsService {
     const session = this.toSession(row);
     if (!session) return null;
     return { ...session, createdAt: row.created_at, expiresAt: row.expires_at };
+  }
+
+  /**
+   * The Identity's active Sessions for the Account Center: the same
+   * fail-closed liveness gate as resolution, newest activity first, each with
+   * the device metadata a non-expert can recognize (user agent, sign-in time,
+   * last-seen time).
+   */
+  listForIdentity(identityId: string): SessionSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT ${SESSION_ROW_COLUMNS}
+         FROM sessions s JOIN identities i ON i.id = s.identity_id
+         WHERE s.identity_id = ?
+         ORDER BY s.last_seen_at DESC, s.created_at DESC`,
+      )
+      .all(identityId) as unknown as SessionRow[];
+    return rows.filter((row) => this.isLive(row)).map((row) => this.toSummary(row));
+  }
+
+  /**
+   * Sign-out is revocation of the current Session (ADR-0013). Uniform and
+   * idempotent: an absent, stale, or dead cookie revokes nothing.
+   */
+  signOut(token: string): void {
+    const session = this.resolve(token);
+    if (!session) return;
+    this.revoke({ sessionId: session.id, identityId: session.identityId, reason: 'sign_out' });
+  }
+
+  /**
+   * Revoke one Session of one Identity (ADR-0013). The session row is the
+   * arbiter: only a Session belonging to the requesting Identity can be
+   * revoked, so a foreign id is simply "not found". The revocation, the
+   * descendant refresh-token cascade, and the audit event are one unit —
+   * a revoked Session whose tokens outlive it would be exactly the lie the
+   * revocable anchor exists to prevent. Idempotent: revoking a dead Session
+   * changes nothing and is not an error.
+   */
+  revoke(input: {
+    sessionId: string;
+    identityId: string;
+    reason: SessionRevocationReason;
+  }): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT ${SESSION_ROW_COLUMNS}
+         FROM sessions s JOIN identities i ON i.id = s.identity_id
+         WHERE s.id = ? AND s.identity_id = ?`,
+      )
+      .get(input.sessionId, input.identityId) as SessionRow | undefined;
+    if (!row) return false;
+    if (row.revoked_at !== null) return true;
+
+    const now = new Date().toISOString();
+    this.db.exec('BEGIN');
+    try {
+      this.db
+        .prepare('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+        .run(now, row.id);
+      this.db
+        .prepare(
+          'UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL',
+        )
+        .run(now, row.id);
+      recordAuditEvent(this.db, {
+        organizationId: row.organization_id,
+        actor: 'end-user',
+        kind: 'session.revoked',
+        detail: { identityId: row.identity_id, sessionId: row.id, reason: input.reason },
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return true;
+  }
+
+  private toSummary(row: SessionRow): SessionSummary {
+    return {
+      id: row.id,
+      device: row.user_agent,
+      createdAt: row.created_at,
+      lastSeenAt: row.last_seen_at,
+    };
   }
 
   private findRow(where: string, value: string): SessionRow | undefined {
