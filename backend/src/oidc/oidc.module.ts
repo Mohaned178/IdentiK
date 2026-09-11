@@ -6,6 +6,14 @@ import { SessionsModule } from '../sessions/sessions.module';
 import { StorageModule } from '../storage/storage.module';
 import { AuthorizeController } from './authorize.controller';
 import { AuthorizeService } from './authorize.service';
+import { ClientAuthenticationService } from './client-authentication.service';
+import { DiscoveryController } from './discovery.controller';
+import { IssuerService } from './issuer.service';
+import { SigningKeysService } from './signing-keys.service';
+import { TokenManagementController } from './token-management.controller';
+import { TokenController } from './token.controller';
+import { TokenService } from './token.service';
+import { UserInfoController } from './userinfo.controller';
 
 @Module({
   imports: [
@@ -15,7 +23,19 @@ import { AuthorizeService } from './authorize.service';
     SessionsModule,
     EnrollmentsModule,
   ],
-  controllers: [AuthorizeController],
-  providers: [AuthorizeService],
+  controllers: [
+    AuthorizeController,
+    TokenController,
+    TokenManagementController,
+    UserInfoController,
+    DiscoveryController,
+  ],
+  providers: [
+    AuthorizeService,
+    ClientAuthenticationService,
+    IssuerService,
+    SigningKeysService,
+    TokenService,
+  ],
 })
 export class OidcModule {}

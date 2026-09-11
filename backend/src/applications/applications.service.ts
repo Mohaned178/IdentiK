@@ -5,6 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { timingSafeEqual } from 'node:crypto';
 import { hashToken, randomToken } from '../crypto/password';
 import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
@@ -46,6 +47,14 @@ export interface AuthorizeClient {
   name: string;
   type: ApplicationType;
   redirectUris: string[];
+}
+
+/** What the token surface needs to know about a client. */
+export interface ClientRecord {
+  id: string;
+  clientId: string;
+  organizationId: string;
+  type: ApplicationType;
 }
 
 interface ApplicationRow {
@@ -188,6 +197,44 @@ export class ApplicationsService {
       type: row.type,
       redirectUris: redirectUris.map((entry) => entry.uri),
     };
+  }
+
+  /** Resolve a Client ID at the token boundary; no redirect URIs needed there. */
+  findClient(clientId: string): ClientRecord | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT id, client_id, organization_id, type FROM applications WHERE client_id = ?',
+      )
+      .get(clientId) as
+      | { id: string; client_id: string; organization_id: string; type: ApplicationType }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      clientId: row.client_id,
+      organizationId: row.organization_id,
+      type: row.type,
+    };
+  }
+
+  /**
+   * Whether a presented Client Secret is one of the Application's currently
+   * valid concurrent secrets (ADR-0010). Revocation applies immediately: a
+   * revoked secret simply is not in the active set any more. Secrets are
+   * high-entropy, so comparing their stored hashes is the verification.
+   */
+  verifyClientSecret(applicationId: string, secret: string): boolean {
+    const presented = Buffer.from(hashToken(secret));
+    const hashes = this.db
+      .prepare(
+        'SELECT secret_hash FROM client_secrets WHERE application_id = ? AND revoked_at IS NULL',
+      )
+      .all(applicationId) as unknown as Array<{ secret_hash: string }>;
+    for (const row of hashes) {
+      const stored = Buffer.from(row.secret_hash);
+      if (stored.length === presented.length && timingSafeEqual(stored, presented)) return true;
+    }
+    return false;
   }
 
   /**

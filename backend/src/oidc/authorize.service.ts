@@ -13,8 +13,9 @@ import { canonicalRedirectUri } from '../applications/redirect-uri';
 import { IdentitiesService, IdentityAuthentication } from '../identities/identities.service';
 import { SessionsService, SsoSession } from '../sessions/sessions.service';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
+import { parseSupportedScope } from './scopes';
+import { optionalText } from './text';
 
-const SUPPORTED_SCOPES = new Set(['openid', 'email', 'profile']);
 const S256_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
 
 export interface AuthorizationRequest {
@@ -227,12 +228,12 @@ export class AuthorizeService {
   }
 
   private validate(request: AuthorizationRequest): Validation {
-    const clientId = this.text(request.clientId);
+    const clientId = optionalText(request.clientId);
     if (!clientId) return this.errorPage('invalid_client', 'client_id is required');
     const application = this.applications.findForAuthorization(clientId);
     if (!application) return this.errorPage('invalid_client', 'unknown client_id');
 
-    const rawRedirectUri = this.text(request.redirectUri);
+    const rawRedirectUri = optionalText(request.redirectUri);
     const redirectUri = rawRedirectUri ? canonicalRedirectUri(rawRedirectUri) : null;
     if (!redirectUri || !application.redirectUris.includes(redirectUri)) {
       return this.errorPage(
@@ -243,11 +244,11 @@ export class AuthorizeService {
 
     const state = this.verbatim(request.state);
     const nonce = this.verbatim(request.nonce);
-    const codeChallenge = this.text(request.codeChallenge);
-    const codeChallengeMethod = this.text(request.codeChallengeMethod);
+    const codeChallenge = optionalText(request.codeChallenge);
+    const codeChallengeMethod = optionalText(request.codeChallengeMethod);
     const base: ValidatedRequest = { application, redirectUri, scope: [], state };
 
-    const responseType = this.text(request.responseType);
+    const responseType = optionalText(request.responseType);
     if (!responseType) {
       return {
         kind: 'invalid',
@@ -265,7 +266,7 @@ export class AuthorizeService {
       };
     }
 
-    const scope = this.parseScope(request.scope);
+    const scope = parseSupportedScope(request.scope);
     if (!scope) {
       return {
         kind: 'invalid',
@@ -289,15 +290,6 @@ export class AuthorizeService {
       kind: 'ok',
       request: { ...base, scope, nonce, codeChallenge, codeChallengeMethod },
     };
-  }
-
-  private parseScope(value: string | undefined): string[] | null {
-    const raw = this.text(value);
-    if (!raw) return null;
-    const scopes = [...new Set(raw.split(/\s+/).filter((entry) => entry.length > 0))];
-    if (!scopes.includes('openid')) return null;
-    if (scopes.some((scope) => !SUPPORTED_SCOPES.has(scope))) return null;
-    return scopes;
   }
 
   /**
@@ -415,12 +407,6 @@ export class AuthorizeService {
       kind: 'invalid',
       outcome: { kind: 'error-page', status: 400, error, errorDescription: description },
     };
-  }
-
-  private text(value: string | undefined): string | undefined {
-    if (typeof value !== 'string') return undefined;
-    const trimmed = value.trim();
-    return trimmed.length === 0 ? undefined : trimmed;
   }
 
   /** State and nonce are echoed exactly as the client sent them. */

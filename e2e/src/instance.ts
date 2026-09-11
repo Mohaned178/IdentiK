@@ -89,6 +89,7 @@ export class Instance {
       headers?: Record<string, string>;
       query?: Record<string, string>;
       body?: unknown;
+      form?: Record<string, string>;
       redirect?: 'follow' | 'error' | 'manual';
     },
   ): Promise<Response> {
@@ -96,14 +97,23 @@ export class Instance {
     for (const [k, v] of Object.entries(init?.query ?? {})) {
       url.searchParams.set(k, v);
     }
-    const serialized = init?.body === undefined ? undefined : JSON.stringify(init.body);
+    const serialized = init?.form
+      ? new URLSearchParams(init.form).toString()
+      : init?.body === undefined
+        ? undefined
+        : JSON.stringify(init.body);
     return fetch(url, {
       method: init?.method ?? 'GET',
       redirect: init?.redirect ?? 'follow',
       headers:
         serialized === undefined
           ? init?.headers
-          : { 'content-type': 'application/json', ...init?.headers },
+          : {
+              'content-type': init?.form
+                ? 'application/x-www-form-urlencoded'
+                : 'application/json',
+              ...init?.headers,
+            },
       body: serialized,
     });
   }

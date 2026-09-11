@@ -215,6 +215,31 @@ const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    version: 8,
+    up: (db) => {
+      // ADR-0013: a refresh token is a child of the Session whose authentication
+      // minted it — never an independent credential. Stored verifiable-only,
+      // single-use by the rotated_at arbiter (rotation on every use), and
+      // expiring no later than its parent Session. Access tokens are
+      // deliberately absent here: they are untracked signed JWTs that die
+      // naturally within a short TTL.
+      db.exec(`CREATE TABLE refresh_tokens (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        application_id TEXT NOT NULL REFERENCES applications(id),
+        identity_id TEXT NOT NULL REFERENCES identities(id),
+        scope TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        rotated_at TEXT,
+        revoked_at TEXT
+      )`);
+      db.exec('CREATE INDEX refresh_tokens_session_idx ON refresh_tokens(session_id)');
+      db.exec('CREATE INDEX refresh_tokens_application_idx ON refresh_tokens(application_id)');
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

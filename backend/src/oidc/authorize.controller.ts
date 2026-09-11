@@ -91,16 +91,16 @@ export class AuthorizeController {
 /** The authorization request travels in the query, exactly like OIDC expects. */
 function readAuthorizationRequest(req: Request): AuthorizationRequest {
   const query = req.query as Record<string, unknown>;
-  const text = (value: unknown): string | undefined =>
+  const queryText = (value: unknown): string | undefined =>
     typeof value === 'string' ? value : undefined;
   return {
-    clientId: text(query.client_id),
-    redirectUri: text(query.redirect_uri),
-    responseType: text(query.response_type),
-    scope: text(query.scope),
-    state: text(query.state),
-    nonce: text(query.nonce),
-    codeChallenge: text(query.code_challenge),
-    codeChallengeMethod: text(query.code_challenge_method),
+    clientId: queryText(query.client_id),
+    redirectUri: queryText(query.redirect_uri),
+    responseType: queryText(query.response_type),
+    scope: queryText(query.scope),
+    state: queryText(query.state),
+    nonce: queryText(query.nonce),
+    codeChallenge: queryText(query.code_challenge),
+    codeChallengeMethod: queryText(query.code_challenge_method),
   };
 }
