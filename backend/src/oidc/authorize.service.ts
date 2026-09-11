@@ -248,6 +248,16 @@ export class AuthorizeService {
     const codeChallengeMethod = optionalText(request.codeChallengeMethod);
     const base: ValidatedRequest = { application, redirectUri, scope: [], state };
 
+    // A Disabled or Deleted Application refuses new authentication (ADR-0007).
+    // The redirect URI is already validated, so the refusal can travel back to
+    // the Application as a protocol error rather than an error page.
+    if (!application.enabled) {
+      return {
+        kind: 'invalid',
+        outcome: this.errorRedirect(base, 'access_denied', 'this Application is not available'),
+      };
+    }
+
     const responseType = optionalText(request.responseType);
     if (!responseType) {
       return {

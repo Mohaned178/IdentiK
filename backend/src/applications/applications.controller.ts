@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -99,6 +100,73 @@ export class ApplicationsController {
   ): { application: ApplicationView } {
     const session = requireAdministratorSession(req);
     return { application: this.applications.find(session.organizationId, id) };
+  }
+
+  /**
+   * Disable: the reversible pause (ADR-0007). New authentication through the
+   * Application is refused and its refresh tokens are revoked immediately;
+   * Sessions survive. A routine state lever, available to Members (ADR-0008).
+   */
+  @Post(':id/disable')
+  @HttpCode(200)
+  disable(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+  ): { application: ApplicationView } {
+    const session = requireAdministratorSession(req);
+    return {
+      application: this.applications.disable({
+        organizationId: session.organizationId,
+        applicationId: id,
+        actor: session.administratorId,
+      }),
+    };
+  }
+
+  @Post(':id/enable')
+  @HttpCode(200)
+  enable(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+  ): { application: ApplicationView } {
+    const session = requireAdministratorSession(req);
+    return {
+      application: this.applications.enable({
+        organizationId: session.organizationId,
+        applicationId: id,
+        actor: session.administratorId,
+      }),
+    };
+  }
+
+  /**
+   * Delete: Owner-only and irreversible (ADR-0007, ADR-0016). Enrollments are
+   * removed and credentials revoked; Identities survive. There is no undo, so
+   * the caller must send `{ confirm: true }`; without it the API states the
+   * irreversibility plainly and refuses. The returned view is the
+   * pseudonymous shell the audit trail remains attributed to.
+   */
+  @Delete(':id')
+  @UseGuards(OwnerGuard)
+  delete(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Body() body: { confirm?: unknown },
+  ): { application: ApplicationView } {
+    const session = requireAdministratorSession(req);
+    if (body?.confirm !== true) {
+      throw new BadRequestException(
+        'Deleting an Application is irreversible: it removes its Enrollments and revokes ' +
+          'its credentials, and no path restores it. Resend with { "confirm": true } to proceed.',
+      );
+    }
+    return {
+      application: this.applications.remove({
+        organizationId: session.organizationId,
+        applicationId: id,
+        actor: session.administratorId,
+      }),
+    };
   }
 
   /**

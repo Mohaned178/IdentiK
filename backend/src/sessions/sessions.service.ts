@@ -245,6 +245,22 @@ export class SessionsService {
     return this.revokeRows(rows, input);
   }
 
+  /**
+   * Revoke every refresh token minted through one Application's flows
+   * (ADR-0007), leaving every Session — and every other Application's tokens —
+   * alive. Used by the Application Disabled pause and by irreversible
+   * Application deletion. A plain statement so callers can compose it into
+   * their own transaction; idempotent by the `revoked_at IS NULL` guard.
+   */
+  revokeRefreshTokensForApplication(applicationId: string): number {
+    const changed = this.db
+      .prepare(
+        'UPDATE refresh_tokens SET revoked_at = ? WHERE application_id = ? AND revoked_at IS NULL',
+      )
+      .run(new Date().toISOString(), applicationId);
+    return Number(changed.changes);
+  }
+
   /** One revoke-many unit: every row dies, one collection audit event lives. */
   private revokeRows(rows: SessionRef[], input: RevokeManyInput): number {
     this.db.exec('BEGIN');

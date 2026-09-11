@@ -109,6 +109,21 @@ export class EnrollmentsService {
   }
 
   /**
+   * Remove every Enrollment of one Application (ADR-0007): irreversible
+   * Application deletion takes the Application's Enrollments with it, while
+   * the Identities themselves survive untouched. A plain statement so the
+   * caller can compose it into its deletion transaction; returns how many
+   * Enrollments were removed. There is no per-Enrollment audit event — the
+   * deletion event records the collection effect.
+   */
+  removeAllForApplication(applicationId: string): number {
+    const removed = this.db
+      .prepare('DELETE FROM enrollments WHERE application_id = ?')
+      .run(applicationId);
+    return Number(removed.changes);
+  }
+
+  /**
    * Suspend one Enrollment (ADR-0006): authentication through that Application
    * is refused, and the Identity's live platform Sessions are revoked in the
    * same action — an Identity marked suspended while still using the

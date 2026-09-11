@@ -4,14 +4,30 @@
 
 **Blocked by:** 10 (refresh tokens minted via Application flows exist to revoke), 12 (dashboard views where the actions live).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Disabling an Application blocks new authentication through it, immediately
-- [ ] Disable revokes all refresh tokens minted via that Application's flows, immediately; Sessions survive
-- [ ] Disabling is reversible: re-enable restores authentication for non-suspended Identities
-- [ ] Deleting an Application removes its Enrollments and revokes its credentials
-- [ ] Deleted-Application audit history survives pseudonymously
-- [ ] Identities survive deletion — including those with no other Enrollments (orphands stay in the Organization's Identity list)
-- [ ] Deletion is Owner-only at the Management API; disable is Administrator-accessible
-- [ ] Disable and delete are audit events; delete's confirmation states irreversibility
-- [ ] Black-box tests verify token revocation, orphan survival, and Owner-only enforcement over HTTP only
+- [x] Disabling an Application blocks new authentication through it, immediately
+- [x] Disable revokes all refresh tokens minted via that Application's flows, immediately; Sessions survive
+- [x] Disabling is reversible: re-enable restores authentication for non-suspended Identities
+- [x] Deleting an Application removes its Enrollments and revokes its credentials
+- [x] Deleted-Application audit history survives pseudonymously
+- [x] Identities survive deletion — including those with no other Enrollments (orphands stay in the Organization's Identity list)
+- [x] Deletion is Owner-only at the Management API; disable is Administrator-accessible
+- [x] Disable and delete are audit events; delete's confirmation states irreversibility
+- [x] Black-box tests verify token revocation, orphan survival, and Owner-only enforcement over HTTP only
+
+## Comments
+
+Implementation notes:
+
+- Endpoints (all Management API): `POST /api/applications/:id/disable` and `POST /api/applications/:id/enable` (`AdministratorGuard`; the pause is routine state management, so Members pull it — ADR-0008), and `DELETE /api/applications/:id` (`OwnerGuard`; destructive and irreversible — ADR-0016). Unknown/foreign ids are 404s. `ApplicationView` gains `state: 'active' | 'disabled' | 'deleted'` from `application-state.ts`.
+- Confirmation: `DELETE` requires `{ confirm: true }`; without it the API refuses with 400 and states plainly that deletion is irreversible (removes Enrollments, revokes credentials, no path restores it). The dashboard workspace was removed at `815bf37`, so this Management API contract is the backend embodiment of "delete's confirmation states irreversibility"; the SPA dialog is deferred with the dashboard.
+- Schema: migration v10 adds `applications.disabled_at` and `applications.deleted_at`. `disabled_at` is the reversible pause; `deleted_at` is terminal and wins in the state precedence.
+- Disable: `ApplicationsService.disable` flips `disabled_at` (gated `deleted_at IS NULL`) and, in the same transaction, revokes every refresh token minted by the Application through the new `SessionsService.revokeRefreshTokensForApplication` (a plain statement, so callers compose it into their own transaction). Sessions — Identity-scoped, not Application-scoped — are untouched, and the Client Secrets stay valid: a pause is not credential revocation. Idempotent, no duplicate audit.
+- Enable: clears `disabled_at` and audits `application.enabled`; revoked refresh tokens stay dead, so re-enabling restores authentication but never resurrects credentials.
+- Delete: `ApplicationsService.remove` makes the loop terminal and pseudonymizes the row (`name` → `deleted application #<first4>`), revokes all Client Secrets and app-minted refresh tokens, removes every Enrollment via `EnrollmentsService.removeAllForApplication`, and re-attributes the surviving audit trail (`json_set(detail, '$.name', pseudonym)` scoped to the `applicationId`). Identities are never touched. The terminal-marker `UPDATE ... WHERE deleted_at IS NULL` is the race-free arbiter: a concurrent second delete rolls back without duplicating the event. Idempotent. The pseudonymous shell remains visible in `GET /api/applications` and `GET /api/applications/:id`, mirroring an anonymized Identity.
+- Gates: `findForAuthorization`/`findClient` return an `enabled` flag (`disabled_at IS NULL AND deleted_at IS NULL`). `AuthorizeService.validate` refuses with an `access_denied` redirect once the redirect URI is validated (so `client_id`/redirect handling stays unchanged); `TokenService.handleGrant` refuses grants on a non-enabled Application. Client authentication still succeeds for a disabled Application — the pause is not credential revocation — while a deleted Application's secrets are revoked. Access tokens stay untracked and die within their short TTL; introspecting a refresh token answers `active: false` because it is revoked.
+- Audit kinds: `application.disabled` (`{ applicationId, name, refreshTokensRevoked }`), `application.enabled` (`{ applicationId, name }`), and `application.deleted` (`{ applicationId, pseudonym, enrollmentsRemoved, secretsRevoked, refreshTokensRevoked }` — no name). Admin actions are attributed to the Administrator id, which the audit surface resolves to name/email.
+- Tests: `e2e/src/application-lifecycle.test.ts` (3 tests) is black-box over HTTP/email only: disable blocks fresh and silent sign-in, revokes app-minted refresh tokens (rotation and introspection), leaves the other Application and the platform Session alive, and re-enable restores authentication while revoked tokens stay dead; delete is Owner-only, demands confirmation, revokes secrets, empties Enrollments, refuses authorization, keeps orphaned and shared Identities alive, and scrubs the audit name; plus 401/404 and terminal-idempotency checks. Full suite: 170 tests across 17 files.
+- Review round applied: `remove` now guards on the terminal-marker `changes` (no duplicate `application.deleted`), `enabled` is single-sourced via a private `isUsable`, the long import is wrapped, and a banned-vocabulary "user-membership" comment was reworded.
+- Deferred: the dashboard surfaces that render Disabled/Deleted state and the confirmation dialog (frontend removed); Organization-level orphan hygiene (ADR-0007 makes it an explicit Organization concern); auditing access-token death on disable, which remains TTL-bound by design.

@@ -251,6 +251,19 @@ const migrations: Migration[] = [
       db.exec('ALTER TABLE identities ADD COLUMN anonymized_at TEXT');
     },
   },
+  {
+    version: 10,
+    up: (db) => {
+      // ADR-0007: an Application has a reversible Disabled pause (new
+      // authentication blocked, app-minted refresh tokens revoked, Sessions
+      // survive) and an irreversible Deleted terminal state (Enrollments
+      // removed, credentials revoked, name pseudonymized). The row survives so
+      // audit history stays attributable by applicationId; Identities are
+      // untouched, including those left orphaned.
+      db.exec('ALTER TABLE applications ADD COLUMN disabled_at TEXT');
+      db.exec('ALTER TABLE applications ADD COLUMN deleted_at TEXT');
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

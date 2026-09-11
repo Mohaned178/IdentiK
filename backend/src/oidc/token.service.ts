@@ -123,6 +123,13 @@ export class TokenService {
     client: AuthenticatedClient,
     request: TokenRequest,
   ): Promise<TokenResult> {
+    // A Disabled or Deleted Application mints no new tokens (ADR-0007). Client
+    // authentication already succeeded — a pause is not credential revocation —
+    // so the refusal is a grant-level one, and refresh tokens the Application
+    // minted earlier have been revoked.
+    if (!client.enabled) {
+      return invalidGrant('the Application is not available');
+    }
     const grantType = optionalText(request.grant_type);
     if (!grantType) return invalidRequest('grant_type is required');
     if (grantType === 'authorization_code') return this.exchangeCode(client, request);

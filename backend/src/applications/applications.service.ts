@@ -7,9 +7,16 @@ import {
 } from '@nestjs/common';
 import { timingSafeEqual } from 'node:crypto';
 import { hashToken, randomToken } from '../crypto/password';
+import { EnrollmentsService } from '../enrollments/enrollments.service';
+import { SessionsService } from '../sessions/sessions.service';
 import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
+import {
+  applicationState,
+  deletedApplicationPseudonym,
+  type ApplicationState,
+} from './application-state';
 import { validateRedirectUri } from './redirect-uri';
 
 export type ApplicationType = 'web' | 'spa';
@@ -33,6 +40,7 @@ export interface ApplicationView {
   name: string;
   type: ApplicationType;
   clientId: string;
+  state: ApplicationState;
   createdAt: string;
   secrets: SecretView[];
   redirectUris: RedirectUriView[];
@@ -46,6 +54,7 @@ export interface AuthorizeClient {
   organizationName: string;
   name: string;
   type: ApplicationType;
+  enabled: boolean;
   redirectUris: string[];
 }
 
@@ -55,6 +64,7 @@ export interface ClientRecord {
   clientId: string;
   organizationId: string;
   type: ApplicationType;
+  enabled: boolean;
 }
 
 interface ApplicationRow {
@@ -62,6 +72,8 @@ interface ApplicationRow {
   name: string;
   type: ApplicationType;
   client_id: string;
+  disabled_at: string | null;
+  deleted_at: string | null;
   created_at: string;
 }
 
@@ -90,7 +102,11 @@ interface RedirectUriRow {
  */
 @Injectable()
 export class ApplicationsService {
-  constructor(@Inject(DATABASE) private readonly db: Database) {}
+  constructor(
+    @Inject(DATABASE) private readonly db: Database,
+    private readonly enrollments: EnrollmentsService,
+    private readonly sessions: SessionsService,
+  ) {}
 
   /**
    * Register an Application. A Web Application additionally receives its first
@@ -147,7 +163,7 @@ export class ApplicationsService {
   list(organizationId: string): ApplicationView[] {
     const rows = this.db
       .prepare(
-        `SELECT id, name, type, client_id, created_at FROM applications
+        `SELECT id, name, type, client_id, disabled_at, deleted_at, created_at FROM applications
          WHERE organization_id = ? ORDER BY created_at`,
       )
       .all(organizationId) as unknown as ApplicationRow[];
@@ -159,6 +175,123 @@ export class ApplicationsService {
   }
 
   /**
+   * Pause an Application (ADR-0007): new authentication is refused and every
+   * refresh token minted through its flows is revoked immediately, while the
+   * platform Sessions survive — a pause is not credential revocation, so the
+   * Client Secrets stay valid. Reversible via `enable`; idempotent.
+   */
+  disable(input: { organizationId: string; applicationId: string; actor: string }): ApplicationView {
+    const application = this.requireApplication(input.organizationId, input.applicationId);
+    if (application.deleted_at !== null) return this.view(input.organizationId, application.id);
+
+    const now = new Date().toISOString();
+    // State change, revocation, and audit are one unit: a paused Application
+    // whose app-minted tokens outlive the pause is the lie disable exists to
+    // prevent.
+    this.db.exec('BEGIN');
+    try {
+      const changed = this.db
+        .prepare(
+          'UPDATE applications SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL AND deleted_at IS NULL',
+        )
+        .run(now, application.id);
+      if (Number(changed.changes) === 1) {
+        const refreshTokensRevoked = this.sessions.revokeRefreshTokensForApplication(application.id);
+        this.audit(input.organizationId, input.actor, 'application.disabled', {
+          applicationId: application.id,
+          name: application.name,
+          refreshTokensRevoked,
+        });
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return this.view(input.organizationId, application.id);
+  }
+
+  /** Reverse the pause. Revoked refresh tokens stay dead (ADR-0007). */
+  enable(input: { organizationId: string; applicationId: string; actor: string }): ApplicationView {
+    const application = this.requireApplication(input.organizationId, input.applicationId);
+    if (application.deleted_at !== null) return this.view(input.organizationId, application.id);
+
+    const changed = this.db
+      .prepare(
+        'UPDATE applications SET disabled_at = NULL WHERE id = ? AND disabled_at IS NOT NULL AND deleted_at IS NULL',
+      )
+      .run(application.id);
+    if (Number(changed.changes) === 1) {
+      this.audit(input.organizationId, input.actor, 'application.enabled', {
+        applicationId: application.id,
+        name: application.name,
+      });
+    }
+    return this.view(input.organizationId, application.id);
+  }
+
+  /**
+   * Delete an Application — irreversible (ADR-0007). Enrollments are removed,
+   * Client Secrets and app-minted refresh tokens are revoked, and the
+   * Application's name is destroyed and pseudonymized in both the row and its
+   * surviving audit trail. Identities are never touched: the Organization owns
+   * them, so even Identities left with no Enrollments survive. Idempotent.
+   */
+  remove(input: { organizationId: string; applicationId: string; actor: string }): ApplicationView {
+    const application = this.requireApplication(input.organizationId, input.applicationId);
+    if (application.deleted_at !== null) return this.view(input.organizationId, application.id);
+
+    const now = new Date().toISOString();
+    const pseudonym = deletedApplicationPseudonym(application.id);
+
+    this.db.exec('BEGIN');
+    try {
+      // The terminal marker is the race-free arbiter: a concurrent second
+      // delete rolls back without duplicating the event or re-pseudonymizing.
+      const marked = this.db
+        .prepare(
+          'UPDATE applications SET name = ?, disabled_at = COALESCE(disabled_at, ?), deleted_at = ? WHERE id = ? AND deleted_at IS NULL',
+        )
+        .run(pseudonym, now, now, application.id);
+      if (Number(marked.changes) !== 1) {
+        this.db.exec('ROLLBACK');
+        return this.view(input.organizationId, application.id);
+      }
+      const secrets = this.db
+        .prepare(
+          `UPDATE client_secrets SET revoked_at = ?, revoked_by = ?
+            WHERE application_id = ? AND revoked_at IS NULL`,
+        )
+        .run(now, input.actor, application.id);
+      const refreshTokensRevoked = this.sessions.revokeRefreshTokensForApplication(application.id);
+      const enrollmentsRemoved = this.enrollments.removeAllForApplication(application.id);
+      // The durable key is the applicationId; the human-facing name in
+      // historical details is PII, so the surviving trail is re-attributed to
+      // the pseudonymous shell.
+      this.db
+        .prepare(
+          `UPDATE audit_events SET detail = json_set(detail, '$.name', ?)
+            WHERE organization_id = ?
+              AND json_extract(detail, '$.applicationId') = ?
+              AND json_extract(detail, '$.name') IS NOT NULL`,
+        )
+        .run(pseudonym, input.organizationId, application.id);
+      this.audit(input.organizationId, input.actor, 'application.deleted', {
+        applicationId: application.id,
+        pseudonym,
+        enrollmentsRemoved,
+        secretsRevoked: Number(secrets.changes),
+        refreshTokensRevoked,
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return this.view(input.organizationId, application.id);
+  }
+
+  /**
    * Resolve a Client ID at the authorization boundary, with the Organization
    * it belongs to and the exact-match redirect URI list. Returns undefined for
    * an unknown client; the caller decides how to refuse without leaking which
@@ -167,7 +300,8 @@ export class ApplicationsService {
   findForAuthorization(clientId: string): AuthorizeClient | undefined {
     const row = this.db
       .prepare(
-        `SELECT a.id, a.client_id, a.organization_id, a.name, a.type, o.name AS organization_name
+        `SELECT a.id, a.client_id, a.organization_id, a.name, a.type, a.disabled_at, a.deleted_at,
+                o.name AS organization_name
          FROM applications a JOIN organizations o ON o.id = a.organization_id
          WHERE a.client_id = ?`,
       )
@@ -179,6 +313,8 @@ export class ApplicationsService {
           organization_name: string;
           name: string;
           type: ApplicationType;
+          disabled_at: string | null;
+          deleted_at: string | null;
         }
       | undefined;
     if (!row) return undefined;
@@ -195,6 +331,7 @@ export class ApplicationsService {
       organizationName: row.organization_name,
       name: row.name,
       type: row.type,
+      enabled: this.isUsable(row),
       redirectUris: redirectUris.map((entry) => entry.uri),
     };
   }
@@ -203,10 +340,17 @@ export class ApplicationsService {
   findClient(clientId: string): ClientRecord | undefined {
     const row = this.db
       .prepare(
-        'SELECT id, client_id, organization_id, type FROM applications WHERE client_id = ?',
+        'SELECT id, client_id, organization_id, type, disabled_at, deleted_at FROM applications WHERE client_id = ?',
       )
       .get(clientId) as
-      | { id: string; client_id: string; organization_id: string; type: ApplicationType }
+      | {
+          id: string;
+          client_id: string;
+          organization_id: string;
+          type: ApplicationType;
+          disabled_at: string | null;
+          deleted_at: string | null;
+        }
       | undefined;
     if (!row) return undefined;
     return {
@@ -214,6 +358,7 @@ export class ApplicationsService {
       clientId: row.client_id,
       organizationId: row.organization_id,
       type: row.type,
+      enabled: this.isUsable(row),
     };
   }
 
@@ -447,10 +592,15 @@ export class ApplicationsService {
     };
   }
 
+  /** Whether the Application may mint new authentication and tokens at all. */
+  private isUsable(row: { disabled_at: string | null; deleted_at: string | null }): boolean {
+    return row.disabled_at === null && row.deleted_at === null;
+  }
+
   private requireApplication(organizationId: string, id: string): ApplicationRow {
     const row = this.db
       .prepare(
-        'SELECT id, name, type, client_id, created_at FROM applications WHERE id = ? AND organization_id = ?',
+        'SELECT id, name, type, client_id, disabled_at, deleted_at, created_at FROM applications WHERE id = ? AND organization_id = ?',
       )
       .get(id, organizationId) as ApplicationRow | undefined;
     if (!row) throw new NotFoundException('no such Application');
@@ -477,6 +627,10 @@ export class ApplicationsService {
       name: row.name,
       type: row.type,
       clientId: row.client_id,
+      state: applicationState({
+        disabled: row.disabled_at !== null,
+        deleted: row.deleted_at !== null,
+      }),
       createdAt: row.created_at,
       secrets: secrets.map((secret) => ({
         id: secret.id,

@@ -18,6 +18,8 @@ export interface AuthenticatedClient {
   clientId: string;
   organizationId: string;
   type: ApplicationType;
+  /** False while the Application is Disabled, or once it is Deleted. */
+  enabled: boolean;
   method: ClientAuthenticationMethod;
 }
 
