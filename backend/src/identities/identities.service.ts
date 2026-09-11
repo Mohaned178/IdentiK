@@ -1,5 +1,11 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { hashPassword, hashToken, randomToken } from '../crypto/password';
+import {
+  DUMMY_PASSWORD_HASH,
+  hashPassword,
+  hashToken,
+  randomToken,
+  verifyPassword,
+} from '../crypto/password';
 import { parseTtlMs } from '../config/env';
 import { LinkBaseService } from '../config/link-base.service';
 import { MailService } from '../mail/mail.service';
@@ -18,6 +24,16 @@ interface IdentityRow {
   email: string;
   email_verified: number;
 }
+
+export interface AuthenticatedIdentity {
+  id: string;
+  organizationId: string;
+  email: string;
+}
+
+export type IdentityAuthentication =
+  | { ok: true; identity: AuthenticatedIdentity }
+  | { ok: false; reason: 'invalid' | 'unverified' | 'suspended'; identityId?: string };
 
 /**
  * The End-User sign-up boundary (ADR-0011): sign-up creates an inert
@@ -62,6 +78,53 @@ export class IdentitiesService {
       .get() as { id: string; name: string } | undefined;
     if (!row) throw new NotFoundException('no organization exists on this Instance');
     return row;
+  }
+
+  /**
+   * Verify a credential at the authorization boundary (ADR-0011, ADR-0006).
+   * Failure is uniform — unknown email, wrong password, unverified
+   * reservation, and suspended Identity are indistinguishable to the caller;
+   * the difference lives only in the audit detail. Verification always
+   * performs the hash work, so timing does not reveal whether the email
+   * exists. A suspended Identity is refused even with the correct password,
+   * and recovery can never un-suspend it.
+   */
+  async authenticate(
+    organizationId: string,
+    email: string,
+    password: string,
+  ): Promise<IdentityAuthentication> {
+    const normalized = email.trim().toLowerCase();
+    const row = this.db
+      .prepare(
+        `SELECT id, organization_id, email, email_verified, suspended_at, password_hash
+         FROM identities WHERE organization_id = ? AND email = ?`,
+      )
+      .get(organizationId, normalized) as
+      | {
+          id: string;
+          organization_id: string;
+          email: string;
+          email_verified: number;
+          suspended_at: string | null;
+          password_hash: string;
+        }
+      | undefined;
+
+    const passwordOk = await verifyPassword(password, row?.password_hash ?? DUMMY_PASSWORD_HASH);
+    if (!row || !passwordOk) {
+      return { ok: false, reason: 'invalid', ...(row ? { identityId: row.id } : {}) };
+    }
+    if (row.suspended_at !== null) {
+      return { ok: false, reason: 'suspended', identityId: row.id };
+    }
+    if (row.email_verified === 0) {
+      return { ok: false, reason: 'unverified', identityId: row.id };
+    }
+    return {
+      ok: true,
+      identity: { id: row.id, organizationId: row.organization_id, email: row.email },
+    };
   }
 
   async signUp(input: { email: string; password: string }): Promise<void> {

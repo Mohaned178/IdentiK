@@ -25,10 +25,8 @@ export function validateRedirectUri(value: string): string {
     );
   }
 
-  let parsed: URL;
-  try {
-    parsed = new URL(candidate);
-  } catch {
+  const parsed = parseAbsoluteUrl(candidate);
+  if (!parsed) {
     throw new BadRequestException('a redirect URI must be a valid absolute URL');
   }
 
@@ -53,6 +51,24 @@ export function validateRedirectUri(value: string): string {
   // An empty query (`...?`) is not a component with content; drop the
   // delimiter so it cannot pose as a distinct match target.
   return parsed.search === '' && parsed.href.endsWith('?') ? parsed.href.slice(0, -1) : parsed.href;
+}
+
+/**
+ * The canonical form of a submitted redirect URI, or null when it is not an
+ * absolute URL. Exact matching compares these canonical forms, so the
+ * authorization endpoint (ticket 09) shares this one definition of what a
+ * stored URI is.
+ */
+export function canonicalRedirectUri(value: string): string | null {
+  return parseAbsoluteUrl(value)?.href ?? null;
+}
+
+function parseAbsoluteUrl(value: string): URL | null {
+  try {
+    return new URL(value.trim());
+  } catch {
+    return null;
+  }
 }
 
 /** localhost, the whole 127.0.0.0/8 loopback block, and IPv6 ::1. */

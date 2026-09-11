@@ -13,13 +13,14 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
-import type { Request, Response, CookieOptions } from 'express';
+import type { Request, Response } from 'express';
 import { IsEmail, IsIn, IsOptional, IsString, MinLength } from 'class-validator';
 import { ADMIN_SESSION_TTL_MS, AdministratorsService } from './administrators.service';
 import { AdministratorGuard } from './administrator.guard';
 import { OwnerGuard } from './owner.guard';
 import { InvitationsService } from './invitations.service';
 import { LinkBaseService } from '../config/link-base.service';
+import { cookieToken, sessionCookieOptions } from '../config/cookies';
 
 class SignInBody {
   @IsEmail()
@@ -60,13 +61,7 @@ export interface AdministratorRequest extends Request {
 }
 
 export function sessionTokenFrom(req: Request): string | null {
-  const raw = req.headers.cookie;
-  if (!raw || typeof raw !== 'string') return null;
-  for (const part of raw.split(';')) {
-    const [name, ...rest] = part.trim().split('=');
-    if (name === SESSION_COOKIE) return rest.join('=');
-  }
-  return null;
+  return cookieToken(req, SESSION_COOKIE);
 }
 
 @Controller('api/administrators')
@@ -85,7 +80,7 @@ export class AdministratorsController {
       throw new UnauthorizedException();
     }
     res.cookie(SESSION_COOKIE, result.session.token, {
-      ...this.sessionCookieOptions(),
+      ...sessionCookieOptions(this.links.resolve()),
       maxAge: ADMIN_SESSION_TTL_MS,
     });
     return {
@@ -102,7 +97,7 @@ export class AdministratorsController {
     if (token) {
       await this.administrators.signOut(token);
     }
-    res.clearCookie(SESSION_COOKIE, this.sessionCookieOptions());
+    res.clearCookie(SESSION_COOKIE, sessionCookieOptions(this.links.resolve()));
   }
 
   @Get('session')
@@ -174,16 +169,4 @@ export class AdministratorsController {
     };
   }
 
-  /**
-   * Derived from the deployment's configured base URL, never the request, so
-   * the flag matches the scheme the Instance is actually served under.
-   */
-  private sessionCookieOptions(): CookieOptions {
-    return {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: this.links.resolve().startsWith('https'),
-      path: '/',
-    };
-  }
 }

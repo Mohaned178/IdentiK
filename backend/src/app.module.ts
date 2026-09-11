@@ -7,6 +7,7 @@ import { BootstrapModule } from './bootstrap/bootstrap.module';
 import { AdministratorsModule } from './administrators/administrators.module';
 import { IdentitiesModule } from './identities/identities.module';
 import { ApplicationsModule } from './applications/applications.module';
+import { OidcModule } from './oidc/oidc.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { ApplicationsModule } from './applications/applications.module';
     AdministratorsModule,
     IdentitiesModule,
     ApplicationsModule,
+    OidcModule,
   ],
 })
 export class AppModule {}

@@ -37,6 +37,17 @@ export interface ApplicationView {
   redirectUris: RedirectUriView[];
 }
 
+/** What the authorization endpoint needs to know about a client. */
+export interface AuthorizeClient {
+  id: string;
+  clientId: string;
+  organizationId: string;
+  organizationName: string;
+  name: string;
+  type: ApplicationType;
+  redirectUris: string[];
+}
+
 interface ApplicationRow {
   id: string;
   name: string;
@@ -136,6 +147,47 @@ export class ApplicationsService {
 
   find(organizationId: string, id: string): ApplicationView {
     return this.view(organizationId, id);
+  }
+
+  /**
+   * Resolve a Client ID at the authorization boundary, with the Organization
+   * it belongs to and the exact-match redirect URI list. Returns undefined for
+   * an unknown client; the caller decides how to refuse without leaking which
+   * part was wrong.
+   */
+  findForAuthorization(clientId: string): AuthorizeClient | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT a.id, a.client_id, a.organization_id, a.name, a.type, o.name AS organization_name
+         FROM applications a JOIN organizations o ON o.id = a.organization_id
+         WHERE a.client_id = ?`,
+      )
+      .get(clientId) as
+      | {
+          id: string;
+          client_id: string;
+          organization_id: string;
+          organization_name: string;
+          name: string;
+          type: ApplicationType;
+        }
+      | undefined;
+    if (!row) return undefined;
+
+    const redirectUris = this.db
+      .prepare(
+        'SELECT uri FROM redirect_uris WHERE application_id = ? ORDER BY created_at, id',
+      )
+      .all(row.id) as unknown as Array<{ uri: string }>;
+    return {
+      id: row.id,
+      clientId: row.client_id,
+      organizationId: row.organization_id,
+      organizationName: row.organization_name,
+      name: row.name,
+      type: row.type,
+      redirectUris: redirectUris.map((entry) => entry.uri),
+    };
   }
 
   /**

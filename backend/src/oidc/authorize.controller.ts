@@ -1,0 +1,106 @@
+import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
+import type { Request, Response } from 'express';
+import { IsEmail, IsString, MinLength } from 'class-validator';
+import { LinkBaseService } from '../config/link-base.service';
+import { sessionCookieOptions } from '../config/cookies';
+import { SSO_COOKIE, ssoTokenFrom } from '../sessions/sso-cookie';
+import { SessionsService } from '../sessions/sessions.service';
+import {
+  AuthorizationRequest,
+  AuthorizeOutcome,
+  AuthorizeService,
+} from './authorize.service';
+
+class SignInBody {
+  @IsEmail()
+  email!: string;
+
+  @IsString()
+  @MinLength(1)
+  password!: string;
+}
+
+/**
+ * The authorization endpoint (ADR-0015, ADR-0018) and the hosted sign-in
+ * page's data. GET validates the request and either redirects a live Session
+ * straight back with a code or serves the page's data; POST is the page's form
+ * target. This controller owns the response deliberately: an authorization
+ * endpoint's status and Location are protocol, not decoration.
+ */
+@Controller('api/oidc')
+export class AuthorizeController {
+  constructor(
+    private readonly authorize: AuthorizeService,
+    private readonly sessions: SessionsService,
+    private readonly links: LinkBaseService,
+  ) {}
+
+  @Get('authorize')
+  begin(@Req() req: Request, @Res() res: Response): void {
+    this.render(this.authorize.begin(readAuthorizationRequest(req), ssoTokenFrom(req)), res);
+  }
+
+  @Post('authorize')
+  @HttpCode(200)
+  async signIn(
+    @Req() req: Request,
+    @Body() body: SignInBody,
+    @Res() res: Response,
+  ): Promise<void> {
+    const outcome = await this.authorize.signIn(
+      readAuthorizationRequest(req),
+      body,
+      ssoTokenFrom(req),
+      {
+        source: req.ip ?? null,
+        userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+      },
+    );
+
+    if (outcome.kind === 'invalid-credentials') {
+      res.status(401).json({ error: 'invalid_credentials' });
+      return;
+    }
+    if (outcome.kind === 'redirect-with-session') {
+      res.cookie(SSO_COOKIE, outcome.sessionToken, {
+        ...sessionCookieOptions(this.links.resolve()),
+        maxAge: this.sessions.ttlMs(),
+      });
+      res.redirect(302, outcome.location);
+      return;
+    }
+    this.render(outcome, res);
+  }
+
+  private render(outcome: AuthorizeOutcome, res: Response): void {
+    if (outcome.kind === 'page') {
+      res.json(outcome.page);
+      return;
+    }
+    if (outcome.kind === 'redirect') {
+      res.redirect(302, outcome.location);
+      return;
+    }
+    res.status(outcome.status).json({
+      error: outcome.error,
+      error_description: outcome.errorDescription,
+    });
+  }
+}
+
+/** The authorization request travels in the query, exactly like OIDC expects. */
+function readAuthorizationRequest(req: Request): AuthorizationRequest {
+  const query = req.query as Record<string, unknown>;
+  const text = (value: unknown): string | undefined =>
+    typeof value === 'string' ? value : undefined;
+  return {
+    clientId: text(query.client_id),
+    redirectUri: text(query.redirect_uri),
+    responseType: text(query.response_type),
+    scope: text(query.scope),
+    state: text(query.state),
+    nonce: text(query.nonce),
+    codeChallenge: text(query.code_challenge),
+    codeChallengeMethod: text(query.code_challenge_method),
+  };
+}
