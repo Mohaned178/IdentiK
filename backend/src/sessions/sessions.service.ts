@@ -30,7 +30,9 @@ export type SessionRevocationReason =
   | 'account_center'
   | 'sign_out'
   | 'suspension'
-  | 'administrator';
+  | 'administrator'
+  | 'password_change'
+  | 'password_reset';
 
 interface SessionRow {
   id: string;
@@ -45,6 +47,21 @@ interface SessionRow {
   email_verified: number;
   suspended_at: string | null;
   sessions_revoked_at: string | null;
+}
+
+/** The columns a revoke-many unit needs to kill a Session and its lineage. */
+interface SessionRef {
+  id: string;
+  identity_id: string;
+  organization_id: string;
+}
+
+/** The inputs every revoke-many cascade carries. */
+interface RevokeManyInput {
+  identityId: string;
+  organizationId: string;
+  reason: SessionRevocationReason;
+  actor: string;
 }
 
 const SESSION_ROW_COLUMNS = `s.id, s.identity_id, s.organization_id, s.user_agent, s.created_at,
@@ -199,23 +216,35 @@ export class SessionsService {
    * platform Session is Organization-scoped, so any suspension that loses an
    * Identity at platform scope kills it wherever it was created.
    */
-  revokeAllForIdentity(input: {
-    identityId: string;
-    organizationId: string;
-    reason: SessionRevocationReason;
-    actor: string;
-  }): number {
+  revokeAllForIdentity(input: RevokeManyInput): number {
     const rows = this.db
       .prepare(
         `SELECT id, identity_id, organization_id FROM sessions
          WHERE identity_id = ? AND organization_id = ? AND revoked_at IS NULL`,
       )
-      .all(input.identityId, input.organizationId) as unknown as Array<{
-        id: string;
-        identity_id: string;
-        organization_id: string;
-      }>;
+      .all(input.identityId, input.organizationId) as unknown as SessionRef[];
+    return this.revokeRows(rows, input);
+  }
 
+  /**
+   * Revoke every Session of one Identity *except* the one where the change
+   * happened (ADR-0013): the password-change cascade. The kept Session's SSO
+   * cookie and its descendant refresh tokens survive; every other device dies
+   * with its lineage in the same unit. The kept id is looked up inside the
+   * Identity's own rows, so a foreign id kept nothing extra alive.
+   */
+  revokeOthersForIdentity(input: RevokeManyInput & { keepSessionId: string }): number {
+    const rows = this.db
+      .prepare(
+        `SELECT id, identity_id, organization_id FROM sessions
+         WHERE identity_id = ? AND organization_id = ? AND revoked_at IS NULL AND id != ?`,
+      )
+      .all(input.identityId, input.organizationId, input.keepSessionId) as unknown as SessionRef[];
+    return this.revokeRows(rows, input);
+  }
+
+  /** One revoke-many unit: every row dies, one collection audit event lives. */
+  private revokeRows(rows: SessionRef[], input: RevokeManyInput): number {
     this.db.exec('BEGIN');
     try {
       for (const row of rows) {
@@ -241,7 +270,7 @@ export class SessionsService {
    * tokens outlive it. Callers own the transaction.
    */
   private revokeRow(
-    row: { id: string; identity_id: string; organization_id: string },
+    row: SessionRef,
     reason: SessionRevocationReason,
     actor: string,
   ): void {

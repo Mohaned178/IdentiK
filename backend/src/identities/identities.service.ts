@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import {
   DUMMY_PASSWORD_HASH,
   hashPassword,
@@ -26,10 +26,14 @@ interface IdentityRow {
   email_verified: number;
 }
 
-interface SuspensionRow {
+/** The state levers' Organization-scoped target: enough to find, name, and
+ * gate the Identity, and nothing that authenticates. */
+interface IdentityTarget {
   id: string;
   organization_id: string;
+  organization_name: string;
   email: string;
+  email_verified: number;
 }
 
 export interface AuthenticatedIdentity {
@@ -261,6 +265,111 @@ export class IdentitiesService {
   }
 
   /**
+   * The Account Center's self-service password change (ADR-0013, ADR-0018).
+   * The current credential must be presented — an authenticated Session alone
+   * does not authorize rewriting the credential its owner holds. On success,
+   * the Session where the change happened survives and every other Session
+   * dies with its descendant refresh tokens: the stolen-laptop cascade.
+   * Returns false when the current password is wrong; that attempt is audited
+   * even though nothing changed, because a wrong credential presented by a
+   * live Session is exactly what a stolen device looks like. The cascade runs
+   * before the credential lands, so a failure between them over-revokes
+   * rather than leaving a changed password with live Sessions (ADR-0013).
+   * Public pages never see this path; only the End User's own Session guard
+   * does. This is the self-service counterpart of `resetPassword`, which is
+   * mailbox-proof recovery rather than a presented-credential change.
+   */
+  async changePassword(input: {
+    identityId: string;
+    currentSessionId: string;
+    currentPassword: string;
+    newPassword: string;
+  }): Promise<boolean> {
+    const identity = this.db
+      .prepare(
+        'SELECT id, organization_id, email, password_hash FROM identities WHERE id = ?',
+      )
+      .get(input.identityId) as
+      | { id: string; organization_id: string; email: string; password_hash: string }
+      | undefined;
+    if (!identity) return false;
+
+    const currentOk = await verifyPassword(input.currentPassword, identity.password_hash);
+    if (!currentOk) {
+      this.audit(identity.organization_id, 'identity.password_change.failed', {
+        identityId: identity.id,
+        email: identity.email,
+        reason: 'invalid_current_password',
+      });
+      return false;
+    }
+
+    const passwordHash = await hashPassword(input.newPassword);
+    const otherSessionsRevoked = this.sessions.revokeOthersForIdentity({
+      identityId: identity.id,
+      organizationId: identity.organization_id,
+      keepSessionId: input.currentSessionId,
+      reason: 'password_change',
+      actor: 'end-user',
+    });
+    this.db
+      .prepare('UPDATE identities SET password_hash = ? WHERE id = ?')
+      .run(passwordHash, identity.id);
+
+    this.audit(identity.organization_id, 'identity.password_change.completed', {
+      identityId: identity.id,
+      email: identity.email,
+      otherSessionsRevoked,
+    });
+    return true;
+  }
+
+  /**
+   * The Administrator's force-reset lever (ADR-0008): a state lever that
+   * never sets, reads, or displays a credential. It sends ticket 04's
+   * password-reset link to the Identity's existing verified email and revokes
+   * every Session, so the devices that exist at the click are evicted.
+   * Recovery completes through the same mailbox-proof flow as forgot-password:
+   * the link sets the new credential, and completion revokes every Session
+   * again through the reset watermark — including any Session created between
+   * the lever and the click. The mail goes out before the cascade, so a
+   * failure cannot leave every device dead with no recovery link delivered.
+   * A suspended Identity still receives the mail and may complete the reset;
+   * the suspension gate keeps authentication refused (ADR-0006), so the lever
+   * can never restore access by itself.
+   */
+  async forcePasswordReset(input: {
+    organizationId: string;
+    identityId: string;
+    actor: string;
+  }): Promise<void> {
+    const identity = this.requireIdentity(input.organizationId, input.identityId);
+    // The lever's premise is an Identity with a proven mailbox: an Unverified
+    // Reservation has no verified email to deliver to, and "force password
+    // reset" would be a contradiction — there is no credential its owner has
+    // ever held. Reservations heal through the mailbox-proof flows instead.
+    if (identity.email_verified === 0) {
+      throw new ConflictException('the Identity has no verified email');
+    }
+
+    const token = this.issueToken(identity.id, 'password_reset', this.resetTtlMs());
+    // The lever's pull is recorded before delivery, like the self-service
+    // request: an Administrator's security action must be auditable even when
+    // the transport fails afterwards.
+    this.adminAudit(identity.organization_id, input.actor, 'identity.password_reset.forced', {
+      identityId: identity.id,
+      email: identity.email,
+    });
+    await this.sendPasswordResetEmail(identity.email, identity.organization_name, token);
+    this.sessions.revokeAllForIdentity({
+      identityId: identity.id,
+      organizationId: identity.organization_id,
+      reason: 'password_reset',
+      actor: input.actor,
+    });
+  }
+
+  /**
    * Suspend an Identity Organization-wide (ADR-0006): new authentication is
    * refused at the credential gate, and every live platform Session dies in
    * the same action, carrying its descendant refresh tokens with it. The
@@ -377,13 +486,15 @@ export class IdentitiesService {
       .get(identityId) as IdentityRow | undefined;
   }
 
-  /** The suspension levers' Organization-scoped target, or a 404. */
-  private requireIdentity(organizationId: string, identityId: string): SuspensionRow {
+  /** The state levers' Organization-scoped target, or a 404. */
+  private requireIdentity(organizationId: string, identityId: string): IdentityTarget {
     const row = this.db
       .prepare(
-        'SELECT id, organization_id, email FROM identities WHERE id = ? AND organization_id = ?',
+        `SELECT i.id, i.organization_id, o.name AS organization_name, i.email, i.email_verified
+         FROM identities i JOIN organizations o ON o.id = i.organization_id
+         WHERE i.id = ? AND i.organization_id = ?`,
       )
-      .get(identityId, organizationId) as SuspensionRow | undefined;
+      .get(identityId, organizationId) as IdentityTarget | undefined;
     if (!row) throw new NotFoundException('no such Identity');
     return row;
   }

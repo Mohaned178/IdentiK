@@ -1,5 +1,7 @@
 import {
+  Body,
   Controller,
+  ForbiddenException,
   Get,
   HttpCode,
   NotFoundException,
@@ -10,13 +12,24 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { IsString, MinLength } from 'class-validator';
 import type { Request, Response } from 'express';
 import { sessionCookieOptions } from '../config/cookies';
 import { LinkBaseService } from '../config/link-base.service';
+import { IdentitiesService } from '../identities/identities.service';
 import { EndUserSessionGuard, type EndUserRequest } from '../sessions/end-user.guard';
 import { SSO_COOKIE, ssoTokenFrom } from '../sessions/sso-cookie';
 import { SessionsService } from '../sessions/sessions.service';
 import { AccountCenterService, AccountCenterView } from './account-center.service';
+
+class ChangePasswordBody {
+  @IsString()
+  currentPassword!: string;
+
+  @IsString()
+  @MinLength(8)
+  newPassword!: string;
+}
 
 /**
  * The platform-hosted Account Center (ADR-0018): the End User's self-service
@@ -25,12 +38,15 @@ import { AccountCenterService, AccountCenterView } from './account-center.servic
  * Revoking a Session is the whole revocation story (ADR-0013): the cookie
  * dies, every descendant refresh token is revoked, and the event lands in the
  * audit surface. Revoking the current Session also clears the browser's
- * cookie, so it is indistinguishable from signing out.
+ * cookie, so it is indistinguishable from signing out. Password change is the
+ * same story with one exception: the Session where the change happens
+ * survives (ADR-0013).
  */
 @Controller('api/account-center')
 export class AccountCenterController {
   constructor(
     private readonly accountCenter: AccountCenterService,
+    private readonly identities: IdentitiesService,
     private readonly sessions: SessionsService,
     private readonly links: LinkBaseService,
   ) {}
@@ -41,6 +57,32 @@ export class AccountCenterController {
     const session = req.endUserSession;
     if (!session) throw new UnauthorizedException();
     return this.accountCenter.view(session);
+  }
+
+  /**
+   * Change the requesting Identity's own password (ADR-0008, ADR-0013): the
+   * current credential proves the change is the owner's, the device that
+   * changed it stays signed in, and every other device is evicted with its
+   * refresh lineage. A wrong current password is a clean 403 and changes
+   * nothing.
+   */
+  @Post('password')
+  @HttpCode(200)
+  @UseGuards(EndUserSessionGuard)
+  async changePassword(
+    @Req() req: EndUserRequest,
+    @Body() body: ChangePasswordBody,
+  ): Promise<{ status: 'password-changed' }> {
+    const session = req.endUserSession;
+    if (!session) throw new UnauthorizedException();
+    const changed = await this.identities.changePassword({
+      identityId: session.identityId,
+      currentSessionId: session.id,
+      currentPassword: body.currentPassword,
+      newPassword: body.newPassword,
+    });
+    if (!changed) throw new ForbiddenException('the current password is incorrect');
+    return { status: 'password-changed' };
   }
 
   /**

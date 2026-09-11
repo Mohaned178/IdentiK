@@ -89,4 +89,24 @@ export class IdentitiesController {
       }),
     };
   }
+
+  /**
+   * Force password reset: the mailbox gets the reset link and every Session
+   * dies now. The Administrator never sets, reads, or sees a credential — the
+   * Identity's own mailbox proves control and chooses the password (ADR-0008).
+   */
+  @Post(':id/force-password-reset')
+  @HttpCode(200)
+  async forcePasswordReset(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+  ): Promise<{ status: 'reset-sent' }> {
+    const session = requireAdministratorSession(req);
+    await this.identities.forcePasswordReset({
+      organizationId: session.organizationId,
+      identityId: id,
+      actor: session.administratorId,
+    });
+    return { status: 'reset-sent' };
+  }
 }
