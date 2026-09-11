@@ -1,10 +1,30 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { identityState, type IdentityState } from '../identities/identity-state';
 import { recordAuditEvent } from '../storage/audit';
 import { isUniqueViolation } from '../storage/sqlite';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 
 export type EnrollmentGate = { allowed: true } | { allowed: false; reason: 'suspended' };
+
+/** One row of "this Application's people" (ADR-0008, ADR-0014). */
+export interface ApplicationEnrollmentView {
+  identityId: string;
+  email: string;
+  emailVerified: boolean;
+  state: IdentityState;
+  enrolledAt: string;
+  suspended: boolean;
+}
+
+interface ApplicationEnrollmentRow {
+  identity_id: string;
+  email: string;
+  email_verified: number;
+  identity_suspended_at: string | null;
+  created_at: string;
+  suspended_at: string | null;
+}
 
 /**
  * An Enrollment is an Identity's membership in one Application, created
@@ -55,6 +75,44 @@ export class EnrollmentsService {
       },
     });
     return { allowed: true };
+  }
+
+  /**
+   * Every Enrollment of one Application, Organization-scoped: "Zotac's
+   * people" as a real list (ADR-0014). Identity state and enrollment state are
+   * both present because they are independent levers (ADR-0006). The
+   * Application must exist in this Organization first, so an unknown or
+   * foreign id is a 404, never a misleading empty list.
+   */
+  listForApplication(
+    organizationId: string,
+    applicationId: string,
+  ): ApplicationEnrollmentView[] {
+    const application = this.db
+      .prepare('SELECT 1 FROM applications WHERE id = ? AND organization_id = ?')
+      .get(applicationId, organizationId);
+    if (!application) throw new NotFoundException('no such Application');
+
+    const rows = this.db
+      .prepare(
+        `SELECT e.identity_id, e.created_at, e.suspended_at,
+                i.email, i.email_verified, i.suspended_at AS identity_suspended_at
+         FROM enrollments e JOIN identities i ON i.id = e.identity_id
+         WHERE e.application_id = ? AND i.organization_id = ?
+         ORDER BY e.created_at, e.id`,
+      )
+      .all(applicationId, organizationId) as unknown as ApplicationEnrollmentRow[];
+    return rows.map((row) => ({
+      identityId: row.identity_id,
+      email: row.email,
+      emailVerified: row.email_verified === 1,
+      state: identityState({
+        emailVerified: row.email_verified === 1,
+        suspended: row.identity_suspended_at !== null,
+      }),
+      enrolledAt: row.created_at,
+      suspended: row.suspended_at !== null,
+    }));
   }
 
   private find(

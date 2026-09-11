@@ -15,6 +15,8 @@ export interface AuditEventView {
 export interface AuditFilters {
   actor?: string;
   kind?: string;
+  /** The Identity an event is about, as recorded in its detail (ADR-0008). */
+  identityId?: string;
   from?: string;
   to?: string;
 }
@@ -48,6 +50,7 @@ export class AuditService {
   list(organizationId: string, filters: AuditFilters): AuditEventView[] {
     const actor = this.normalizeFilter(filters.actor);
     const kind = this.normalizeFilter(filters.kind);
+    const identityId = this.normalizeFilter(filters.identityId);
     const from = this.instantFilter(filters.from, 'from');
     const to = this.instantFilter(filters.to, 'to');
     if (from && to && from > to) {
@@ -68,6 +71,10 @@ export class AuditService {
       params.push(actor, actor);
     }
     add('e.kind = ?', kind);
+    // Identity linkage lives in the event detail; the durable key is the
+    // identityId, never the email (which anonymization destroys and reuse
+    // recycles — ADR-0007).
+    add("json_extract(e.detail, '$.identityId') = ?", identityId);
     add('e.occurred_at >= ?', from);
     add('e.occurred_at <= ?', to);
 

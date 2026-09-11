@@ -9,13 +9,19 @@ import {
   Patch,
   Post,
   Req,
-  UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
 import { IsIn, IsString, MinLength } from 'class-validator';
 import { AdministratorGuard } from '../administrators/administrator.guard';
 import { OwnerGuard } from '../administrators/owner.guard';
-import type { AdministratorRequest } from '../administrators/administrators.controller';
+import {
+  requireAdministratorSession,
+  type AdministratorRequest,
+} from '../administrators/administrators.controller';
+import {
+  EnrollmentsService,
+  type ApplicationEnrollmentView,
+} from '../enrollments/enrollments.service';
 import {
   ApplicationsService,
   type ApplicationType,
@@ -56,14 +62,17 @@ class RedirectUriBody {
 @Controller('api/applications')
 @UseGuards(AdministratorGuard)
 export class ApplicationsController {
-  constructor(private readonly applications: ApplicationsService) {}
+  constructor(
+    private readonly applications: ApplicationsService,
+    private readonly enrollments: EnrollmentsService,
+  ) {}
 
   @Post()
   register(
     @Req() req: AdministratorRequest,
     @Body() body: RegisterApplicationBody,
   ): { application: ApplicationView; clientSecret: string | null } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     if (body.type === 'web' && session.role !== 'owner') {
       throw new ForbiddenException(
         'registering a Web Application issues a Client Secret and is reserved to Owners',
@@ -79,7 +88,7 @@ export class ApplicationsController {
 
   @Get()
   list(@Req() req: AdministratorRequest): { applications: ApplicationView[] } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return { applications: this.applications.list(session.organizationId) };
   }
 
@@ -88,8 +97,23 @@ export class ApplicationsController {
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
   ): { application: ApplicationView } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return { application: this.applications.find(session.organizationId, id) };
+  }
+
+  /**
+   * The per-Application view (ADR-0008, ADR-0014): this Application's
+   * Enrollments, and only its own.
+   */
+  @Get(':id/enrollments')
+  enrollmentList(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+  ): { enrollments: ApplicationEnrollmentView[] } {
+    const session = requireAdministratorSession(req);
+    return {
+      enrollments: this.enrollments.listForApplication(session.organizationId, id),
+    };
   }
 
   @Post(':id/secrets')
@@ -99,7 +123,7 @@ export class ApplicationsController {
     @Param('id') id: string,
     @Body() body: GenerateSecretBody,
   ): { secret: SecretView; clientSecret: string } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return this.applications.issueSecret({
       organizationId: session.organizationId,
       applicationId: id,
@@ -116,7 +140,7 @@ export class ApplicationsController {
     @Param('id') id: string,
     @Param('secretId') secretId: string,
   ): { secret: SecretView } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return {
       secret: this.applications.revokeSecret({
         organizationId: session.organizationId,
@@ -134,7 +158,7 @@ export class ApplicationsController {
     @Param('id') id: string,
     @Body() body: RedirectUriBody,
   ): { redirectUri: RedirectUriView } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return {
       redirectUri: this.applications.addRedirectUri({
         organizationId: session.organizationId,
@@ -153,7 +177,7 @@ export class ApplicationsController {
     @Param('uriId') uriId: string,
     @Body() body: RedirectUriBody,
   ): { redirectUri: RedirectUriView } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return {
       redirectUri: this.applications.updateRedirectUri({
         organizationId: session.organizationId,
@@ -172,7 +196,7 @@ export class ApplicationsController {
     @Param('id') id: string,
     @Param('uriId') uriId: string,
   ): { redirectUri: RedirectUriView } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return {
       redirectUri: this.applications.removeRedirectUri({
         organizationId: session.organizationId,
@@ -181,11 +205,5 @@ export class ApplicationsController {
         actor: session.administratorId,
       }),
     };
-  }
-
-  private requireSession(req: AdministratorRequest) {
-    const session = req.administratorSession;
-    if (!session) throw new UnauthorizedException();
-    return session;
   }
 }

@@ -14,6 +14,6 @@ import { MailModule } from '../mail/mail.module';
   imports: [StorageModule, MailModule],
   controllers: [AdministratorsController, OrganizationController, AuditController],
   providers: [AdministratorsService, AdministratorGuard, OwnerGuard, InvitationsService, AuditService],
-  exports: [AdministratorsService, AdministratorGuard, OwnerGuard],
+  exports: [AdministratorsService, AdministratorGuard, OwnerGuard, AuditService],
 })
 export class AdministratorsModule {}

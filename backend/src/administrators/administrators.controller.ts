@@ -64,6 +64,18 @@ export function sessionTokenFrom(req: Request): string | null {
   return cookieToken(req, SESSION_COOKIE);
 }
 
+/**
+ * The Administrator session the guard has established, or 401 if it is
+ * somehow absent. Shared so every guarded controller narrows the same way.
+ */
+export function requireAdministratorSession(
+  req: AdministratorRequest,
+): AdministratorSessionInfo {
+  const session = req.administratorSession;
+  if (!session) throw new UnauthorizedException();
+  return session;
+}
+
 @Controller('api/administrators')
 export class AdministratorsController {
   constructor(
@@ -103,8 +115,7 @@ export class AdministratorsController {
   @Get('session')
   @UseGuards(AdministratorGuard)
   session(@Req() req: AdministratorRequest): AdministratorSessionInfo {
-    if (!req.administratorSession) throw new UnauthorizedException();
-    return req.administratorSession;
+    return requireAdministratorSession(req);
   }
 
   /**
@@ -118,8 +129,7 @@ export class AdministratorsController {
     @Req() req: AdministratorRequest,
     @Body() body: InviteAdministratorBody,
   ): Promise<{ invitationId: string; email: string; role: AdministratorRole }> {
-    const session = req.administratorSession;
-    if (!session) throw new UnauthorizedException();
+    const session = requireAdministratorSession(req);
     return this.invitations.invite({
       organizationId: session.organizationId,
       invitedBy: session.administratorId,
