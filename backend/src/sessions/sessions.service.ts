@@ -32,7 +32,8 @@ export type SessionRevocationReason =
   | 'suspension'
   | 'administrator'
   | 'password_change'
-  | 'password_reset';
+  | 'password_reset'
+  | 'anonymization';
 
 interface SessionRow {
   id: string;
@@ -46,6 +47,7 @@ interface SessionRow {
   email: string;
   email_verified: number;
   suspended_at: string | null;
+  anonymized_at: string | null;
   sessions_revoked_at: string | null;
 }
 
@@ -66,7 +68,7 @@ interface RevokeManyInput {
 
 const SESSION_ROW_COLUMNS = `s.id, s.identity_id, s.organization_id, s.user_agent, s.created_at,
         s.last_seen_at, s.expires_at, s.revoked_at, i.email, i.email_verified, i.suspended_at,
-        i.sessions_revoked_at`;
+        i.anonymized_at, i.sessions_revoked_at`;
 
 /**
  * A Session is the durable record of one authentication of one Identity — the
@@ -324,6 +326,7 @@ export class SessionsService {
     if (row.revoked_at !== null) return false;
     if (row.expires_at <= now) return false;
     if (row.email_verified === 0) return false;
+    if (row.anonymized_at !== null) return false;
     if (row.suspended_at !== null) return false;
     if (row.sessions_revoked_at !== null && row.created_at <= row.sessions_revoked_at) return false;
     return true;

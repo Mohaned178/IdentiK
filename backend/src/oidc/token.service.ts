@@ -93,6 +93,7 @@ interface IdentityRow {
   email: string;
   email_verified: number;
   suspended_at: string | null;
+  anonymized_at: string | null;
 }
 
 /**
@@ -492,7 +493,7 @@ export class TokenService {
   private findIdentity(identityId: string): IdentityRow | undefined {
     return this.db
       .prepare(
-        'SELECT id, email, email_verified, suspended_at FROM identities WHERE id = ?',
+        'SELECT id, email, email_verified, suspended_at, anonymized_at FROM identities WHERE id = ?',
       )
       .get(identityId) as IdentityRow | undefined;
   }
@@ -509,9 +510,14 @@ export class TokenService {
       .get(hashToken(token)) as RefreshRow | undefined;
   }
 
-  /** An Identity is usable only while verified and not suspended (ADR-0006/0011). */
+  /** An Identity is usable only while verified, not suspended, not anonymized
+   * (ADR-0006/0011/0007). */
   private isLive(identity: IdentityRow): boolean {
-    return identity.email_verified === 1 && identity.suspended_at === null;
+    return (
+      identity.email_verified === 1 &&
+      identity.suspended_at === null &&
+      identity.anonymized_at === null
+    );
   }
 
   private accessTtlMs(): number {

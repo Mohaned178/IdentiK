@@ -1,4 +1,14 @@
-import { Controller, Get, HttpCode, Param, Post, Req, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { AdministratorGuard } from '../administrators/administrator.guard';
 import {
   requireAdministratorSession,
@@ -108,5 +118,36 @@ export class IdentitiesController {
       actor: session.administratorId,
     });
     return { status: 'reset-sent' };
+  }
+
+  /**
+   * Anonymize an Identity — the irreversible "delete" (ADR-0007). There is no
+   * undo, so the caller must send `{ confirm: true }`; without it the API
+   * states the irreversibility plainly and refuses. The old email is freed for
+   * a fresh, unlinked Identity, and the returned view is the pseudonymous
+   * shell the audit trail remains attributed to. Members may pull this lever
+   * with the rest of the state levers (ADR-0008).
+   */
+  @Post(':id/anonymize')
+  @HttpCode(200)
+  anonymize(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Body() body: { confirm?: unknown },
+  ): { identity: IdentityDetail } {
+    const session = requireAdministratorSession(req);
+    if (body?.confirm !== true) {
+      throw new BadRequestException(
+        'Anonymization is irreversible: it destroys the Identity\'s email, credentials, ' +
+          'Sessions, and Enrollments, and no path restores it. Resend with { "confirm": true } ' +
+          'to proceed.',
+      );
+    }
+    this.identities.anonymize({
+      organizationId: session.organizationId,
+      identityId: id,
+      actor: session.administratorId,
+    });
+    return { identity: this.directory.detail(session.organizationId, id) };
   }
 }

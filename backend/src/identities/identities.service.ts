@@ -14,6 +14,7 @@ import { recordAuditEvent } from '../storage/audit';
 import { isUniqueViolation } from '../storage/sqlite';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
+import { anonymizedHandle, anonymizedPseudonym } from './identity-state';
 
 type ReservationInsert = { created: true; identityId: string } | { created: false };
 
@@ -24,6 +25,7 @@ interface IdentityRow {
   organization_id: string;
   email: string;
   email_verified: number;
+  anonymized_at: string | null;
 }
 
 /** The state levers' Organization-scoped target: enough to find, name, and
@@ -34,6 +36,7 @@ interface IdentityTarget {
   organization_name: string;
   email: string;
   email_verified: number;
+  anonymized_at: string | null;
 }
 
 export interface AuthenticatedIdentity {
@@ -109,7 +112,7 @@ export class IdentitiesService {
     const normalized = email.trim().toLowerCase();
     const row = this.db
       .prepare(
-        `SELECT id, organization_id, email, email_verified, suspended_at, password_hash
+        `SELECT id, organization_id, email, email_verified, suspended_at, anonymized_at, password_hash
          FROM identities WHERE organization_id = ? AND email = ?`,
       )
       .get(organizationId, normalized) as
@@ -119,6 +122,7 @@ export class IdentitiesService {
           email: string;
           email_verified: number;
           suspended_at: string | null;
+          anonymized_at: string | null;
           password_hash: string;
         }
       | undefined;
@@ -126,6 +130,11 @@ export class IdentitiesService {
     const passwordOk = await verifyPassword(password, row?.password_hash ?? DUMMY_PASSWORD_HASH);
     if (!row || !passwordOk) {
       return { ok: false, reason: 'invalid', ...(row ? { identityId: row.id } : {}) };
+    }
+    // An anonymized shell is terminal: its destroyed credential can never open
+    // it again, whatever was presented.
+    if (row.anonymized_at !== null) {
+      return { ok: false, reason: 'invalid', identityId: row.id };
     }
     if (row.suspended_at !== null) {
       return { ok: false, reason: 'suspended', identityId: row.id };
@@ -172,7 +181,9 @@ export class IdentitiesService {
     if (!identityId) return false;
 
     const activated = this.db
-      .prepare('UPDATE identities SET email_verified = 1 WHERE id = ? AND email_verified = 0')
+      .prepare(
+        'UPDATE identities SET email_verified = 1 WHERE id = ? AND email_verified = 0 AND anonymized_at IS NULL',
+      )
       .run(identityId);
     if (activated.changes !== 1) return false;
 
@@ -240,7 +251,7 @@ export class IdentitiesService {
     if (!identityId) return false;
 
     const identity = this.findIdentityById(identityId);
-    if (!identity) return false;
+    if (!identity || identity.anonymized_at !== null) return false;
 
     const now = new Date().toISOString();
     this.db
@@ -287,12 +298,18 @@ export class IdentitiesService {
   }): Promise<boolean> {
     const identity = this.db
       .prepare(
-        'SELECT id, organization_id, email, password_hash FROM identities WHERE id = ?',
+        'SELECT id, organization_id, email, password_hash, anonymized_at FROM identities WHERE id = ?',
       )
       .get(input.identityId) as
-      | { id: string; organization_id: string; email: string; password_hash: string }
+      | {
+          id: string;
+          organization_id: string;
+          email: string;
+          password_hash: string;
+          anonymized_at: string | null;
+        }
       | undefined;
-    if (!identity) return false;
+    if (!identity || identity.anonymized_at !== null) return false;
 
     const currentOk = await verifyPassword(input.currentPassword, identity.password_hash);
     if (!currentOk) {
@@ -344,6 +361,9 @@ export class IdentitiesService {
     actor: string;
   }): Promise<void> {
     const identity = this.requireIdentity(input.organizationId, input.identityId);
+    if (identity.anonymized_at !== null) {
+      throw new ConflictException('the Identity has been anonymized');
+    }
     // The lever's premise is an Identity with a proven mailbox: an Unverified
     // Reservation has no verified email to deliver to, and "force password
     // reset" would be a contradiction — there is no credential its owner has
@@ -378,6 +398,9 @@ export class IdentitiesService {
    */
   suspend(input: { organizationId: string; identityId: string; actor: string }): void {
     const identity = this.requireIdentity(input.organizationId, input.identityId);
+    // An anonymized shell is terminal: there is no actor left to suspend, and
+    // the state must not be mutated (ADR-0007).
+    if (identity.anonymized_at !== null) return;
     const changed = this.db
       .prepare('UPDATE identities SET suspended_at = ? WHERE id = ? AND suspended_at IS NULL')
       .run(new Date().toISOString(), identity.id);
@@ -435,6 +458,81 @@ export class IdentitiesService {
   }
 
   /**
+   * Anonymize an Identity — what deletion means here (ADR-0007). The PII is
+   * destroyed irreversibly: the email, the credential, every Enrollment, and
+   * every pending mailbox-proof token. The Identity row survives only as a
+   * pseudonymous shell so audit history stays attributable by identityId; the
+   * old email, freed from the unique handle, is immediately reusable by a
+   * fresh unlinked Identity. The stored shell handle is non-deliverable and
+   * never matches a sign-up, so no mailbox-proof flow can revive it, and the
+   * credential gate refuses the shell forever. Idempotent: a second call is a
+   * true no-op.
+   */
+  anonymize(input: { organizationId: string; identityId: string; actor: string }): void {
+    const identity = this.requireIdentity(input.organizationId, input.identityId);
+    if (identity.anonymized_at !== null) return;
+
+    const now = new Date().toISOString();
+    const pseudonym = anonymizedPseudonym(identity.id);
+    const shellHandle = anonymizedHandle(identity.id);
+
+    // The terminal marker, the destruction of the shell's data, and the
+    // pseudonymization of the surviving trail are one unit. `anonymized_at IS
+    // NULL` is the race-free arbiter: a concurrent second anonymize rolls back
+    // without duplicating the event.
+    this.db.exec('BEGIN');
+    try {
+      const marked = this.db
+        .prepare(
+          `UPDATE identities
+              SET email = ?, password_hash = ?, email_verified = 0, suspended_at = NULL,
+                  anonymized_at = ?, sessions_revoked_at = ?
+            WHERE id = ? AND anonymized_at IS NULL`,
+        )
+        .run(shellHandle, DUMMY_PASSWORD_HASH, now, now, identity.id);
+      if (marked.changes !== 1) {
+        this.db.exec('ROLLBACK');
+        return;
+      }
+      this.db.prepare('DELETE FROM enrollments WHERE identity_id = ?').run(identity.id);
+      this.db.prepare('DELETE FROM identity_tokens WHERE identity_id = ?').run(identity.id);
+      this.db.prepare('DELETE FROM authorization_codes WHERE identity_id = ?').run(identity.id);
+      // The durable key is the identityId; the email in historical details is
+      // PII, so the old trail is re-attributed to the shell, never left naming
+      // the person. Scoped to this Identity's events and the End-User
+      // lifecycle kinds that carry only an email, so an Administrator
+      // invitation mentioning the same address is never rewritten.
+      this.db
+        .prepare(
+          `UPDATE audit_events SET detail = json_set(detail, '$.email', ?)
+            WHERE organization_id = ?
+              AND json_extract(detail, '$.email') = ?
+              AND (json_extract(detail, '$.identityId') = ?
+                   OR kind LIKE 'identity.%' OR kind LIKE 'enrollment.%')`,
+        )
+        .run(pseudonym, identity.organization_id, identity.email, identity.id);
+      this.adminAudit(identity.organization_id, input.actor, 'identity.anonymized', {
+        identityId: identity.id,
+        pseudonym,
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+
+    // The shell is already dead at every credential gate (`email_verified = 0`,
+    // `anonymized_at` set); the cascade records the device deaths and revokes
+    // the descendant refresh tokens explicitly.
+    this.sessions.revokeAllForIdentity({
+      identityId: identity.id,
+      organizationId: identity.organization_id,
+      reason: 'anonymization',
+      actor: input.actor,
+    });
+  }
+
+  /**
    * Creates the reservation, or reports the email is held. The UNIQUE
    * (organization_id, email) constraint is the race-free arbiter: any
    * violation (including a lost race) is the same already-registered refusal.
@@ -473,7 +571,7 @@ export class IdentitiesService {
   private findIdentityByEmail(organizationId: string, email: string): IdentityRow | undefined {
     return this.db
       .prepare(
-        'SELECT id, organization_id, email, email_verified FROM identities WHERE organization_id = ? AND email = ?',
+        'SELECT id, organization_id, email, email_verified, anonymized_at FROM identities WHERE organization_id = ? AND email = ?',
       )
       .get(organizationId, email) as IdentityRow | undefined;
   }
@@ -481,7 +579,7 @@ export class IdentitiesService {
   private findIdentityById(identityId: string): IdentityRow | undefined {
     return this.db
       .prepare(
-        'SELECT id, organization_id, email, email_verified FROM identities WHERE id = ?',
+        'SELECT id, organization_id, email, email_verified, anonymized_at FROM identities WHERE id = ?',
       )
       .get(identityId) as IdentityRow | undefined;
   }
@@ -490,7 +588,8 @@ export class IdentitiesService {
   private requireIdentity(organizationId: string, identityId: string): IdentityTarget {
     const row = this.db
       .prepare(
-        `SELECT i.id, i.organization_id, o.name AS organization_name, i.email, i.email_verified
+        `SELECT i.id, i.organization_id, o.name AS organization_name, i.email, i.email_verified,
+                i.anonymized_at
          FROM identities i JOIN organizations o ON o.id = i.organization_id
          WHERE i.id = ? AND i.organization_id = ?`,
       )

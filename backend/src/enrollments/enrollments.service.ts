@@ -23,6 +23,7 @@ interface ApplicationEnrollmentRow {
   email: string;
   email_verified: number;
   identity_suspended_at: string | null;
+  identity_anonymized_at: string | null;
   created_at: string;
   suspended_at: string | null;
 }
@@ -97,7 +98,8 @@ export class EnrollmentsService {
     const rows = this.db
       .prepare(
         `SELECT e.identity_id, e.created_at, e.suspended_at,
-                i.email, i.email_verified, i.suspended_at AS identity_suspended_at
+                i.email, i.email_verified, i.suspended_at AS identity_suspended_at,
+                i.anonymized_at AS identity_anonymized_at
          FROM enrollments e JOIN identities i ON i.id = e.identity_id
          WHERE e.application_id = ? AND i.organization_id = ?
          ORDER BY e.created_at, e.id`,
@@ -185,7 +187,8 @@ export class EnrollmentsService {
     const row = this.db
       .prepare(
         `SELECT e.identity_id, e.created_at, e.suspended_at,
-                i.email, i.email_verified, i.suspended_at AS identity_suspended_at
+                i.email, i.email_verified, i.suspended_at AS identity_suspended_at,
+                i.anonymized_at AS identity_anonymized_at
          FROM enrollments e JOIN identities i ON i.id = e.identity_id
          WHERE e.identity_id = ? AND e.application_id = ? AND i.organization_id = ?`,
       )
@@ -210,6 +213,7 @@ export class EnrollmentsService {
       state: identityState({
         emailVerified: row.email_verified === 1,
         suspended: row.identity_suspended_at !== null,
+        anonymized: row.identity_anonymized_at !== null,
       }),
       enrolledAt: row.created_at,
       suspended: row.suspended_at !== null,

@@ -3,7 +3,7 @@ import type { ApplicationType } from '../applications/applications.service';
 import { AuditService, type AuditEventView } from '../audit/audit.service';
 import { SessionsService, type SessionSummary } from '../sessions/sessions.service';
 import { DATABASE, Database } from '../storage/token';
-import { identityState, type IdentityState } from './identity-state';
+import { anonymizedPseudonym, identityState, type IdentityState } from './identity-state';
 
 export interface IdentityListItem {
   id: string;
@@ -32,6 +32,7 @@ interface IdentityRow {
   email: string;
   email_verified: number;
   suspended_at: string | null;
+  anonymized_at: string | null;
   created_at: string;
 }
 
@@ -65,7 +66,7 @@ export class IdentityDirectoryService {
   list(organizationId: string): IdentityListItem[] {
     const rows = this.db
       .prepare(
-        `SELECT id, email, email_verified, suspended_at, created_at
+        `SELECT id, email, email_verified, suspended_at, anonymized_at, created_at
          FROM identities WHERE organization_id = ?
          ORDER BY created_at, id`,
       )
@@ -76,7 +77,7 @@ export class IdentityDirectoryService {
   detail(organizationId: string, identityId: string): IdentityDetail {
     const row = this.db
       .prepare(
-        `SELECT id, email, email_verified, suspended_at, created_at
+        `SELECT id, email, email_verified, suspended_at, anonymized_at, created_at
          FROM identities WHERE id = ? AND organization_id = ?`,
       )
       .get(identityId, organizationId) as IdentityRow | undefined;
@@ -112,13 +113,17 @@ export class IdentityDirectoryService {
   }
 
   private toView(row: IdentityRow): IdentityListItem {
+    const anonymized = row.anonymized_at !== null;
     return {
       id: row.id,
-      email: row.email,
+      // An anonymized Identity has no email left; the surviving shell is
+      // displayed by its id-derived pseudonym (ADR-0007).
+      email: anonymized ? anonymizedPseudonym(row.id) : row.email,
       emailVerified: row.email_verified === 1,
       state: identityState({
         emailVerified: row.email_verified === 1,
         suspended: row.suspended_at !== null,
+        anonymized,
       }),
       createdAt: row.created_at,
     };

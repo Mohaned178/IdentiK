@@ -240,6 +240,17 @@ const migrations: Migration[] = [
       db.exec('CREATE INDEX refresh_tokens_application_idx ON refresh_tokens(application_id)');
     },
   },
+  {
+    version: 9,
+    up: (db) => {
+      // ADR-0007: deletion means anonymization. The Identity row survives as a
+      // pseudonymous shell so audit history stays attributable by identityId,
+      // while `anonymized_at` marks the terminal state no path reverses. The
+      // email, password, Sessions, and Enrollments are destroyed; the shell's
+      // handle is non-deliverable and never matches a sign-up.
+      db.exec('ALTER TABLE identities ADD COLUMN anonymized_at TEXT');
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {
