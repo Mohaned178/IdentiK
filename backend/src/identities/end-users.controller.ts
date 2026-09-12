@@ -5,11 +5,13 @@ import {
   HttpCode,
   Post,
   Query,
+  Req,
   Res,
   Body,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { IsEmail, IsString, MinLength } from 'class-validator';
+import { ThrottleService, type ThrottleSubject } from '../throttle/throttle.service';
 import { IdentitiesService } from './identities.service';
 
 class SignUpBody {
@@ -45,7 +47,10 @@ class ResetPasswordBody {
  */
 @Controller('api/end-users')
 export class EndUsersController {
-  constructor(private readonly identities: IdentitiesService) {}
+  constructor(
+    private readonly identities: IdentitiesService,
+    private readonly throttle: ThrottleService,
+  ) {}
 
   @Get('sign-up')
   signUpPageInfo(): { organizationName: string } {
@@ -54,7 +59,11 @@ export class EndUsersController {
 
   @Post('sign-up')
   @HttpCode(201)
-  async signUp(@Body() body: SignUpBody): Promise<{ status: 'check-your-mailbox' }> {
+  async signUp(
+    @Req() req: Request,
+    @Body() body: SignUpBody,
+  ): Promise<{ status: 'check-your-mailbox' }> {
+    await this.guardAttempt('sign-up', req, body.email);
     await this.identities.signUp(body);
     return { status: 'check-your-mailbox' };
   }
@@ -100,7 +109,11 @@ export class EndUsersController {
    */
   @Post('forgot-password')
   @HttpCode(202)
-  async forgotPassword(@Body() body: ForgotPasswordBody): Promise<{ status: 'check-your-mailbox' }> {
+  async forgotPassword(
+    @Req() req: Request,
+    @Body() body: ForgotPasswordBody,
+  ): Promise<{ status: 'check-your-mailbox' }> {
+    await this.guardAttempt('forgot-password', req, body.email);
     await this.identities.requestPasswordReset(body);
     return { status: 'check-your-mailbox' };
   }
@@ -131,6 +144,22 @@ export class EndUsersController {
     const ok = await this.identities.resetPassword(body.token, body.password);
     if (!ok) throw new BadRequestException('this reset link is invalid or has expired');
     return { status: 'password-reset' };
+  }
+
+  /**
+   * Rate-limit an unauthenticated request-initiating endpoint. Sign-up and
+   * forgot-password answer uniformly by design (ADR-0005/0020), so there is no
+   * success/failure signal to record: every request is one attempt, keyed by
+   * the submitted email exactly as the Identity lookup normalizes it, so the
+   * delay never distinguishes email-exists from email-not-exists.
+   */
+  private async guardAttempt(scope: string, req: Request, email: string): Promise<void> {
+    const subject: ThrottleSubject = {
+      source: req.ip ?? null,
+      identity: email.trim().toLowerCase(),
+    };
+    await this.throttle.wait(scope, subject);
+    this.throttle.record(scope, subject);
   }
 
   private resultPath(outcome: 'verified' | 'invalid'): string {

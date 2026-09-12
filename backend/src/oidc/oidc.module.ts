@@ -4,6 +4,7 @@ import { EnrollmentsModule } from '../enrollments/enrollments.module';
 import { IdentitiesModule } from '../identities/identities.module';
 import { SessionsModule } from '../sessions/sessions.module';
 import { StorageModule } from '../storage/storage.module';
+import { ThrottleModule } from '../throttle/throttle.module';
 import { AuthorizeController } from './authorize.controller';
 import { AuthorizeService } from './authorize.service';
 import { ClientAuthenticationService } from './client-authentication.service';
@@ -22,6 +23,7 @@ import { UserInfoController } from './userinfo.controller';
     IdentitiesModule,
     SessionsModule,
     EnrollmentsModule,
+    ThrottleModule,
   ],
   controllers: [
     AuthorizeController,
