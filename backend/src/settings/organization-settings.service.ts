@@ -60,9 +60,20 @@ const MAX_PASSWORD_LENGTH = 128;
 const MAX_BRANDING_NAME = 100;
 const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
-type SectionKey = 'branding' | 'password_policy' | 'session_policy';
+/**
+ * The one list of Organization-scoped sections: API field name → storage key.
+ * Everything else — the update allowlist, the stored-row lookup — derives from
+ * it, so a new setting is added in one place and the trust fabric stays
+ * unaddressable by construction.
+ */
+const ORG_SECTIONS = {
+  branding: 'branding',
+  passwordPolicy: 'password_policy',
+  sessionPolicy: 'session_policy',
+} as const;
 
-const SECTION_NAMES = new Set<string>(['branding', 'passwordPolicy', 'sessionPolicy']);
+type SectionField = keyof typeof ORG_SECTIONS;
+type SectionKey = (typeof ORG_SECTIONS)[SectionField];
 
 interface StoredRow {
   value: string;
@@ -70,7 +81,7 @@ interface StoredRow {
 
 interface SectionUpdate {
   key: SectionKey;
-  kind: string;
+  auditKind: string;
   value: unknown;
   detail: Record<string, unknown>;
 }
@@ -94,32 +105,44 @@ export class OrganizationSettingsService {
 
   /** The effective settings: stored values merged over the deployed defaults. */
   view(organizationId: string): OrganizationSettingsView {
-    const defaults = this.defaults(organizationId);
-    const branding = this.stored<Branding>(organizationId, 'branding');
-    const passwordPolicy = this.stored<PasswordPolicy>(organizationId, 'password_policy');
-    const sessionPolicy = this.stored<SessionPolicy>(organizationId, 'session_policy');
     return {
-      branding: { ...defaults.branding, ...(branding ?? {}) },
-      passwordPolicy: { ...defaults.passwordPolicy, ...(passwordPolicy ?? {}) },
-      sessionPolicy: { ...defaults.sessionPolicy, ...(sessionPolicy ?? {}) },
+      branding: this.branding(organizationId),
+      passwordPolicy: this.passwordPolicy(organizationId),
+      sessionPolicy: this.sessionPolicy(organizationId),
     };
   }
 
   branding(organizationId: string): Branding {
-    return this.view(organizationId).branding;
+    return {
+      name: this.organizationName(organizationId),
+      logoUrl: null,
+      ...DEFAULT_BRANDING_COLORS,
+      ...(this.stored<Branding>(organizationId, 'branding') ?? {}),
+    };
   }
 
   passwordPolicy(organizationId: string): PasswordPolicy {
-    return this.view(organizationId).passwordPolicy;
+    return {
+      ...DEFAULT_PASSWORD_POLICY,
+      ...(this.stored<PasswordPolicy>(organizationId, 'password_policy') ?? {}),
+    };
   }
 
   sessionPolicy(organizationId: string): SessionPolicy {
-    return this.view(organizationId).sessionPolicy;
+    return {
+      idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
+      ...(this.stored<SessionPolicy>(organizationId, 'session_policy') ?? {}),
+    };
   }
 
-  /** The idle window a Session lapses after, refreshed by every activity. */
+  /**
+   * The idle window a Session lapses after, refreshed by every activity. Reads
+   * only the session policy row: this is on the hot path of every Session
+   * resolution.
+   */
   idleTimeoutMs(organizationId: string): number {
-    return this.sessionPolicy(organizationId).idleTimeoutMs;
+    const row = this.stored<SessionPolicy>(organizationId, 'session_policy');
+    return row?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   }
 
   /**
@@ -136,16 +159,21 @@ export class OrganizationSettingsService {
     const updates: SectionUpdate[] = [];
     if (input.branding !== undefined) {
       const value = mergeBranding(current.branding, input.branding);
-      if (JSON.stringify(value) !== JSON.stringify(current.branding)) {
-        updates.push({ key: 'branding', kind: 'organization.branding.updated', value, detail: { ...value } });
+      if (changed(value, current.branding)) {
+        updates.push({
+          key: ORG_SECTIONS.branding,
+          auditKind: 'organization.branding.updated',
+          value,
+          detail: { ...value },
+        });
       }
     }
     if (input.passwordPolicy !== undefined) {
       const value = mergePasswordPolicy(current.passwordPolicy, input.passwordPolicy);
-      if (JSON.stringify(value) !== JSON.stringify(current.passwordPolicy)) {
+      if (changed(value, current.passwordPolicy)) {
         updates.push({
-          key: 'password_policy',
-          kind: 'organization.password_policy.updated',
+          key: ORG_SECTIONS.passwordPolicy,
+          auditKind: 'organization.password_policy.updated',
           value,
           detail: { ...value },
         });
@@ -153,10 +181,10 @@ export class OrganizationSettingsService {
     }
     if (input.sessionPolicy !== undefined) {
       const value = mergeSessionPolicy(current.sessionPolicy, input.sessionPolicy);
-      if (JSON.stringify(value) !== JSON.stringify(current.sessionPolicy)) {
+      if (changed(value, current.sessionPolicy)) {
         updates.push({
-          key: 'session_policy',
-          kind: 'organization.session_policy.updated',
+          key: ORG_SECTIONS.sessionPolicy,
+          auditKind: 'organization.session_policy.updated',
           value,
           detail: { ...value },
         });
@@ -180,7 +208,7 @@ export class OrganizationSettingsService {
         recordAuditEvent(this.db, {
           organizationId,
           actor,
-          kind: update.kind,
+          kind: update.auditKind,
           detail: update.detail,
         });
       }
@@ -192,19 +220,11 @@ export class OrganizationSettingsService {
     return this.view(organizationId);
   }
 
-  private defaults(organizationId: string): OrganizationSettingsView {
+  private organizationName(organizationId: string): string {
     const organization = this.db
       .prepare('SELECT name FROM organizations WHERE id = ?')
       .get(organizationId) as { name: string } | undefined;
-    return {
-      branding: {
-        name: organization?.name ?? '',
-        logoUrl: null,
-        ...DEFAULT_BRANDING_COLORS,
-      },
-      passwordPolicy: { ...DEFAULT_PASSWORD_POLICY },
-      sessionPolicy: { idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS },
-    };
+    return organization?.name ?? '';
   }
 
   private stored<T>(organizationId: string, key: SectionKey): Partial<T> | undefined {
@@ -232,20 +252,24 @@ export class OrganizationSettingsService {
     if (!isPlainObject(body)) {
       throw invalidSetting('the request body must be a JSON object');
     }
+    const fields = Object.keys(ORG_SECTIONS) as SectionField[];
     for (const key of Object.keys(body)) {
-      if (!SECTION_NAMES.has(key)) {
+      if (!fields.includes(key as SectionField)) {
         throw new BadRequestException({
           error: 'instance_scoped_setting',
           message: `"${key}" is not an Organization-scoped setting and cannot be changed through the Management API`,
         });
       }
     }
-    const fields = ['branding', 'passwordPolicy', 'sessionPolicy'] as const;
     if (!fields.some((field) => body[field] !== undefined)) {
-      throw invalidSetting('provide at least one of branding, passwordPolicy, sessionPolicy');
+      throw invalidSetting(`provide at least one of ${fields.join(', ')}`);
     }
     return body;
   }
+}
+
+function changed(next: unknown, current: unknown): boolean {
+  return JSON.stringify(next) !== JSON.stringify(current);
 }
 
 /** Validate a candidate password against the Organization's policy. */

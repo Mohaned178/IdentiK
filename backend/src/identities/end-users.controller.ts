@@ -96,10 +96,14 @@ export class EndUsersController {
       .catch(() => res.redirect(302, this.resultPath('invalid')));
   }
 
-  /** Shape-checked outcome for the hosted result page. */
+  /** Shape-checked outcome for the hosted result page, branded like the rest. */
   @Get('verify-email/result')
-  resultPageInfo(@Query('outcome') outcome: string | undefined): { outcome: string } {
-    if (outcome === 'verified' || outcome === 'invalid') return { outcome };
+  resultPageInfo(
+    @Query('outcome') outcome: string | undefined,
+  ): { outcome: string; organizationName: string; branding: Branding } {
+    if (outcome === 'verified' || outcome === 'invalid') {
+      return { outcome, ...this.pageInfo() };
+    }
     throw new BadRequestException('outcome must be "verified" or "invalid"');
   }
 

@@ -207,7 +207,7 @@ export class TokenService {
     const pkce = this.pkceProblem(client, row, optionalText(request.code_verifier));
     if (pkce) return pkce;
 
-    const session = this.sessions.resolveById(row.session_id);
+    const session = this.sessions.resolveById(row.session_id, { touch: true });
     if (!session) return invalidGrant('the Session that authorized this code is no longer valid');
     const identity = this.findIdentity(row.identity_id);
     if (!identity || !this.isLive(identity)) {
@@ -276,7 +276,7 @@ export class TokenService {
     const now = new Date().toISOString();
     if (row.expires_at <= now) return invalidGrant('the refresh token has expired');
 
-    const session = this.sessions.resolveById(row.session_id);
+    const session = this.sessions.resolveById(row.session_id, { touch: true });
     if (!session) {
       return invalidGrant('the Session that issued this refresh token is no longer valid');
     }

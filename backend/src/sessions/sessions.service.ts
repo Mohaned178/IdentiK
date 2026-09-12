@@ -139,15 +139,19 @@ export class SessionsService {
    * Resolve a Session by id with the same fail-closed checks. Refresh tokens
    * are children of the Session (ADR-0013), so refresh validation asks this:
    * a dead parent cannot mint new tokens, whatever route killed it — the
-   * Account Center, a suspension, a password reset. A successful resolution is
-   * activity and refreshes the idle window too.
+   * Account Center, a suspension, a password reset.
+   *
+   * `touch` distinguishes real activity from a liveness check. A token grant
+   * is activity and refreshes the idle window (ADR-0022); pure validation such
+   * as introspection must not, or a server-to-server poll would keep an
+   * otherwise idle Session alive.
    */
-  resolveById(sessionId: string): LiveSession | null {
+  resolveById(sessionId: string, options: { touch?: boolean } = {}): LiveSession | null {
     const row = this.findRow('s.id = ?', sessionId);
     if (!row) return null;
     const session = this.toSession(row);
     if (!session) return null;
-    const expiresAt = this.touch(row);
+    const expiresAt = options.touch === true ? this.touch(row) : row.expires_at;
     return { ...session, createdAt: row.created_at, expiresAt };
   }
 

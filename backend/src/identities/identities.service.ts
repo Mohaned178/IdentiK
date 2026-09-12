@@ -256,13 +256,14 @@ export class IdentitiesService {
    * false without revealing why.
    */
   async resetPassword(token: string, password: string): Promise<boolean> {
-    // The policy gate runs before the token is consumed, so a weak password
-    // does not burn the reset link — the End User can try again with a stronger
-    // one. An invalid link still hashes (uniform work) and reports failure.
+    // Uniform work: hash first, whatever the path, so a valid link with a weak
+    // password and a dead link take the same time. The policy gate runs before
+    // the token is consumed, so a weak password does not burn the reset link —
+    // the End User can try again with a stronger one.
+    const passwordHash = await hashPassword(password);
     const preview = this.previewToken('password_reset', token);
     if (preview) this.assertPasswordPolicy(preview.organizationId, password);
 
-    const passwordHash = await hashPassword(password);
     const identityId = this.consumeToken('password_reset', token);
     if (!identityId) return false;
 

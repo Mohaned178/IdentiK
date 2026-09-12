@@ -288,6 +288,13 @@ describe('Organization settings: branding, password policy, session timeout', ()
     });
     expect(((await resetPage.json()) as { branding: Branding }).branding).toEqual(branding);
 
+    // Hosted verification landing page.
+    const resultPage = await instance.request('/api/end-users/verify-email/result', {
+      query: { outcome: 'verified' },
+    });
+    const result = (await resultPage.json()) as { branding: Branding };
+    expect(result.branding).toEqual(branding);
+
     // Account Center.
     const accountCenter = await instance.request('/api/account-center', {
       headers: { cookie: endUserCookie },
@@ -468,8 +475,7 @@ describe('Organization session timeout: idle expiry, activity refreshes', () => 
     await sleep(2600);
     expect((await accountCenter()).status).toBe(401);
 
-    // The idle death is audited like any other liveness check would be at the
-    // credential gates; at minimum the Session is simply gone from resolution.
+    // The Owner's policy edit is the audit event behind this behaviour.
     const audit = await instance.request('/api/audit', { headers: { cookie: ownerCookie } });
     expect(audit.status).toBe(200);
     const sessionPolicyEvents = ((await audit.json()) as { events: AuditEventView[] }).events.filter(
@@ -477,5 +483,65 @@ describe('Organization session timeout: idle expiry, activity refreshes', () => 
     );
     expect(sessionPolicyEvents).toHaveLength(1);
     expect(sessionPolicyEvents[0]!.detail).toMatchObject({ idleTimeoutMs: 2000 });
+  });
+
+  it('does not treat a token introspection as activity', async () => {
+    const { verifier, challenge } = pkce();
+    const signIn = await instance.request('/api/oidc/authorize', {
+      method: 'POST',
+      redirect: 'manual',
+      query: {
+        client_id: clientId,
+        redirect_uri: REDIRECT,
+        response_type: 'code',
+        scope: 'openid email',
+        state: 'introspect',
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+      },
+      body: END_USER,
+    });
+    expect(signIn.status).toBe(302);
+    const cookie = cookieFrom(signIn);
+    const code = new URL(signIn.headers.get('location')!).searchParams.get('code')!;
+
+    const exchange = await instance.request('/api/oidc/token', {
+      method: 'POST',
+      redirect: 'manual',
+      form: {
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: REDIRECT,
+        client_id: clientId,
+        code_verifier: verifier,
+      },
+    });
+    expect(exchange.status).toBe(200);
+    const { refresh_token: refreshToken } = (await exchange.json()) as { refresh_token: string };
+
+    // A poll just before the window closes answers active, but it is a
+    // liveness check, not the End User's activity: it must not push the
+    // deadline out. Past the window from sign-in the Session is gone.
+    await sleep(1400);
+    const introspection = await instance.request('/api/oidc/introspect', {
+      method: 'POST',
+      redirect: 'manual',
+      form: { token: refreshToken, client_id: clientId },
+    });
+    expect((await introspection.json()) as { active: boolean }).toMatchObject({ active: true });
+
+    await sleep(1000);
+    const accountCenter = await instance.request('/api/account-center', {
+      headers: { cookie },
+      redirect: 'manual',
+    });
+    expect(accountCenter.status).toBe(401);
+
+    const refresh = await instance.request('/api/oidc/token', {
+      method: 'POST',
+      redirect: 'manual',
+      form: { grant_type: 'refresh_token', refresh_token: refreshToken, client_id: clientId },
+    });
+    expect(refresh.status).toBe(400);
   });
 });
