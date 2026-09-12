@@ -107,6 +107,38 @@ export class EndUsersController {
     throw new BadRequestException('outcome must be "verified" or "invalid"');
   }
 
+  /**
+   * The email-change verification click (ADR-0008, ADR-0018): proof of the new
+   * mailbox, opened from a mail client with no Session required. Like the
+   * sign-up verification click, it redirects to a hosted result page; the
+   * change is applied by the service only when the single-use link is live.
+   */
+  @Get('change-email')
+  changeEmail(
+    @Query('token') token: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ): void {
+    if (typeof token !== 'string' || token.length === 0) {
+      res.redirect(302, this.changeEmailResultPath('invalid'));
+      return;
+    }
+    this.identities
+      .verifyEmailChange(token)
+      .then((changed) => res.redirect(302, this.changeEmailResultPath(changed ? 'changed' : 'invalid')))
+      .catch(() => res.redirect(302, this.changeEmailResultPath('invalid')));
+  }
+
+  /** Shape-checked outcome for the hosted email-change result page. */
+  @Get('change-email/result')
+  changeEmailResultPageInfo(
+    @Query('outcome') outcome: string | undefined,
+  ): { outcome: string; organizationName: string; branding: Branding } {
+    if (outcome === 'changed' || outcome === 'invalid') {
+      return { outcome, ...this.pageInfo() };
+    }
+    throw new BadRequestException('outcome must be "changed" or "invalid"');
+  }
+
   @Get('forgot-password')
   forgotPasswordPageInfo(): { organizationName: string; branding: Branding } {
     return this.pageInfo();
@@ -174,6 +206,10 @@ export class EndUsersController {
 
   private resultPath(outcome: 'verified' | 'invalid'): string {
     return `/end-users/verify-email/result?outcome=${outcome}`;
+  }
+
+  private changeEmailResultPath(outcome: 'changed' | 'invalid'): string {
+    return `/end-users/change-email/result?outcome=${outcome}`;
   }
 
   /** The Organization's name and branding every hosted page renders. */

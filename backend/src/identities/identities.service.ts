@@ -362,6 +362,154 @@ export class IdentitiesService {
   }
 
   /**
+   * The Account Center's email-change request (ADR-0008, ADR-0018). The handle
+   * moves only on proof of the *new* mailbox: the request parks a single-use,
+   * expiring token bound to the new address and sends the link there, leaving
+   * the Identity's email untouched until it is consumed (ADR-0005). The new
+   * address must be unique in the Organization — held by a verified Identity
+   * or an inert Unverified Reservation alike (ADR-0011) — and a refusal is
+   * uniform in shape, with the reason travelling to the requested mailbox (like
+   * sign-up, not the HTTP layer). A second request supersedes the first, so at
+   * most one change is ever pending.
+   */
+  async requestEmailChange(input: { identityId: string; newEmail: string }): Promise<void> {
+    const identity = this.findIdentityById(input.identityId);
+    if (!identity || identity.anonymized_at !== null) return;
+    const organizationName = this.organizationName(identity.organization_id);
+    const newEmail = normalizeEmail(input.newEmail);
+
+    if (!this.emailChangeAvailable(identity, newEmail)) {
+      this.audit(identity.organization_id, 'identity.email_change.refused', {
+        identityId: identity.id,
+        email: identity.email,
+        newEmail,
+      });
+      await this.sendEmailChangeRefusedEmail(newEmail, organizationName);
+      return;
+    }
+
+    // One pending change per Identity: a fresh request invalidates the last.
+    this.db
+      .prepare('DELETE FROM email_change_requests WHERE identity_id = ? AND consumed_at IS NULL')
+      .run(identity.id);
+
+    const token = randomToken(32);
+    const now = new Date();
+    this.db
+      .prepare(
+        `INSERT INTO email_change_requests
+           (id, organization_id, identity_id, new_email, token_hash, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        uuid(),
+        identity.organization_id,
+        identity.id,
+        newEmail,
+        hashToken(token),
+        new Date(now.getTime() + this.emailChangeTtlMs()).toISOString(),
+        now.toISOString(),
+      );
+    this.audit(identity.organization_id, 'identity.email_change.requested', {
+      identityId: identity.id,
+      email: identity.email,
+      newEmail,
+    });
+    await this.sendEmailChangeVerificationEmail(newEmail, organizationName, token);
+  }
+
+  /**
+   * Clicking the change link: proof of the new mailbox. The token is consumed
+   * atomically first (single-use), then the email column moves — the UNIQUE
+   * (organization_id, email) constraint is the race-free arbiter if the address
+   * was claimed between request and proof, in which case the change is refused
+   * and the token stays spent. An anonymized Identity has no handle to move.
+   */
+  async verifyEmailChange(token: string): Promise<boolean> {
+    const now = new Date().toISOString();
+    const request = this.db
+      .prepare(
+        `UPDATE email_change_requests SET consumed_at = ?
+         WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?
+         RETURNING identity_id, organization_id, new_email`,
+      )
+      .get(now, hashToken(token), now) as
+      | { identity_id: string; organization_id: string; new_email: string }
+      | undefined;
+    if (!request) return false;
+
+    const identity = this.findIdentityById(request.identity_id);
+    if (!identity || identity.anonymized_at !== null) return false;
+
+    try {
+      const moved = this.db
+        .prepare(
+          'UPDATE identities SET email = ?, email_verified = 1 WHERE id = ? AND anonymized_at IS NULL',
+        )
+        .run(request.new_email, identity.id);
+      if (moved.changes !== 1) return false;
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        this.audit(request.organization_id, 'identity.email_change.refused', {
+          identityId: identity.id,
+          email: identity.email,
+          newEmail: request.new_email,
+        });
+        return false;
+      }
+      throw error;
+    }
+
+    this.audit(request.organization_id, 'identity.email_change.completed', {
+      identityId: identity.id,
+      email: request.new_email,
+      previousEmail: identity.email,
+    });
+    return true;
+  }
+
+  /** The address a live email-change request would move the Identity to. */
+  pendingEmailChange(identityId: string): string | null {
+    const now = new Date().toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT new_email FROM email_change_requests
+         WHERE identity_id = ? AND consumed_at IS NULL AND expires_at > ?
+         ORDER BY created_at DESC, id DESC LIMIT 1`,
+      )
+      .get(identityId, now) as { new_email: string } | undefined;
+    return row?.new_email ?? null;
+  }
+
+  /**
+   * Whether the requested address is free to move to: not the Identity's own
+   * current handle, not held by any Identity (verified or inert reservation),
+   * and not the target of another Identity's live request.
+   */
+  private emailChangeAvailable(identity: IdentityRow, newEmail: string): boolean {
+    if (newEmail === normalizeEmail(identity.email)) return false;
+    const holder = this.db
+      .prepare('SELECT 1 FROM identities WHERE organization_id = ? AND email = ?')
+      .get(identity.organization_id, newEmail);
+    if (holder) return false;
+    const pending = this.db
+      .prepare(
+        `SELECT 1 FROM email_change_requests
+         WHERE organization_id = ? AND new_email = ? AND identity_id != ?
+           AND consumed_at IS NULL AND expires_at > ?`,
+      )
+      .get(identity.organization_id, newEmail, identity.id, new Date().toISOString());
+    return pending === undefined;
+  }
+
+  private organizationName(organizationId: string): string {
+    const row = this.db
+      .prepare('SELECT name FROM organizations WHERE id = ?')
+      .get(organizationId) as { name: string } | undefined;
+    return row?.name ?? '';
+  }
+
+  /**
    * The Administrator's force-reset lever (ADR-0008): a state lever that
    * never sets, reads, or displays a credential. It sends ticket 04's
    * password-reset link to the Identity's existing verified email and revokes
@@ -517,6 +665,7 @@ export class IdentitiesService {
       this.db.prepare('DELETE FROM enrollments WHERE identity_id = ?').run(identity.id);
       this.db.prepare('DELETE FROM identity_tokens WHERE identity_id = ?').run(identity.id);
       this.db.prepare('DELETE FROM authorization_codes WHERE identity_id = ?').run(identity.id);
+      this.db.prepare('DELETE FROM email_change_requests WHERE identity_id = ?').run(identity.id);
       // The durable key is the identityId; the email in historical details is
       // PII, so the old trail is re-attributed to the shell, never left naming
       // the person. Scoped to this Identity's events and the End-User
@@ -531,6 +680,31 @@ export class IdentitiesService {
                    OR kind LIKE 'identity.%' OR kind LIKE 'enrollment.%')`,
         )
         .run(pseudonym, identity.organization_id, identity.email, identity.id);
+      // An email-change trail names the requested (`newEmail`) and previous
+      // (`previousEmail`) addresses, and its own `email` may not equal the
+      // Identity's current handle; rewrite all three so no address survives
+      // (ADR-0007).
+      this.db
+        .prepare(
+          `UPDATE audit_events SET detail = json_set(detail, '$.email', ?)
+            WHERE organization_id = ? AND json_extract(detail, '$.identityId') = ?
+              AND kind LIKE 'identity.email_change.%'`,
+        )
+        .run(pseudonym, identity.organization_id, identity.id);
+      this.db
+        .prepare(
+          `UPDATE audit_events SET detail = json_set(detail, '$.newEmail', ?)
+            WHERE organization_id = ? AND json_extract(detail, '$.newEmail') IS NOT NULL
+              AND json_extract(detail, '$.identityId') = ?`,
+        )
+        .run(pseudonym, identity.organization_id, identity.id);
+      this.db
+        .prepare(
+          `UPDATE audit_events SET detail = json_set(detail, '$.previousEmail', ?)
+            WHERE organization_id = ? AND json_extract(detail, '$.previousEmail') IS NOT NULL
+              AND json_extract(detail, '$.identityId') = ?`,
+        )
+        .run(pseudonym, identity.organization_id, identity.id);
       this.adminAudit(identity.organization_id, input.actor, 'identity.anonymized', {
         identityId: identity.id,
         pseudonym,
@@ -692,6 +866,39 @@ export class IdentitiesService {
     });
   }
 
+  private async sendEmailChangeVerificationEmail(
+    email: string,
+    organizationName: string,
+    token: string,
+  ): Promise<void> {
+    const link = `${this.links.resolve()}/api/end-users/change-email?token=${encodeURIComponent(token)}`;
+    await this.mail.send({
+      to: email,
+      subject: `Confirm your new email — ${organizationName}`,
+      body:
+        `Someone asked to change an identity's email at ${organizationName} to this address.\n\n` +
+        `Confirm this address to complete the change by opening the link below:\n\n${link}\n\n` +
+        `The link is single-use and expires soon. Until you confirm it, the old address stays in ` +
+        `effect. If you did not ask for this, you can ignore this message.`,
+    });
+  }
+
+  private async sendEmailChangeRefusedEmail(
+    email: string,
+    organizationName: string,
+  ): Promise<void> {
+    await this.mail.send({
+      to: email,
+      subject: `This email is already in use — ${organizationName}`,
+      body:
+        `Someone tried to change an identity's email at ${organizationName} to this address, ` +
+        `but an identity with this email already exists.\n` +
+        `No change was made — the address stays with its current identity.\n\n` +
+        `If you have forgotten your password, use the "Forgot password" flow to choose a new one.\n` +
+        `If this wasn't you, you can ignore this message.`,
+    });
+  }
+
   private async sendAlreadyRegisteredEmail(email: string, organizationName: string): Promise<void> {
     await this.mail.send({
       to: email,
@@ -750,5 +957,9 @@ export class IdentitiesService {
 
   private resetTtlMs(): number {
     return parseTtlMs('IDENTIK_RESET_TOKEN_TTL_MS', 60 * 60 * 1000);
+  }
+
+  private emailChangeTtlMs(): number {
+    return parseTtlMs('IDENTIK_EMAIL_CHANGE_TOKEN_TTL_MS', 60 * 60 * 1000);
   }
 }

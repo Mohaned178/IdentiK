@@ -12,7 +12,7 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
-import { IsString, MinLength } from 'class-validator';
+import { IsEmail, IsString, MinLength } from 'class-validator';
 import type { Request, Response } from 'express';
 import { sessionCookieOptions } from '../config/cookies';
 import { LinkBaseService } from '../config/link-base.service';
@@ -29,6 +29,11 @@ class ChangePasswordBody {
   @IsString()
   @MinLength(8)
   newPassword!: string;
+}
+
+class ChangeEmailBody {
+  @IsEmail()
+  newEmail!: string;
 }
 
 /**
@@ -83,6 +88,29 @@ export class AccountCenterController {
     });
     if (!changed) throw new ForbiddenException('the current password is incorrect');
     return { status: 'password-changed' };
+  }
+
+  /**
+   * Request an email change (ADR-0008, ADR-0018). The response is uniform
+   * (ADR-0005): whether the new address is free or already claimed, the caller
+   * sees the same shape; the verification link — or the refusal — travels to
+   * the requested mailbox, never the HTTP layer. The Identity's handle is
+   * untouched until the link is clicked.
+   */
+  @Post('email')
+  @HttpCode(202)
+  @UseGuards(EndUserSessionGuard)
+  async changeEmail(
+    @Req() req: EndUserRequest,
+    @Body() body: ChangeEmailBody,
+  ): Promise<{ status: 'check-your-mailbox' }> {
+    const session = req.endUserSession;
+    if (!session) throw new UnauthorizedException();
+    await this.identities.requestEmailChange({
+      identityId: session.identityId,
+      newEmail: body.newEmail,
+    });
+    return { status: 'check-your-mailbox' };
   }
 
   /**

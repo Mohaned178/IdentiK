@@ -284,6 +284,29 @@ const migrations: Migration[] = [
       )`);
     },
   },
+  {
+    version: 12,
+    up: (db) => {
+      // ADR-0008/0018: an End User's email change is self-service and takes
+      // effect only once the new mailbox is proven. The request is a
+      // single-use, expiring, verifiable-only token bound to the Identity and
+      // the requested address; until it is consumed the Identity's email
+      // column is untouched, so an abandoned change leaves the handle exactly
+      // as it was. The new address is stored normalized/COLLATE NOCASE because
+      // it must be unique within the Organization (ADR-0005), verified or not.
+      db.exec(`CREATE TABLE email_change_requests (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        identity_id TEXT NOT NULL REFERENCES identities(id),
+        new_email TEXT NOT NULL COLLATE NOCASE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
+      )`);
+      db.exec('CREATE INDEX email_change_requests_identity_idx ON email_change_requests(identity_id)');
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

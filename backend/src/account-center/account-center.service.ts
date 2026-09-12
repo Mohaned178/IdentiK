@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { ApplicationType } from '../applications/applications.service';
+import { IdentitiesService } from '../identities/identities.service';
 import {
   OrganizationSettingsService,
   type Branding,
@@ -28,6 +29,7 @@ export interface AccountCenterView {
   organizationName: string;
   branding: Branding;
   identity: { email: string };
+  pendingEmail: string | null;
   currentSessionId: string;
   sessions: SessionView[];
   connectedApplications: ConnectedApplicationView[];
@@ -55,6 +57,7 @@ export class AccountCenterService {
     @Inject(DATABASE) private readonly db: Database,
     private readonly sessions: SessionsService,
     private readonly settings: OrganizationSettingsService,
+    private readonly identities: IdentitiesService,
   ) {}
 
   view(session: SsoSession): AccountCenterView {
@@ -62,6 +65,7 @@ export class AccountCenterService {
       organizationName: this.organizationName(session.organizationId),
       branding: this.settings.branding(session.organizationId),
       identity: { email: session.email },
+      pendingEmail: this.identities.pendingEmailChange(session.identityId),
       currentSessionId: session.id,
       sessions: this.sessions
         .listForIdentity(session.identityId)
