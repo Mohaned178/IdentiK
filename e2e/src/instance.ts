@@ -71,8 +71,12 @@ export class Instance {
     try {
       await waitUntilHealthy(url, child);
     } catch (error) {
+      const output = instance.consoleLog().trim();
       await instance.stop();
-      throw error;
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}` +
+          (output ? `\n--- Instance output ---\n${output}` : ''),
+      );
     }
     return instance;
   }
@@ -175,7 +179,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function freePort(): Promise<number> {
+/** A currently free loopback port, for pointing an Instance at a known-dead address. */
+export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createNetServer();
     server.once('error', reject);

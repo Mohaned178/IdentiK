@@ -7,9 +7,13 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^22.0.0",
+    "@types/smtp-server": "^3.5.13",
     "jose": "^6.2.12",
+    "mailparser": "^3.9.25",
     "openid-client": "^6.8.8",
+    "smtp-server": "^3.19.11",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }
