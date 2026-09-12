@@ -47,6 +47,7 @@ export interface ThrottleSubject {
 @Injectable()
 export class ThrottleService {
   private readonly attempts = new Map<string, number[]>();
+  private lastSweep = 0;
 
   private readonly windowMs = parseTtlMs('IDENTIK_THROTTLE_WINDOW_MS', 15 * 60 * 1000);
   private readonly freeAttempts = parseCount('IDENTIK_THROTTLE_AFTER_ATTEMPTS', 50);
@@ -64,6 +65,7 @@ export class ThrottleService {
   /** Record one attempt (or failure) against both dimensions. */
   record(scope: ThrottleScope, subject: ThrottleSubject): void {
     const now = Date.now();
+    this.sweep(now);
     for (const key of [
       this.sourceKey(scope, subject.source),
       this.identityKey(scope, subject.identity),
@@ -116,6 +118,20 @@ export class ThrottleService {
     }
     this.attempts.set(key, live);
     return live;
+  }
+
+  /**
+   * Drop every key whose history has fully expired. Per-key pruning only
+   * touches keys that come back; a spray of unique emails or sources would
+   * otherwise grow the map for the process lifetime. Sweeping once per window
+   * bounds memory without a timer.
+   */
+  private sweep(now: number): void {
+    if (now - this.lastSweep < this.windowMs) return;
+    this.lastSweep = now;
+    for (const [key, timestamps] of this.attempts) {
+      if (!timestamps.some((at) => at > now - this.windowMs)) this.attempts.delete(key);
+    }
   }
 
   private sourceKey(scope: ThrottleScope, source: string | null | undefined): string | null {

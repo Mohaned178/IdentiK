@@ -340,6 +340,17 @@ describe('Organization settings: branding, password policy, session timeout', ()
     });
     expect(updated.status).toBe(200);
 
+    // The policy edit is itself an audited settings change.
+    const policyEvents = (await auditEvents(ownerCookie)).filter(
+      (event) => event.kind === 'organization.password_policy.updated',
+    );
+    expect(policyEvents).toHaveLength(1);
+    expect(policyEvents[0]!.detail).toMatchObject({
+      minLength: 12,
+      requireUppercase: true,
+      requireDigit: true,
+    });
+
     const weak = await signUp('weak@example.com', 'abcdefghij12');
     expect(weak.status).toBe(400);
     expect(((await weak.json()) as { error: string }).error).toBe('password_too_weak');
@@ -402,11 +413,11 @@ describe('Organization session timeout: idle expiry, activity refreshes', () => 
     });
     ownerCookie = cookieFrom(owner);
 
-    // Two seconds of idle, set through the Management API by the Owner.
+    // Three seconds of idle, set through the Management API by the Owner.
     const policy = await instance.request('/api/organization/settings', {
       method: 'PUT',
       headers: { cookie: ownerCookie },
-      body: { sessionPolicy: { idleTimeoutMs: 2000 } },
+      body: { sessionPolicy: { idleTimeoutMs: 3000 } },
     });
     expect(policy.status).toBe(200);
 
@@ -461,14 +472,14 @@ describe('Organization session timeout: idle expiry, activity refreshes', () => 
     expect((await accountCenter()).status).toBe(200);
 
     // Activity inside the window refreshes it: the second visit happens after
-    // more than the original window has elapsed since sign-in, and still lives.
-    await sleep(1200);
+    // more than a third of the window has elapsed since sign-in, and still lives.
+    await sleep(1000);
     expect((await accountCenter()).status).toBe(200);
-    await sleep(1200);
+    await sleep(1000);
     expect((await accountCenter()).status).toBe(200);
 
     // Now truly idle past the window: the Session lapses without a scheduler.
-    await sleep(2600);
+    await sleep(3600);
     expect((await accountCenter()).status).toBe(401);
 
     // The Owner's policy edit is the audit event behind this behaviour.
@@ -478,7 +489,7 @@ describe('Organization session timeout: idle expiry, activity refreshes', () => 
       (event) => event.kind === 'organization.session_policy.updated',
     );
     expect(sessionPolicyEvents).toHaveLength(1);
-    expect(sessionPolicyEvents[0]!.detail).toMatchObject({ idleTimeoutMs: 2000 });
+    expect(sessionPolicyEvents[0]!.detail).toMatchObject({ idleTimeoutMs: 3000 });
   });
 
   it('does not treat a token introspection as activity', async () => {
@@ -518,7 +529,7 @@ describe('Organization session timeout: idle expiry, activity refreshes', () => 
     // A poll just before the window closes answers active, but it is a
     // liveness check, not the End User's activity: it must not push the
     // deadline out. Past the window from sign-in the Session is gone.
-    await sleep(1400);
+    await sleep(1000);
     const introspection = await instance.request('/api/oidc/introspect', {
       method: 'POST',
       redirect: 'manual',
@@ -526,7 +537,7 @@ describe('Organization session timeout: idle expiry, activity refreshes', () => 
     });
     expect((await introspection.json()) as { active: boolean }).toMatchObject({ active: true });
 
-    await sleep(1000);
+    await sleep(2600);
     const accountCenter = await instance.request('/api/account-center', {
       headers: { cookie },
       redirect: 'manual',

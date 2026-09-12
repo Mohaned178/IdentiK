@@ -1,7 +1,8 @@
-export const SUPPORTED_SCOPES = new Set(['openid', 'email', 'profile']);
-
 /** The canonical order configured scope sets are stored and displayed in. */
 export const CANONICAL_SCOPES = ['openid', 'email', 'profile'];
+
+/** The supported scopes, derived from the one canonical list. */
+export const SUPPORTED_SCOPES = new Set(CANONICAL_SCOPES);
 
 /** The scope set a newly registered Application starts with. */
 export const DEFAULT_APPLICATION_SCOPES = [...CANONICAL_SCOPES];

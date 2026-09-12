@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   HttpCode,
+  Logger,
   Post,
   Query,
   Req,
@@ -52,6 +53,8 @@ class ResetPasswordBody {
  */
 @Controller('api/end-users')
 export class EndUsersController {
+  private readonly logger = new Logger(EndUsersController.name);
+
   constructor(
     private readonly identities: IdentitiesService,
     private readonly throttle: ThrottleService,
@@ -93,7 +96,15 @@ export class EndUsersController {
     this.identities
       .verifyEmail(token)
       .then((verified) => res.redirect(302, this.resultPath(verified ? 'verified' : 'invalid')))
-      .catch(() => res.redirect(302, this.resultPath('invalid')));
+      .catch((error: unknown) => {
+        // A dead link and a failed write both answer "invalid" so nothing is
+        // revealed at the surface; the failure itself still needs to be
+        // diagnosable from the Instance log.
+        this.logger.error(
+          `email verification click failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        res.redirect(302, this.resultPath('invalid'));
+      });
   }
 
   /** Shape-checked outcome for the hosted result page, branded like the rest. */
@@ -125,7 +136,13 @@ export class EndUsersController {
     this.identities
       .verifyEmailChange(token)
       .then((changed) => res.redirect(302, this.changeEmailResultPath(changed ? 'changed' : 'invalid')))
-      .catch(() => res.redirect(302, this.changeEmailResultPath('invalid')));
+      .catch((error: unknown) => {
+        // Same posture as the verification click: uniform redirect, diagnosable log.
+        this.logger.error(
+          `email change click failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        res.redirect(302, this.changeEmailResultPath('invalid'));
+      });
   }
 
   /** Shape-checked outcome for the hosted email-change result page. */

@@ -311,11 +311,12 @@ describe('Identity anonymization', () => {
     expect(owner.status).toBe(200);
     ownerCookie = cookieFrom(owner);
 
-    await instance.request('/api/administrators/invitations', {
+    const invited = await instance.request('/api/administrators/invitations', {
       method: 'POST',
       headers: { cookie: ownerCookie },
       body: { email: MEMBER.email, role: 'member' },
     });
+    expect(invited.status).toBe(201);
     const invitationMail = (await instance.capturedEmails()).find(
       (mail) => mail.to === MEMBER.email && /invit/i.test(mail.subject),
     );

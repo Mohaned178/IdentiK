@@ -179,11 +179,12 @@ describe('Per-Application scopes: integration configuration governing token cont
     expect(owner.status).toBe(200);
     ownerCookie = cookieFrom(owner);
 
-    await instance.request('/api/administrators/invitations', {
+    const invited = await instance.request('/api/administrators/invitations', {
       method: 'POST',
       headers: { cookie: ownerCookie },
       body: { email: MEMBER.email, role: 'member' },
     });
+    expect(invited.status).toBe(201);
     const invitationMail = (await instance.capturedEmails()).find(
       (mail) => mail.to === MEMBER.email && /invit/i.test(mail.subject),
     );
@@ -304,9 +305,11 @@ describe('Per-Application scopes: integration configuration governing token cont
     expect(widened.status).toBe(400);
     expect(((await widened.json()) as { error: string }).error).toBe('invalid_scope');
 
-    const narrowed = await refresh(tokens.refresh_token);
+    const narrowed = await refresh(tokens.refresh_token, 'openid');
     expect(narrowed.status).toBe(200);
-    expect(decodeJwt(((await narrowed.json()) as TokenResponse).id_token).email).toBe(MOHAMED.email);
+    const narrowedClaims = decodeJwt(((await narrowed.json()) as TokenResponse).id_token);
+    expect(narrowedClaims.sub).toBeTruthy();
+    expect(narrowedClaims.email).toBeUndefined();
   });
 
   it('validates the configured value and Administrator access', async () => {
@@ -330,6 +333,24 @@ describe('Per-Application scopes: integration configuration governing token cont
       redirect: 'manual',
     });
     expect(unknown.status).toBe(404);
+  });
+
+  it('narrowing the configured set bites already-granted refresh tokens', async () => {
+    const tokens = await authorizeAndExchange('openid email');
+
+    const narrowed = await configure(['openid']);
+    expect(narrowed.status).toBe(200);
+
+    // The grant is wider than the Application is now configured for: a plain
+    // refresh is refused rather than minting removed claims forever.
+    const refused = await refresh(tokens.refresh_token);
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toBe('invalid_scope');
+
+    // Explicitly narrowing into the configured set recovers the grant.
+    const recovered = await refresh(tokens.refresh_token, 'openid');
+    expect(recovered.status).toBe(200);
+    expect(decodeJwt(((await recovered.json()) as TokenResponse).id_token).email).toBeUndefined();
   });
 
   it('re-widening restores the wider claims', async () => {

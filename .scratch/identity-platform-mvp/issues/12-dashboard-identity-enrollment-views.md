@@ -30,3 +30,7 @@ Implementation notes:
 - Tests: `e2e/src/identity-directory.test.ts` (7 tests) drives the real sign-up/verify/authorize arc with a Member and an Owner, then asserts list contents and state, detail Enrollments/Sessions/activity (including ordering and cross-Identity isolation), the inert reservation, Application-filtered Enrollments with a 404 for unknown Applications, Administrator-only access, and the absence of credential exposure or setting routes. 152 tests pass in the full suite.
 - Review round applied: removed a banned-vocabulary quote, hoisted the shared `requireAdministratorSession` from three controller copies, moved the Application-existence 404 into `listForApplication` so the service's contract is self-contained, and inlined a pass-through state helper.
 - Deferred: the suspension/revocation levers and their cascade (ticket 13); anonymized presentation and the anonymization action (ticket 15); per-Application activity filtering beyond the Identity detail; auditing successful authentications if the audit surface later decides to carry them.
+
+## Comments
+
+Review round applied: the Identity detail's recent activity now passes `limit: 20` into the audit query (address index added in ticket 08) rather than fetching the full trail and slicing in memory.

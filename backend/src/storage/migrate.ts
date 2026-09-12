@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { normalizeEmail } from '../identities/email';
 
 interface Migration {
   version: number;
@@ -316,6 +317,42 @@ const migrations: Migration[] = [
       // exceeds it. Existing Applications keep the full supported set.
       db.exec(
         `ALTER TABLE applications ADD COLUMN allowed_scopes TEXT NOT NULL DEFAULT 'openid email profile'`,
+      );
+    },
+  },
+  {
+    version: 14,
+    up: (db) => {
+      // Administrator emails are normalized handles (trimmed, lower-cased) at
+      // sign-in lookup. The column's NOCASE collation folds ASCII only, so a
+      // row written before bootstrap normalized its input could hold Unicode
+      // case the lookup no longer matches. Fold historical rows with the same
+      // Unicode-aware helper; a collision means two Administrators normalize
+      // to one handle and must be resolved by the Operator before boot.
+      const rows = db
+        .prepare('SELECT id, email FROM administrators')
+        .all() as Array<{ id: string; email: string }>;
+      const seen = new Set<string>();
+      for (const row of rows) {
+        const folded = normalizeEmail(row.email);
+        if (seen.has(folded)) {
+          throw new Error(
+            'two Administrator emails collide under Unicode normalization; resolve them before booting',
+          );
+        }
+        seen.add(folded);
+      }
+      const update = db.prepare('UPDATE administrators SET email = ? WHERE id = ?');
+      for (const row of rows) update.run(normalizeEmail(row.email), row.id);
+    },
+  },
+  {
+    version: 15,
+    up: (db) => {
+      // The audit surface reads newest-first per Organization and per
+      // Identity; the index keeps those reads bounded as history grows.
+      db.exec(
+        'CREATE INDEX audit_events_organization_time_idx ON audit_events(organization_id, occurred_at)',
       );
     },
   },

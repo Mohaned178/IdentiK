@@ -72,6 +72,7 @@ export interface ClientRecord {
   organizationId: string;
   type: ApplicationType;
   enabled: boolean;
+  allowedScopes: string[];
 }
 
 interface ApplicationRow {
@@ -360,7 +361,7 @@ export class ApplicationsService {
   findClient(clientId: string): ClientRecord | undefined {
     const row = this.db
       .prepare(
-        'SELECT id, client_id, organization_id, type, disabled_at, deleted_at FROM applications WHERE client_id = ?',
+        'SELECT id, client_id, organization_id, type, disabled_at, deleted_at, allowed_scopes FROM applications WHERE client_id = ?',
       )
       .get(clientId) as
       | {
@@ -370,6 +371,7 @@ export class ApplicationsService {
           type: ApplicationType;
           disabled_at: string | null;
           deleted_at: string | null;
+          allowed_scopes: string;
         }
       | undefined;
     if (!row) return undefined;
@@ -379,6 +381,7 @@ export class ApplicationsService {
       organizationId: row.organization_id,
       type: row.type,
       enabled: this.isUsable(row),
+      allowedScopes: splitScope(row.allowed_scopes),
     };
   }
 

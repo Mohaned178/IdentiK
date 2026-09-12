@@ -15,3 +15,7 @@
 - [x] The audit store exists and records the completed bootstrap (who/what/when)
 - [x] Administrator credentials never exist in recoverable form
 - [x] Black-box tests cover: ceremony happy path, expiry, re-run refusal, Owner sign-in success and failure — all over HTTP only
+
+## Comments
+
+Review round applied: the Owner's email is stored normalized (`normalizeEmail`) during the ceremony, matching the Administrator sign-in lookup and every other Administrator write path. SQLite's NOCASE collation folds ASCII only, so a raw non-ASCII address (`Ähmed@…`) previously became unreachable once sign-in normalized its input; migration v14 folds historical Administrator rows with the same Unicode-aware helper (and refuses to boot on a genuine normalization collision). `bootstrap-ceremony.test.ts` adds the non-ASCII sign-in proof.

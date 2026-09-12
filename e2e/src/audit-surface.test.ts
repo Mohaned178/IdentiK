@@ -115,11 +115,12 @@ describe('Unified audit surface', () => {
     ownerId = ((await owner.json()) as SignInView).administratorId;
 
     // Ticket 05: invitation issued by the Owner, accepted by the invitee.
-    await instance.request('/api/administrators/invitations', {
+    const invited = await instance.request('/api/administrators/invitations', {
       method: 'POST',
       headers: { cookie: ownerCookie },
       body: { email: MEMBER.email, role: 'member' },
     });
+    expect(invited.status).toBe(201);
     const invitationMail = (await instance.capturedEmails()).find(
       (mail) => mail.to === MEMBER.email && /invit/i.test(mail.subject),
     );

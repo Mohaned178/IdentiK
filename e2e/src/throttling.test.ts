@@ -327,8 +327,8 @@ describe('Throttling uniformity across email existence', () => {
   });
 
   afterAll(async () => {
-    await existingInstance.stop();
-    await absentInstance.stop();
+    await existingInstance?.stop();
+    await absentInstance?.stop();
   });
 
   it('throttles and refuses an existing email exactly like an unknown one', async () => {

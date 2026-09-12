@@ -20,6 +20,11 @@ export interface AuditFilters {
   identityId?: string;
   from?: string;
   to?: string;
+  /**
+   * Internal cap for derived views (an Identity's recent activity); never an
+   * HTTP filter, so the Management API's audit read stays complete.
+   */
+  limit?: number;
 }
 
 interface AuditEventRow {
@@ -88,9 +93,10 @@ export class AuditService {
            ON m.organization_id = e.organization_id AND m.administrator_id = e.actor
          LEFT JOIN administrators a ON a.id = m.administrator_id
          WHERE ${conditions.join(' AND ')}
-         ORDER BY e.occurred_at DESC, e.rowid DESC`,
+         ORDER BY e.occurred_at DESC, e.rowid DESC
+         ${filters.limit === undefined ? '' : 'LIMIT ?'}`,
       )
-      .all(...params) as unknown as AuditEventRow[];
+      .all(...params, ...(filters.limit === undefined ? [] : [filters.limit])) as unknown as AuditEventRow[];
 
     return rows.map((row) => ({
       id: row.id,

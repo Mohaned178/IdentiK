@@ -268,8 +268,8 @@ describe('Application registration and Client credential lifecycle', () => {
     expect(body.application.secrets).toHaveLength(0);
 
     const generate = await generateSecret(ownerCookie, body.application.id, { label: 'never' });
-    expect(generate.status).toBeGreaterThanOrEqual(400);
-    expect(generate.status).toBeLessThan(500);
+    expect(generate.status).toBe(400);
+    expect(((await generate.json()) as { message: string }).message).toMatch(/never issued/i);
 
     const detail = await getApplication(ownerCookie, body.application.id);
     expect(detail.secrets).toHaveLength(0);

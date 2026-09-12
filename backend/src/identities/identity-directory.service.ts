@@ -87,9 +87,10 @@ export class IdentityDirectoryService {
       ...this.toView(row),
       enrollments: this.enrollments(row.id),
       sessions: this.sessions.listForIdentity(row.id),
-      recentActivity: this.audit
-        .list(organizationId, { identityId: row.id })
-        .slice(0, RECENT_ACTIVITY_LIMIT),
+      recentActivity: this.audit.list(organizationId, {
+        identityId: row.id,
+        limit: RECENT_ACTIVITY_LIMIT,
+      }),
     };
   }
 

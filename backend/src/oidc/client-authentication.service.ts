@@ -20,6 +20,8 @@ export interface AuthenticatedClient {
   type: ApplicationType;
   /** False while the Application is Disabled, or once it is Deleted. */
   enabled: boolean;
+  /** The scopes the Application is configured for, current as of this request. */
+  allowedScopes: string[];
   method: ClientAuthenticationMethod;
 }
 

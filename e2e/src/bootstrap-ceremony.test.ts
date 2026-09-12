@@ -302,3 +302,35 @@ describe('Bootstrap Ceremony concurrency', () => {
     }
   });
 });
+
+describe('Bootstrap Ceremony Owner email normalization', () => {
+  it('folds a non-ASCII email so the Owner signs in with any case', async () => {
+    // The sign-in lookup normalizes the submitted email (Unicode-aware
+    // toLowerCase), so the ceremony must store the same normalized handle:
+    // SQLite's NOCASE collation folds ASCII only.
+    const instance = await Instance.start(BACKEND_DIST);
+    try {
+      const ceremony = await completeCeremony(instance, instance.setupToken(), {
+        organizationName: 'Acme',
+        email: 'Ähmed@Example.com',
+        password: 'owner password 123',
+        name: 'Ahmed',
+      });
+      expect(ceremony.status).toBe(201);
+
+      const signedIn = await signIn(instance, {
+        email: 'ähmed@example.com',
+        password: 'owner password 123',
+      });
+      expect(signedIn.status).toBe(200);
+
+      const exactCase = await signIn(instance, {
+        email: 'Ähmed@Example.com',
+        password: 'owner password 123',
+      });
+      expect(exactCase.status).toBe(200);
+    } finally {
+      await instance.stop();
+    }
+  });
+});

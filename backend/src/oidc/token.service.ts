@@ -11,7 +11,7 @@ import { identityGate } from '../identities/identity-state';
 import { SessionsService, type LiveSession } from '../sessions/sessions.service';
 import type { AuthenticatedClient } from './client-authentication.service';
 import { IssuerService } from './issuer.service';
-import { splitScope } from './scopes';
+import { splitScope, scopeWithin } from './scopes';
 import { SigningKeysService } from './signing-keys.service';
 import { optionalText } from '../common/text';
 
@@ -218,11 +218,19 @@ export class TokenService {
       return invalidGrant('the Identity is not permitted to use this Application');
     }
 
+    // The Application's configured scopes are the current contract: a code
+    // issued before a narrowing cannot be exchanged into claims the
+    // Application is no longer configured for.
+    const scopes = splitScope(row.scope);
+    if (!scopeWithin(client.allowedScopes, scopes)) {
+      return invalidGrant('the Application is no longer configured for these scopes');
+    }
+
     const body = await this.mint({
       client,
       identity,
       session,
-      scopes: splitScope(row.scope),
+      scopes,
       ...(row.nonce !== null ? { nonce: row.nonce } : {}),
     });
     if (!body) return invalidGrant('the Session that authorized this code is no longer valid');
@@ -289,7 +297,10 @@ export class TokenService {
       return invalidGrant('the Identity is not permitted to use this Application');
     }
 
-    // A refresh may narrow its scopes, never widen them (RFC 6749 §6).
+    // A refresh may narrow its scopes, never widen them (RFC 6749 §6), and the
+    // effective set must remain within what the Application is configured for
+    // now: narrowing `allowed_scopes` must actually bite, even for a client
+    // that keeps refreshing.
     const granted = splitScope(row.scope);
     const requested = optionalText(request.scope);
     const scopes = requested === undefined ? granted : narrowScope(granted, requested);
@@ -298,6 +309,13 @@ export class TokenService {
         status: 400,
         error: 'invalid_scope',
         error_description: 'the requested scope exceeds the original grant',
+      };
+    }
+    if (!scopeWithin(client.allowedScopes, scopes)) {
+      return {
+        status: 400,
+        error: 'invalid_scope',
+        error_description: 'the requested scope exceeds the Application\'s configured scopes',
       };
     }
 
@@ -396,8 +414,19 @@ export class TokenService {
     );
     // The parent is re-checked with no await between check and insert, so a
     // revocation that landed while the tokens were being signed cannot leave a
-    // live refresh token under a dead Session (ADR-0013).
+    // live refresh token under a dead Session (ADR-0013). The same no-await
+    // window applies to the Application's pause/deletion and the Enrollment's
+    // suspension: none may leave a freshly minted token behind.
     if (!this.sessions.resolveById(input.session.id)) return null;
+    if (!this.enrollments.allows(input.identity.id, input.client.id)) return null;
+    const application = this.db
+      .prepare('SELECT disabled_at, deleted_at FROM applications WHERE id = ?')
+      .get(input.client.id) as
+      | { disabled_at: string | null; deleted_at: string | null }
+      | undefined;
+    if (!application || application.disabled_at !== null || application.deleted_at !== null) {
+      return null;
+    }
     this.db
       .prepare(
         `INSERT INTO refresh_tokens

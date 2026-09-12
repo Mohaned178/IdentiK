@@ -20,3 +20,7 @@
 ## Comments
 
 Review round (post ticket-03 implementation) resolved a serious spec finding: re-sending a verification link on a duplicate unverified sign-up allowed a pre-claim takeover — the mailbox owner's click would have activated an Identity whose password the attacker chose. Duplicate emails (verified or not) now get the same "already exists — sign in instead" mailbox message; healing to the true owner is the ticket-04 reset flow (which sets a fresh password while proving the mailbox), per ADR-0011.
+
+## Comments
+
+Review round applied: the verification click's catch-all redirect to the `invalid` page now logs the underlying failure (message only, never the token) before answering uniformly, so an internal error after token consumption is diagnosable from the Instance log instead of being indistinguishable from a dead link. The email-change click got the same treatment in ticket 19's flow.

@@ -162,13 +162,12 @@ describe('Administrator invitation and Owner/Member roles', () => {
   });
 
   it('the role distinction is enforced: an Owner may invite and a Member may not', async () => {
-    const owner = await signIn(instance, OWNER.email, OWNER.password);
-    const ownerBody = (await owner.json()) as { role: string };
-    expect(ownerBody.role).toBe('owner');
+    const invitee = 'role-distinction@example.com';
+    const byMember = await invite(memberCookie, { email: invitee, role: 'member' });
+    expect(byMember.status).toBe(403);
 
-    const member = await signIn(instance, MEMBER.email, MEMBER.password);
-    const memberBody = (await member.json()) as { role: string };
-    expect(memberBody.role).toBe('member');
+    const byOwner = await invite(ownerCookie, { email: invitee, role: 'member' });
+    expect(byOwner.status).toBe(201);
   });
 
   it('an Owner-role invitation grants the Owner role', async () => {
