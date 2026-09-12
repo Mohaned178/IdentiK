@@ -10,6 +10,7 @@ import {
   ApplicationType,
 } from '../applications/applications.service';
 import { canonicalRedirectUri } from '../applications/redirect-uri';
+import { normalizeEmail } from '../identities/email';
 import { IdentitiesService, IdentityAuthentication } from '../identities/identities.service';
 import { SessionsService, SsoSession } from '../sessions/sessions.service';
 import {
@@ -17,8 +18,8 @@ import {
   type Branding,
 } from '../settings/organization-settings.service';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
-import { parseSupportedScope } from './scopes';
-import { optionalText } from './text';
+import { parseSupportedScope, scopeWithin } from './scopes';
+import { optionalText } from '../common/text';
 
 const S256_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
 
@@ -134,7 +135,7 @@ export class AuthorizeService {
       return this.complete(validated.request, deviceOf(existing));
     }
 
-    const email = credentials.email.trim().toLowerCase();
+    const email = normalizeEmail(credentials.email);
     const authentication = await this.identities.authenticate(
       validated.request.application.organizationId,
       email,
@@ -290,6 +291,18 @@ export class AuthorizeService {
           base,
           'invalid_scope',
           'scope must include openid and only the supported scopes',
+        ),
+      };
+    }
+    // Scopes are this Application's integration configuration (ADR-0016):
+    // anything it was not configured for is refused, not silently dropped.
+    if (!scopeWithin(application.allowedScopes, scope)) {
+      return {
+        kind: 'invalid',
+        outcome: this.errorRedirect(
+          base,
+          'invalid_scope',
+          'scope exceeds the scopes configured for this Application',
         ),
       };
     }

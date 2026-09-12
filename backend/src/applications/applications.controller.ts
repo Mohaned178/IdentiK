@@ -3,18 +3,18 @@ import {
   Body,
   Controller,
   Delete,
-  ForbiddenException,
   Get,
   HttpCode,
   Param,
   Patch,
   Post,
+  Put,
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { IsIn, IsString, MinLength } from 'class-validator';
+import { IsArray, IsIn, IsString, MinLength } from 'class-validator';
 import { AdministratorGuard } from '../administrators/administrator.guard';
-import { OwnerGuard } from '../administrators/owner.guard';
+import { assertOwner, OwnerGuard } from '../administrators/owner.guard';
 import {
   requireAdministratorSession,
   type AdministratorRequest,
@@ -52,6 +52,12 @@ class RedirectUriBody {
   uri!: string;
 }
 
+class ConfigureScopesBody {
+  @IsArray()
+  @IsString({ each: true })
+  scopes!: string[];
+}
+
 /**
  * The Management API surface for Applications and their Client credentials
  * (ADR-0019). The dashboard is a client of exactly these routes. Registration
@@ -74,8 +80,9 @@ export class ApplicationsController {
     @Body() body: RegisterApplicationBody,
   ): { application: ApplicationView; clientSecret: string | null } {
     const session = requireAdministratorSession(req);
-    if (body.type === 'web' && session.role !== 'owner') {
-      throw new ForbiddenException(
+    if (body.type === 'web') {
+      assertOwner(
+        session,
         'registering a Web Application issues a Client Secret and is reserved to Owners',
       );
     }
@@ -308,6 +315,30 @@ export class ApplicationsController {
         applicationId: id,
         uriId,
         actor: session.administratorId,
+      }),
+    };
+  }
+
+  /**
+   * Configure the scopes this Application may request (ADR-0016). Scope sets
+   * govern token contents, not user-granted permissions; `openid` is always
+   * required and the change is audit-logged. Members pull this lever with the
+   * rest of integration state — it is neither destructive nor credential-
+   * issuing.
+   */
+  @Put(':id/scopes')
+  configureScopes(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Body() body: ConfigureScopesBody,
+  ): { application: ApplicationView } {
+    const session = requireAdministratorSession(req);
+    return {
+      application: this.applications.setScopes({
+        organizationId: session.organizationId,
+        applicationId: id,
+        actor: session.administratorId,
+        scopes: body.scopes,
       }),
     };
   }

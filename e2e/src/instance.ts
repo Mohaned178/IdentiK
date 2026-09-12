@@ -86,6 +86,18 @@ export class Instance {
     return this.consoleOutput.join('');
   }
 
+  /**
+   * The Bootstrap Ceremony's one-time token. The ceremony is initiated from the
+   * install process, so the console is its operator surface: this is the only
+   * place the token is revealed, and it is never re-minted (the harness never
+   * derives it from storage).
+   */
+  setupToken(): string {
+    const match = [...this.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
+    if (!match) throw new Error('no setup token in console output');
+    return match[1]!;
+  }
+
   async request(
     path: string,
     init?: {

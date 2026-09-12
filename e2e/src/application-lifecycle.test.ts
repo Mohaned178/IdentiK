@@ -326,11 +326,9 @@ describe('Application disable and delete', () => {
   beforeAll(async () => {
     instance = await Instance.start(BACKEND_DIST, { IDENTIK_ACCESS_TOKEN_TTL_MS: '60000' });
 
-    const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
     const ceremony = await instance.request('/api/setup', {
       method: 'POST',
-      query: { token: match[1] },
+      query: { token: instance.setupToken() },
       body: { organizationName: ORGANIZATION_NAME, ...OWNER },
     });
     expect(ceremony.status).toBe(201);
@@ -519,6 +517,58 @@ describe('Application disable and delete', () => {
     // The shell remains visible in the directory, pseudonymously.
     const apps = await appList();
     expect(apps.find((app) => app.id === zotac.id)?.state).toBe('deleted');
+  });
+
+  it('keeps a deleted Application immutable: no new credentials, no redirect changes', async () => {
+    const before = await appDetail(zotac.id);
+    expect(before.state).toBe('deleted');
+    const eventsBefore = (await auditEvents()).filter(
+      (event) => event.detail.applicationId === zotac.id,
+    ).length;
+
+    // Credentials revoked at deletion stay revoked: no replacement can be
+    // minted on the terminal shell.
+    const issued = await adminPost(`/api/applications/${zotac.id}/secrets`, ownerCookie, {
+      label: 'after-delete',
+    });
+    expect(issued.status).toBe(409);
+
+    const added = await adminPost(`/api/applications/${zotac.id}/redirect-uris`, ownerCookie, {
+      uri: 'https://zotac.example.com/after-delete',
+    });
+    expect(added.status).toBe(409);
+
+    const existingUri = before.redirectUris[0]!;
+    const updated = await instance.request(
+      `/api/applications/${zotac.id}/redirect-uris/${existingUri.id}`,
+      {
+        method: 'PATCH',
+        headers: { cookie: ownerCookie },
+        body: { uri: 'https://zotac.example.com/moved' },
+        redirect: 'manual',
+      },
+    );
+    expect(updated.status).toBe(409);
+
+    const removed = await instance.request(
+      `/api/applications/${zotac.id}/redirect-uris/${existingUri.id}`,
+      { method: 'DELETE', headers: { cookie: ownerCookie }, redirect: 'manual' },
+    );
+    expect(removed.status).toBe(409);
+
+    const existingSecret = before.secrets[0]!;
+    const revoked = await adminPost(
+      `/api/applications/${zotac.id}/secrets/${existingSecret.id}/revoke`,
+      ownerCookie,
+    );
+    expect(revoked.status).toBe(409);
+
+    // Nothing changed, and none of the refusals wrote an audit event.
+    expect(await appDetail(zotac.id)).toEqual(before);
+    const eventsAfter = (await auditEvents()).filter(
+      (event) => event.detail.applicationId === zotac.id,
+    ).length;
+    expect(eventsAfter).toBe(eventsBefore);
   });
 
   it('serves the lifecycle levers to Administrator sessions only, and 404s unknown targets', async () => {

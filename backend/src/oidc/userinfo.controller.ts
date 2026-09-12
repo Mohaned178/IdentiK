@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { optionalText } from './text';
+import { optionalText } from '../common/text';
 import { TokenService } from './token.service';
 
 /**

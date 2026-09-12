@@ -103,7 +103,9 @@ export class AdministratorsController {
     };
     await this.throttle.wait('administrator-sign-in', subject);
 
-    const result = await this.administrators.signIn(body.email, body.password);
+    const result = await this.administrators.signIn(body.email, body.password, {
+      source: req.ip ?? null,
+    });
     if (!result.ok || !result.session) {
       this.throttle.record('administrator-sign-in', subject);
       throw new UnauthorizedException();

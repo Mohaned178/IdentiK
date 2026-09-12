@@ -19,7 +19,7 @@ import { isUniqueViolation } from '../storage/sqlite';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import { normalizeEmail } from './email';
-import { anonymizedHandle, anonymizedPseudonym } from './identity-state';
+import { anonymizedHandle, anonymizedPseudonym, identityGate } from './identity-state';
 
 type ReservationInsert = { created: true; identityId: string } | { created: false };
 
@@ -138,15 +138,11 @@ export class IdentitiesService {
       return { ok: false, reason: 'invalid', ...(row ? { identityId: row.id } : {}) };
     }
     // An anonymized shell is terminal: its destroyed credential can never open
-    // it again, whatever was presented.
-    if (row.anonymized_at !== null) {
-      return { ok: false, reason: 'invalid', identityId: row.id };
-    }
-    if (row.suspended_at !== null) {
-      return { ok: false, reason: 'suspended', identityId: row.id };
-    }
-    if (row.email_verified === 0) {
-      return { ok: false, reason: 'unverified', identityId: row.id };
+    // it again, whatever was presented. Suspension and an unverified
+    // reservation carry their own refusal reasons for the audit trail.
+    const gate = identityGate(row);
+    if (gate !== 'live') {
+      return { ok: false, reason: gate === 'anonymized' ? 'invalid' : gate, identityId: row.id };
     }
     return {
       ok: true,

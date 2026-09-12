@@ -307,6 +307,18 @@ const migrations: Migration[] = [
       db.exec('CREATE INDEX email_change_requests_identity_idx ON email_change_requests(identity_id)');
     },
   },
+  {
+    version: 13,
+    up: (db) => {
+      // Scopes are integration configuration governing token contents, not
+      // user-granted permissions (ADR-0016). Each Application carries its
+      // allowed scope set; the authorization endpoint refuses a request that
+      // exceeds it. Existing Applications keep the full supported set.
+      db.exec(
+        `ALTER TABLE applications ADD COLUMN allowed_scopes TEXT NOT NULL DEFAULT 'openid email profile'`,
+      );
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

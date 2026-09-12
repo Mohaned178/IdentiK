@@ -120,11 +120,9 @@ describe('Application registration and Client credential lifecycle', () => {
   beforeAll(async () => {
     instance = await Instance.start(BACKEND_DIST);
 
-    const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
     const ceremony = await instance.request('/api/setup', {
       method: 'POST',
-      query: { token: match[1] },
+      query: { token: instance.setupToken() },
       body: { organizationName: ORGANIZATION_NAME, ...OWNER },
     });
     expect(ceremony.status).toBe(201);

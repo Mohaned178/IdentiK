@@ -61,11 +61,9 @@ function median(values: number[]): number {
 /** Start an Instance and run the Bootstrap Ceremony so an Organization exists. */
 async function bootstrap(): Promise<Instance> {
   const instance = await Instance.start(BACKEND_DIST, THROTTLE_ENV);
-  const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-  if (!match) throw new Error('no setup token in console output');
   const ceremony = await instance.request('/api/setup', {
     method: 'POST',
-    query: { token: match[1] },
+    query: { token: instance.setupToken() },
     body: { organizationName: ORGANIZATION_NAME, ...OWNER },
   });
   if (ceremony.status !== 201) throw new Error(`setup failed: ${ceremony.status}`);

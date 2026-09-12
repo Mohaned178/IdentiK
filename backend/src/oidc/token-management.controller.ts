@@ -6,7 +6,7 @@ import {
 } from './client-authentication.service';
 import { presentedCredentials, sendInvalidClient } from './client-request';
 import { TokenService } from './token.service';
-import { optionalText } from './text';
+import { optionalText } from '../common/text';
 
 interface TokenManagementRequest {
   token?: unknown;

@@ -78,11 +78,9 @@ describe('Short-lived authorization codes and access tokens', () => {
       IDENTIK_ACCESS_TOKEN_TTL_MS: '2000',
     });
 
-    const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
     const ceremony = await instance.request('/api/setup', {
       method: 'POST',
-      query: { token: match[1] },
+      query: { token: instance.setupToken() },
       body: { organizationName: 'Acme', ...OWNER },
     });
     expect(ceremony.status).toBe(201);

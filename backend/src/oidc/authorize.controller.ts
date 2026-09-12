@@ -77,9 +77,9 @@ export class AuthorizeController {
       return;
     }
     if (outcome.kind === 'redirect-with-session') {
-      // The credential was proven: forget this Identity's failures so a
-      // legitimate user is never punished for having mistyped. The source
-      // history stays, so scanning remains slow.
+      // The credential was proven: forget this Identity's failures so an
+      // Identity is never punished for having mistyped. The source history
+      // stays, so scanning remains slow.
       this.throttle.recordSuccess('sign-in', subject);
       res.cookie(SSO_COOKIE, outcome.sessionToken, {
         ...sessionCookieOptions(this.links.resolve()),

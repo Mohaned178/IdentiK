@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import type { PresentedCredentials } from './client-authentication.service';
-import { optionalText } from './text';
+import { optionalText } from '../common/text';
 
 export interface ClientCredentialsBody {
   client_id?: unknown;

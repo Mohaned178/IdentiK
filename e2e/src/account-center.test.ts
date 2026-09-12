@@ -18,7 +18,7 @@ const BACKEND_DIST = backendDistFromWorkspaceRoot(WORKSPACE_ROOT);
 const ORGANIZATION_NAME = 'Acme';
 const OWNER = { email: 'ahmed@example.com', password: 'owner password 123', name: 'Ahmed' };
 const END_USER = { email: 'mohamed@example.com', password: 'end user password 123' };
-const OTHER_USER = { email: 'layla@example.com', password: 'other user password 123' };
+const OTHER_END_USER = { email: 'layla@example.com', password: 'other user password 123' };
 
 const ZOTAC_REDIRECT = 'https://zotac.example.com/oidc/callback';
 const MOBILE_REDIRECT = 'https://mobile.example.com/callback';
@@ -251,11 +251,9 @@ describe('Account Center: Sessions, revocation, sign-out, connected Applications
   beforeAll(async () => {
     instance = await Instance.start(BACKEND_DIST);
 
-    const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
     const ceremony = await instance.request('/api/setup', {
       method: 'POST',
-      query: { token: match[1] },
+      query: { token: instance.setupToken() },
       body: { organizationName: ORGANIZATION_NAME, ...OWNER },
     });
     expect(ceremony.status).toBe(201);
@@ -271,7 +269,7 @@ describe('Account Center: Sessions, revocation, sign-out, connected Applications
     mobile = await registerApplication('Mobile', 'spa', MOBILE_REDIRECT);
 
     await signUpAndVerify(END_USER);
-    await signUpAndVerify(OTHER_USER);
+    await signUpAndVerify(OTHER_END_USER);
 
     // Device A: the web Application, confidential client.
     const zotacSignIn = await signIn({
@@ -346,8 +344,8 @@ describe('Account Center: Sessions, revocation, sign-out, connected Applications
       clientId: zotac.clientId,
       redirectUri: ZOTAC_REDIRECT,
       device: DEVICE_OTHER,
-      email: OTHER_USER.email,
-      password: OTHER_USER.password,
+      email: OTHER_END_USER.email,
+      password: OTHER_END_USER.password,
     });
     otherCookie = otherSignIn.cookie;
 

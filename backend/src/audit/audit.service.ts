@@ -1,5 +1,6 @@
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { isISO8601 } from 'class-validator';
+import { optionalText } from '../common/text';
 import { DATABASE, Database } from '../storage/token';
 
 export interface AuditEventView {
@@ -48,9 +49,9 @@ export class AuditService {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
   list(organizationId: string, filters: AuditFilters): AuditEventView[] {
-    const actor = this.normalizeFilter(filters.actor);
-    const kind = this.normalizeFilter(filters.kind);
-    const identityId = this.normalizeFilter(filters.identityId);
+    const actor = optionalText(filters.actor);
+    const kind = optionalText(filters.kind);
+    const identityId = optionalText(filters.identityId);
     const from = this.instantFilter(filters.from, 'from');
     const to = this.instantFilter(filters.to, 'to');
     if (from && to && from > to) {
@@ -102,13 +103,6 @@ export class AuditService {
     }));
   }
 
-  /** Empty values are treated as absent: a filter left blank is no filter. */
-  private normalizeFilter(value: string | undefined): string | undefined {
-    if (value === undefined) return undefined;
-    const trimmed = value.trim();
-    return trimmed.length === 0 ? undefined : trimmed;
-  }
-
   /**
    * Accept only instants with no ambiguity: an ISO date (UTC midnight) or an
    * ISO date-time carrying an explicit offset. An offsetless date-time would
@@ -116,7 +110,7 @@ export class AuditService {
    * different windows per deployment.
    */
   private instantFilter(value: string | undefined, name: string): string | undefined {
-    const text = this.normalizeFilter(value);
+    const text = optionalText(value);
     if (text === undefined) return undefined;
     if (
       !isISO8601(text, { strict: true, strictSeparator: true }) ||

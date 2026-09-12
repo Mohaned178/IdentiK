@@ -7,12 +7,13 @@ import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
+import { identityGate } from '../identities/identity-state';
 import { SessionsService, type LiveSession } from '../sessions/sessions.service';
 import type { AuthenticatedClient } from './client-authentication.service';
 import { IssuerService } from './issuer.service';
 import { splitScope } from './scopes';
 import { SigningKeysService } from './signing-keys.service';
-import { optionalText } from './text';
+import { optionalText } from '../common/text';
 
 export type TokenErrorCode =
   | 'invalid_request'
@@ -545,11 +546,7 @@ export class TokenService {
   /** An Identity is usable only while verified, not suspended, not anonymized
    * (ADR-0006/0011/0007). */
   private isLive(identity: IdentityRow): boolean {
-    return (
-      identity.email_verified === 1 &&
-      identity.suspended_at === null &&
-      identity.anonymized_at === null
-    );
+    return identityGate(identity) === 'live';
   }
 
   private accessTtlMs(): number {

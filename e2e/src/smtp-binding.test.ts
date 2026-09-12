@@ -155,12 +155,6 @@ async function waitForOutput(
   throw new Error('expected diagnostic never appeared in the Instance output');
 }
 
-function setupToken(instance: Instance): string {
-  const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-  if (!match) throw new Error('no setup token in console output');
-  return match[1]!;
-}
-
 function cookieFrom(res: Response): string {
   return (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
 }
@@ -204,7 +198,7 @@ describe('SMTP transport binding delivers platform mail', () => {
 
     const ceremony = await instance.request('/api/setup', {
       method: 'POST',
-      query: { token: setupToken(instance) },
+      query: { token: instance.setupToken() },
       body: { organizationName: ORGANIZATION_NAME, ...OWNER },
     });
     expect(ceremony.status).toBe(201);

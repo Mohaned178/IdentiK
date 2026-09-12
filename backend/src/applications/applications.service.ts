@@ -18,6 +18,11 @@ import {
   type ApplicationState,
 } from './application-state';
 import { validateRedirectUri } from './redirect-uri';
+import {
+  DEFAULT_APPLICATION_SCOPES,
+  parseConfiguredScope,
+  splitScope,
+} from '../oidc/scopes';
 
 export type ApplicationType = 'web' | 'spa';
 
@@ -42,6 +47,7 @@ export interface ApplicationView {
   clientId: string;
   state: ApplicationState;
   createdAt: string;
+  allowedScopes: string[];
   secrets: SecretView[];
   redirectUris: RedirectUriView[];
 }
@@ -56,6 +62,7 @@ export interface AuthorizeClient {
   type: ApplicationType;
   enabled: boolean;
   redirectUris: string[];
+  allowedScopes: string[];
 }
 
 /** What the token surface needs to know about a client. */
@@ -75,6 +82,7 @@ interface ApplicationRow {
   disabled_at: string | null;
   deleted_at: string | null;
   created_at: string;
+  allowed_scopes: string;
 }
 
 interface SecretRow {
@@ -123,6 +131,7 @@ export class ApplicationsService {
     const id = uuid();
     const clientId = randomToken(16);
     const now = new Date().toISOString();
+    const allowedScopes = DEFAULT_APPLICATION_SCOPES;
 
     // Registration and the confidential client's first secret are one unit:
     // a Web Application must never exist without the credential that makes it
@@ -131,10 +140,19 @@ export class ApplicationsService {
     try {
       this.db
         .prepare(
-          `INSERT INTO applications (id, organization_id, name, type, client_id, created_by, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO applications (id, organization_id, name, type, client_id, created_by, created_at, allowed_scopes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(id, input.organizationId, name, input.type, clientId, input.actor, now);
+        .run(
+          id,
+          input.organizationId,
+          name,
+          input.type,
+          clientId,
+          input.actor,
+          now,
+          allowedScopes.join(' '),
+        );
 
       this.audit(input.organizationId, input.actor, 'application.registered', {
         applicationId: id,
@@ -163,7 +181,7 @@ export class ApplicationsService {
   list(organizationId: string): ApplicationView[] {
     const rows = this.db
       .prepare(
-        `SELECT id, name, type, client_id, disabled_at, deleted_at, created_at FROM applications
+        `SELECT id, name, type, client_id, disabled_at, deleted_at, created_at, allowed_scopes FROM applications
          WHERE organization_id = ? ORDER BY created_at`,
       )
       .all(organizationId) as unknown as ApplicationRow[];
@@ -301,7 +319,7 @@ export class ApplicationsService {
     const row = this.db
       .prepare(
         `SELECT a.id, a.client_id, a.organization_id, a.name, a.type, a.disabled_at, a.deleted_at,
-                o.name AS organization_name
+                a.allowed_scopes, o.name AS organization_name
          FROM applications a JOIN organizations o ON o.id = a.organization_id
          WHERE a.client_id = ?`,
       )
@@ -315,6 +333,7 @@ export class ApplicationsService {
           type: ApplicationType;
           disabled_at: string | null;
           deleted_at: string | null;
+          allowed_scopes: string;
         }
       | undefined;
     if (!row) return undefined;
@@ -333,6 +352,7 @@ export class ApplicationsService {
       type: row.type,
       enabled: this.isUsable(row),
       redirectUris: redirectUris.map((entry) => entry.uri),
+      allowedScopes: splitScope(row.allowed_scopes),
     };
   }
 
@@ -392,7 +412,7 @@ export class ApplicationsService {
     actor: string;
     label: string;
   }): { secret: SecretView; clientSecret: string } {
-    const application = this.requireApplication(input.organizationId, input.applicationId);
+    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
     if (application.type !== 'web') {
       throw new BadRequestException(
         'a SPA/Mobile Application is never issued a Client Secret',
@@ -430,7 +450,7 @@ export class ApplicationsService {
     secretId: string;
     actor: string;
   }): SecretView {
-    const application = this.requireApplication(input.organizationId, input.applicationId);
+    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
     const row = this.db
       .prepare('SELECT id, label, created_at, revoked_at FROM client_secrets WHERE id = ? AND application_id = ?')
       .get(input.secretId, application.id) as SecretRow | undefined;
@@ -467,7 +487,7 @@ export class ApplicationsService {
     actor: string;
     uri: string;
   }): RedirectUriView {
-    const application = this.requireApplication(input.organizationId, input.applicationId);
+    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
     const uri = validateRedirectUri(input.uri);
     this.refuseDuplicateRedirectUri(application.id, uri);
 
@@ -509,7 +529,7 @@ export class ApplicationsService {
     actor: string;
     uri: string;
   }): RedirectUriView {
-    const application = this.requireApplication(input.organizationId, input.applicationId);
+    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
     const row = this.requireRedirectUri(application.id, input.uriId);
     const uri = validateRedirectUri(input.uri);
     if (uri === row.uri) return this.redirectUriView(row);
@@ -542,7 +562,7 @@ export class ApplicationsService {
     uriId: string;
     actor: string;
   }): RedirectUriView {
-    const application = this.requireApplication(input.organizationId, input.applicationId);
+    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
     const row = this.requireRedirectUri(application.id, input.uriId);
     this.db.exec('BEGIN');
     try {
@@ -560,6 +580,48 @@ export class ApplicationsService {
       throw error;
     }
     return this.redirectUriView(row);
+  }
+
+  /**
+   * Configure the scope set this Application may request (ADR-0016). Scopes
+   * govern token contents, so the change is audit-logged with both the prior
+   * and the new set; `openid` is always included because every supported flow
+   * is OIDC. A no-op when the value is already in force. Members may pull this
+   * lever: narrowing integration configuration is not a destructive or
+   * credential-issuing action.
+   */
+  setScopes(input: {
+    organizationId: string;
+    applicationId: string;
+    actor: string;
+    scopes: unknown;
+  }): ApplicationView {
+    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
+    const scopes = parseConfiguredScope(input.scopes);
+    if (!scopes) {
+      throw new BadRequestException(
+        'scopes must be a non-empty list of openid, email, and profile, including openid',
+      );
+    }
+    const previous = splitScope(application.allowed_scopes);
+    if (previous.join(' ') === scopes.join(' ')) return this.toView(application);
+
+    this.db.exec('BEGIN');
+    try {
+      this.db
+        .prepare('UPDATE applications SET allowed_scopes = ? WHERE id = ?')
+        .run(scopes.join(' '), application.id);
+      this.audit(input.organizationId, input.actor, 'application.scopes.updated', {
+        applicationId: application.id,
+        previousScopes: previous,
+        scopes,
+      });
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return this.view(input.organizationId, application.id);
   }
 
   private requireRedirectUri(applicationId: string, uriId: string): RedirectUriRow {
@@ -600,11 +662,25 @@ export class ApplicationsService {
   private requireApplication(organizationId: string, id: string): ApplicationRow {
     const row = this.db
       .prepare(
-        'SELECT id, name, type, client_id, disabled_at, deleted_at, created_at FROM applications WHERE id = ? AND organization_id = ?',
+        'SELECT id, name, type, client_id, disabled_at, deleted_at, created_at, allowed_scopes FROM applications WHERE id = ? AND organization_id = ?',
       )
       .get(id, organizationId) as ApplicationRow | undefined;
     if (!row) throw new NotFoundException('no such Application');
     return row;
+  }
+
+  /**
+   * A Deleted Application is a terminal pseudonymous shell: it stays readable,
+   * but nothing about it is configurable any more. Every credential and
+   * redirect mutation goes through here so "credentials revoked immediately"
+   * cannot be undone by minting a replacement after deletion (ADR-0007).
+   */
+  private requireMutableApplication(organizationId: string, id: string): ApplicationRow {
+    const application = this.requireApplication(organizationId, id);
+    if (application.deleted_at !== null) {
+      throw new ConflictException('the Application has been deleted and cannot be changed');
+    }
+    return application;
   }
 
   private view(organizationId: string, id: string): ApplicationView {
@@ -632,6 +708,7 @@ export class ApplicationsService {
         deleted: row.deleted_at !== null,
       }),
       createdAt: row.created_at,
+      allowedScopes: splitScope(row.allowed_scopes),
       secrets: secrets.map((secret) => ({
         id: secret.id,
         label: secret.label,

@@ -1,5 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { DUMMY_PASSWORD_HASH, hashToken, randomToken, verifyPassword } from '../crypto/password';
+import { normalizeEmail } from '../identities/email';
+import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 
@@ -29,17 +31,25 @@ export const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 export class AdministratorsService {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
-  async signIn(email: string, password: string): Promise<AdministratorSignInResult> {
+  async signIn(
+    email: string,
+    password: string,
+    context: { source: string | null },
+  ): Promise<AdministratorSignInResult> {
+    const normalized = normalizeEmail(email);
     const admin = this.db
       .prepare('SELECT id, password_hash FROM administrators WHERE email = ?')
-      .get(email) as { id: string; password_hash: string } | undefined;
+      .get(normalized) as { id: string; password_hash: string } | undefined;
 
     // Verify even on unknown email so response timing does not reveal existence.
     const passwordOk = await verifyPassword(
       password,
       admin?.password_hash ?? DUMMY_PASSWORD_HASH,
     );
-    if (!admin || !passwordOk) return { ok: false };
+    if (!admin || !passwordOk) {
+      this.auditFailure(normalized, context.source);
+      return { ok: false };
+    }
 
     const membership = this.db
       .prepare(
@@ -53,7 +63,10 @@ export class AdministratorsService {
       organization_id: string;
       organization_name: string;
     } | undefined;
-    if (!membership) return { ok: false };
+    if (!membership) {
+      this.auditFailure(normalized, context.source);
+      return { ok: false };
+    }
 
     const token = randomToken(32);
     const now = new Date();
@@ -81,6 +94,42 @@ export class AdministratorsService {
         role: membership.role as AdministratorRole,
       },
     };
+  }
+
+  /**
+   * Failed Administrator sign-in attempts are security events (spec story 58,
+   * ADR-0020): source and targeted email are recorded, uniformly for an
+   * unknown email and a wrong password, so the audit trail carries no
+   * existence signal either. The event lands in the targeted Administrator's
+   * Organization; for an unknown email in a single-Organization Instance it
+   * lands in that Organization, where the Owner actually reads the surface.
+   */
+  private auditFailure(email: string, source: string | null): void {
+    const organizationId = this.failureOrganizationId(email);
+    if (!organizationId) return;
+    recordAuditEvent(this.db, {
+      organizationId,
+      actor: 'administrator',
+      kind: 'administrator.sign_in.failed',
+      detail: { email, reason: 'invalid_credentials', source },
+    });
+  }
+
+  private failureOrganizationId(email: string): string | undefined {
+    const member = this.db
+      .prepare(
+        `SELECT m.organization_id FROM administrators a
+         JOIN memberships m ON m.administrator_id = a.id
+         WHERE a.email = ?`,
+      )
+      .get(email) as { organization_id: string } | undefined;
+    if (member) return member.organization_id;
+    // Unknown email: there is exactly one Organization in this release, so
+    // its surface is the honest home for the attempt until hosted mode exists.
+    const hosted = this.db
+      .prepare('SELECT id FROM organizations ORDER BY created_at LIMIT 1')
+      .get() as { id: string } | undefined;
+    return hosted?.id;
   }
 
   async resolveSession(token: string): Promise<AdministratorSessionInfo | null> {

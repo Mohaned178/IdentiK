@@ -21,7 +21,7 @@ const ORGANIZATION_NAME = 'Acme';
 const OWNER = { email: 'ahmed@example.com', password: 'owner password 123', name: 'Ahmed' };
 const MEMBER = { email: 'layla@example.com', password: 'member password 123', name: 'Layla' };
 const END_USER = { email: 'mohamed@example.com', password: 'end user password 123' };
-const OTHER_USER = { email: 'omar@example.com', password: 'other user password 123' };
+const OTHER_END_USER = { email: 'omar@example.com', password: 'other user password 123' };
 const UNVERIFIED = { email: 'newcomer@example.com', password: 'unverified password 123' };
 
 const ZOTAC_REDIRECT = 'https://zotac.example.com/oidc/callback';
@@ -212,17 +212,15 @@ describe('Dashboard Identity and Enrollment views', () => {
     createHash('sha256').update(randomBytes(32).toString('base64url')).digest('base64url');
 
   let endUserId: string;
-  let otherUserId: string;
+  let otherEndUserId: string;
   let unverifiedId: string;
 
   beforeAll(async () => {
     instance = await Instance.start(BACKEND_DIST);
 
-    const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
     const ceremony = await instance.request('/api/setup', {
       method: 'POST',
-      query: { token: match[1] },
+      query: { token: instance.setupToken() },
       body: { organizationName: ORGANIZATION_NAME, ...OWNER },
     });
     expect(ceremony.status).toBe(201);
@@ -260,8 +258,8 @@ describe('Dashboard Identity and Enrollment views', () => {
 
     await signUp(END_USER);
     await verify(END_USER.email);
-    await signUp(OTHER_USER);
-    await verify(OTHER_USER.email);
+    await signUp(OTHER_END_USER);
+    await verify(OTHER_END_USER.email);
     await signUp(UNVERIFIED);
 
     // Authentication activity the detail view must surface.
@@ -298,8 +296,8 @@ describe('Dashboard Identity and Enrollment views', () => {
       await signIn({
         clientId: mobile.clientId,
         redirectUri: MOBILE_REDIRECT,
-        email: OTHER_USER.email,
-        password: OTHER_USER.password,
+        email: OTHER_END_USER.email,
+        password: OTHER_END_USER.password,
         device: 'OmarLaptop/2.0',
         codeChallenge: pkceChallenge(),
       }),
@@ -307,7 +305,7 @@ describe('Dashboard Identity and Enrollment views', () => {
 
     const listed = await identitiesFor(ownerCookie);
     endUserId = listed.find((identity) => identity.email === END_USER.email)!.id;
-    otherUserId = listed.find((identity) => identity.email === OTHER_USER.email)!.id;
+    otherEndUserId = listed.find((identity) => identity.email === OTHER_END_USER.email)!.id;
     unverifiedId = listed.find((identity) => identity.email === UNVERIFIED.email)!.id;
   });
 
@@ -331,8 +329,8 @@ describe('Dashboard Identity and Enrollment views', () => {
       emailVerified: true,
       state: 'active',
     });
-    expect(identities.find((identity) => identity.id === otherUserId)).toMatchObject({
-      email: OTHER_USER.email,
+    expect(identities.find((identity) => identity.id === otherEndUserId)).toMatchObject({
+      email: OTHER_END_USER.email,
       emailVerified: true,
       state: 'active',
     });
@@ -412,7 +410,7 @@ describe('Dashboard Identity and Enrollment views', () => {
     expect(times).toEqual([...times].sort((a, b) => b - a));
 
     // The other Identity's activity stays out of this page.
-    const other = await identityDetail(ownerCookie, otherUserId);
+    const other = await identityDetail(ownerCookie, otherEndUserId);
     expect(
       other.recentActivity.some((event) => event.detail.identityId === endUserId),
     ).toBe(false);
@@ -445,7 +443,7 @@ describe('Dashboard Identity and Enrollment views', () => {
 
     const mobileEnrollments = await applicationEnrollments(ownerCookie, mobile.id);
     expect(mobileEnrollments.map((entry) => entry.identityId).sort()).toEqual(
-      [endUserId, otherUserId].sort(),
+      [endUserId, otherEndUserId].sort(),
     );
     expect(mobileEnrollments.some((entry) => entry.email === UNVERIFIED.email)).toBe(false);
 
