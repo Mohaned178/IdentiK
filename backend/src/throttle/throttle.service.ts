@@ -11,6 +11,7 @@ export type ThrottleScope =
   | 'administrator-sign-in'
   | 'sign-up'
   | 'forgot-password'
+  | 'email-change'
   | 'token';
 
 /**

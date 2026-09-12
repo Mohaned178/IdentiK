@@ -455,6 +455,12 @@ export class IdentitiesService {
           email: identity.email,
           newEmail: request.new_email,
         });
+        // The address was claimed between request and proof: the refusal
+        // reaches the mailbox, like every other refusal in this flow.
+        await this.sendEmailChangeRefusedEmail(
+          request.new_email,
+          this.organizationName(request.organization_id),
+        );
         return false;
       }
       throw error;
@@ -665,7 +671,14 @@ export class IdentitiesService {
       this.db.prepare('DELETE FROM enrollments WHERE identity_id = ?').run(identity.id);
       this.db.prepare('DELETE FROM identity_tokens WHERE identity_id = ?').run(identity.id);
       this.db.prepare('DELETE FROM authorization_codes WHERE identity_id = ?').run(identity.id);
-      this.db.prepare('DELETE FROM email_change_requests WHERE identity_id = ?').run(identity.id);
+      // Pending changes to the address being freed die with it, and the freed
+      // address is released from any other Identity's request trail below.
+      this.db
+        .prepare(
+          `DELETE FROM email_change_requests
+           WHERE identity_id = ? OR (organization_id = ? AND new_email = ?)`,
+        )
+        .run(identity.id, identity.organization_id, identity.email);
       // The durable key is the identityId; the email in historical details is
       // PII, so the old trail is re-attributed to the shell, never left naming
       // the person. Scoped to this Identity's events and the End-User
@@ -705,6 +718,21 @@ export class IdentitiesService {
               AND json_extract(detail, '$.identityId') = ?`,
         )
         .run(pseudonym, identity.organization_id, identity.id);
+      // The freed address may also appear as some *other* Identity's requested
+      // or previous address; destroy it there too so deletion leaves no trace
+      // of the person (ADR-0007).
+      this.db
+        .prepare(
+          `UPDATE audit_events SET detail = json_set(detail, '$.newEmail', ?)
+            WHERE organization_id = ? AND json_extract(detail, '$.newEmail') = ?`,
+        )
+        .run(pseudonym, identity.organization_id, identity.email);
+      this.db
+        .prepare(
+          `UPDATE audit_events SET detail = json_set(detail, '$.previousEmail', ?)
+            WHERE organization_id = ? AND json_extract(detail, '$.previousEmail') = ?`,
+        )
+        .run(pseudonym, identity.organization_id, identity.email);
       this.adminAudit(identity.organization_id, input.actor, 'identity.anonymized', {
         identityId: identity.id,
         pseudonym,
@@ -889,11 +917,11 @@ export class IdentitiesService {
   ): Promise<void> {
     await this.mail.send({
       to: email,
-      subject: `This email is already in use — ${organizationName}`,
+      subject: `This email cannot be used — ${organizationName}`,
       body:
         `Someone tried to change an identity's email at ${organizationName} to this address, ` +
-        `but an identity with this email already exists.\n` +
-        `No change was made — the address stays with its current identity.\n\n` +
+        `but this address is already in use or reserved for another identity.\n` +
+        `No change was made — the address keeps its current holder.\n\n` +
         `If you have forgotten your password, use the "Forgot password" flow to choose a new one.\n` +
         `If this wasn't you, you can ignore this message.`,
     });

@@ -18,7 +18,7 @@ const BACKEND_DIST = backendDistFromWorkspaceRoot(WORKSPACE_ROOT);
 
 const ORGANIZATION_NAME = 'Acme';
 const OWNER = { email: 'ahmed@example.com', password: 'owner password 123', name: 'Ahmed' };
-const USER = { email: 'mohamed@example.com', password: 'end user password 123' };
+const END_USER = { email: 'mohamed@example.com', password: 'end user password 123' };
 const OTHER = { email: 'layla@example.com', password: 'other user password 123' };
 const RESERVED = 'reserved@example.com';
 const NEW_EMAIL = 'mohamed.new@example.com';
@@ -73,7 +73,7 @@ function sleep(ms: number): Promise<void> {
 describe('Account Center verified email change', () => {
   let instance: Instance;
   let ownerCookie: string;
-  let userCookie: string;
+  let endUserCookie: string;
   let clientId: string;
 
   const pkce = (): { verifier: string; challenge: string } => {
@@ -182,12 +182,12 @@ describe('Account Center verified email change', () => {
       body: { uri: REDIRECT },
     });
 
-    await signUpAndVerify(USER);
+    await signUpAndVerify(END_USER);
     await signUpAndVerify(OTHER);
     // A claimed-but-unverified reservation: the email is held inertly (ADR-0011).
     expect((await signUp(RESERVED, 'reserved user password 123')).status).toBe(201);
 
-    userCookie = (await signIn(USER.email, USER.password)).cookie;
+    endUserCookie = (await signIn(END_USER.email, END_USER.password)).cookie;
   });
 
   afterAll(async () => {
@@ -203,27 +203,27 @@ describe('Account Center verified email change', () => {
   });
 
   it('delivers verification to the new address while the old handle stays active', async () => {
-    const res = await requestChange(userCookie, NEW_EMAIL);
+    const res = await requestChange(endUserCookie, NEW_EMAIL);
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ status: 'check-your-mailbox' });
 
     // The proof travels to the new mailbox, not the old one.
     const link = await changeLinkTo(NEW_EMAIL);
     expect(link).toContain('/api/end-users/change-email?token=');
-    const oldMailbox = (await mailsTo(USER.email)).filter((mail) =>
+    const oldMailbox = (await mailsTo(END_USER.email)).filter((mail) =>
       mail.body.includes('/api/end-users/change-email?token='),
     );
     expect(oldMailbox).toHaveLength(0);
 
     // Nothing has changed yet: the handle is still the old address, with the
     // requested one only pending.
-    const view = await accountCenterView(userCookie);
-    expect(view.identity.email).toBe(USER.email);
+    const view = await accountCenterView(endUserCookie);
+    expect(view.identity.email).toBe(END_USER.email);
     expect(view.pendingEmail).toBe(NEW_EMAIL);
 
     // The old handle still authenticates (ADR-0005: the change is not effective
     // until proven).
-    const oldHandle = await signIn(USER.email, USER.password);
+    const oldHandle = await signIn(END_USER.email, END_USER.password);
     expect(oldHandle.status).toBe(302);
   });
 
@@ -233,13 +233,13 @@ describe('Account Center verified email change', () => {
     expect(click.status).toBe(302);
     expect(outcomeFrom(click.location)).toBe('changed');
 
-    const view = await accountCenterView(userCookie);
+    const view = await accountCenterView(endUserCookie);
     expect(view.identity.email).toBe(NEW_EMAIL);
     expect(view.pendingEmail).toBeNull();
 
     // The new handle now authenticates and the old one is gone.
-    expect((await signIn(NEW_EMAIL, USER.password)).status).toBe(302);
-    expect((await signIn(USER.email, USER.password)).status).toBe(401);
+    expect((await signIn(NEW_EMAIL, END_USER.password)).status).toBe(302);
+    expect((await signIn(END_USER.email, END_USER.password)).status).toBe(401);
   });
 
   it('a verification link is single-use', async () => {
@@ -248,13 +248,13 @@ describe('Account Center verified email change', () => {
     expect(again.status).toBe(302);
     expect(outcomeFrom(again.location)).toBe('invalid');
 
-    const view = await accountCenterView(userCookie);
+    const view = await accountCenterView(endUserCookie);
     expect(view.identity.email).toBe(NEW_EMAIL);
   });
 
   it('refuses an address held by a verified Identity, with uniform messaging', async () => {
-    const available = await requestChange(userCookie, SECOND_NEW_EMAIL);
-    const claimed = await requestChange(userCookie, OTHER.email);
+    const available = await requestChange(endUserCookie, SECOND_NEW_EMAIL);
+    const claimed = await requestChange(endUserCookie, OTHER.email);
     expect(claimed.status).toBe(available.status);
     expect(await claimed.json()).toEqual(await available.json());
 
@@ -265,13 +265,13 @@ describe('Account Center verified email change', () => {
     );
     expect(claimedLinks).toHaveLength(0);
 
-    const view = await accountCenterView(userCookie);
+    const view = await accountCenterView(endUserCookie);
     expect(view.identity.email).toBe(NEW_EMAIL);
     expect(view.pendingEmail).toBe(SECOND_NEW_EMAIL);
   });
 
   it('refuses a claimed-but-unverified reservation identically', async () => {
-    const claimed = await requestChange(userCookie, RESERVED);
+    const claimed = await requestChange(endUserCookie, RESERVED);
     expect(claimed.status).toBe(202);
     expect(await claimed.json()).toEqual({ status: 'check-your-mailbox' });
 
@@ -280,7 +280,7 @@ describe('Account Center verified email change', () => {
     );
     expect(reservationLinks).toHaveLength(0);
 
-    const view = await accountCenterView(userCookie);
+    const view = await accountCenterView(endUserCookie);
     expect(view.identity.email).toBe(NEW_EMAIL);
   });
 
@@ -294,11 +294,34 @@ describe('Account Center verified email change', () => {
 
     const completed = events.filter((event) => event.kind === 'identity.email_change.completed');
     expect(completed).toHaveLength(1);
-    expect(completed[0]!.detail).toMatchObject({ email: NEW_EMAIL, previousEmail: USER.email });
+    expect(completed[0]!.detail).toMatchObject({ email: NEW_EMAIL, previousEmail: END_USER.email });
 
     const refused = events.filter((event) => event.kind === 'identity.email_change.refused');
     expect(refused.some((event) => event.detail.newEmail === OTHER.email)).toBe(true);
     expect(refused.some((event) => event.detail.newEmail === RESERVED)).toBe(true);
+  });
+
+  it('anonymizing an Identity destroys its address in another Identity’s email-change trail', async () => {
+    const list = await instance.request('/api/identities', { headers: { cookie: ownerCookie } });
+    const identities = ((await list.json()) as {
+      identities: Array<{ id: string; email: string }>;
+    }).identities;
+    const other = identities.find((identity) => identity.email === OTHER.email);
+    expect(other).toBeDefined();
+
+    const anonymized = await instance.request(`/api/identities/${other!.id}/anonymize`, {
+      method: 'POST',
+      headers: { cookie: ownerCookie },
+      body: { confirm: true },
+    });
+    expect(anonymized.status).toBe(200);
+
+    // The refusal event above named OTHER's address from the requester's trail;
+    // after anonymization no trace of that address may survive (ADR-0007).
+    const leaked = (await auditEvents()).filter((event) =>
+      JSON.stringify(event.detail).includes(OTHER.email),
+    );
+    expect(leaked).toHaveLength(0);
   });
 });
 
@@ -336,9 +359,9 @@ describe('email change token expiry', () => {
         body: { uri: REDIRECT },
       });
 
-      expect((await instance.request('/api/end-users/sign-up', { method: 'POST', body: USER })).status).toBe(201);
+      expect((await instance.request('/api/end-users/sign-up', { method: 'POST', body: END_USER })).status).toBe(201);
       const verification = (await instance.capturedEmails())
-        .filter((mail) => mail.to === USER.email && /verify/i.test(mail.subject))
+        .filter((mail) => mail.to === END_USER.email && /verify/i.test(mail.subject))
         .at(-1);
       await fetch(linkFromBody(verification!.body), { redirect: 'manual' });
 
@@ -354,7 +377,7 @@ describe('email change token expiry', () => {
           code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
           code_challenge_method: 'S256',
         },
-        body: USER,
+        body: END_USER,
       });
       expect(signIn.status).toBe(302);
       const cookie = cookieFrom(signIn);
@@ -383,7 +406,7 @@ describe('email change token expiry', () => {
       const view = (await (
         await instance.request('/api/account-center', { headers: { cookie } })
       ).json()) as AccountCenterView;
-      expect(view.identity.email).toBe(USER.email);
+      expect(view.identity.email).toBe(END_USER.email);
       expect(view.pendingEmail).toBeNull();
     } finally {
       await instance.stop();

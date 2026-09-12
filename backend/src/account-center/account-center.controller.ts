@@ -20,6 +20,7 @@ import { IdentitiesService } from '../identities/identities.service';
 import { EndUserSessionGuard, type EndUserRequest } from '../sessions/end-user.guard';
 import { SSO_COOKIE, ssoTokenFrom } from '../sessions/sso-cookie';
 import { SessionsService } from '../sessions/sessions.service';
+import { ThrottleService, type ThrottleSubject } from '../throttle/throttle.service';
 import { AccountCenterService, AccountCenterView } from './account-center.service';
 
 class ChangePasswordBody {
@@ -54,6 +55,7 @@ export class AccountCenterController {
     private readonly identities: IdentitiesService,
     private readonly sessions: SessionsService,
     private readonly links: LinkBaseService,
+    private readonly throttle: ThrottleService,
   ) {}
 
   @Get()
@@ -106,6 +108,14 @@ export class AccountCenterController {
   ): Promise<{ status: 'check-your-mailbox' }> {
     const session = req.endUserSession;
     if (!session) throw new UnauthorizedException();
+    // Sending mail to an arbitrary address is a public-facing abuse surface,
+    // so the request carries the same escalating per-source/per-Identity delay
+    // as sign-up and forgot-password (ADR-0020). Keyed on the requesting
+    // Identity, never the requested address, so the delay cannot distinguish
+    // which addresses are already claimed.
+    const subject: ThrottleSubject = { source: req.ip ?? null, identity: session.email };
+    await this.throttle.wait('email-change', subject);
+    this.throttle.record('email-change', subject);
     await this.identities.requestEmailChange({
       identityId: session.identityId,
       newEmail: body.newEmail,
