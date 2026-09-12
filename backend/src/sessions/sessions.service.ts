@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { hashToken, randomToken } from '../crypto/password';
 import { parseTtlMs } from '../config/env';
+import { OrganizationSettingsService } from '../settings/organization-settings.service';
 import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
@@ -80,12 +81,16 @@ const SESSION_ROW_COLUMNS = `s.id, s.identity_id, s.organization_id, s.user_agen
  */
 @Injectable()
 export class SessionsService {
-  constructor(@Inject(DATABASE) private readonly db: Database) {}
+  constructor(
+    @Inject(DATABASE) private readonly db: Database,
+    private readonly settings: OrganizationSettingsService,
+  ) {}
 
   /**
-   * Instance-wide default for now; per-Organization session timeout is
-   * Organization-scoped policy (ADR-0022) and arrives with the settings
-   * surface in ticket 18.
+   * The browser cookie's absolute cap. Which Session is still live is decided
+   * by the Organization's idle window (ADR-0022), enforced in `isLive`; the
+   * cookie simply never needs to outlive the cap. Per-Organization timeout is
+   * the policy half; this deployment value is the transport envelope.
    */
   ttlMs(): number {
     return parseTtlMs('IDENTIK_SESSION_TTL_MS', 30 * 24 * 60 * 60 * 1000);
@@ -113,7 +118,7 @@ export class SessionsService {
         input.userAgent,
         now.toISOString(),
         now.toISOString(),
-        new Date(now.getTime() + this.ttlMs()).toISOString(),
+        new Date(now.getTime() + this.settings.idleTimeoutMs(input.organizationId)).toISOString(),
       );
     return { token, sessionId: id };
   }
@@ -126,9 +131,7 @@ export class SessionsService {
     // Only live Sessions record activity: a dead cookie must not refresh the
     // last-seen time of a device the End User already revoked.
     if (!session) return null;
-    this.db
-      .prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?')
-      .run(new Date().toISOString(), row.id);
+    this.touch(row);
     return session;
   }
 
@@ -136,14 +139,16 @@ export class SessionsService {
    * Resolve a Session by id with the same fail-closed checks. Refresh tokens
    * are children of the Session (ADR-0013), so refresh validation asks this:
    * a dead parent cannot mint new tokens, whatever route killed it — the
-   * Account Center, a suspension, a password reset.
+   * Account Center, a suspension, a password reset. A successful resolution is
+   * activity and refreshes the idle window too.
    */
   resolveById(sessionId: string): LiveSession | null {
     const row = this.findRow('s.id = ?', sessionId);
     if (!row) return null;
     const session = this.toSession(row);
     if (!session) return null;
-    return { ...session, createdAt: row.created_at, expiresAt: row.expires_at };
+    const expiresAt = this.touch(row);
+    return { ...session, createdAt: row.created_at, expiresAt };
   }
 
   /**
@@ -326,6 +331,23 @@ export class SessionsService {
       .get(value) as SessionRow | undefined;
   }
 
+  /**
+   * Record activity: refresh the last-seen stamp and push the idle deadline
+   * out by the Organization's window (ADR-0022). This is the whole "activity
+   * refreshes the window" rule — no scheduler exists, so idleness is judged
+   * lazily at the next resolution.
+   */
+  private touch(row: { id: string; organization_id: string }): string {
+    const now = new Date();
+    const expiresAt = new Date(
+      now.getTime() + this.settings.idleTimeoutMs(row.organization_id),
+    ).toISOString();
+    this.db
+      .prepare('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?')
+      .run(now.toISOString(), expiresAt, row.id);
+    return expiresAt;
+  }
+
   /** The gate every Session resolution passes: dead means dead. */
   private toSession(row: SessionRow): SsoSession | null {
     if (!this.isLive(row)) return null;
@@ -340,6 +362,8 @@ export class SessionsService {
   private isLive(row: SessionRow): boolean {
     const now = new Date().toISOString();
     if (row.revoked_at !== null) return false;
+    // `expires_at` is the idle deadline the Organization's window sets and
+    // every activity refreshes (ADR-0022), so an untouched Session lapses.
     if (row.expires_at <= now) return false;
     if (row.email_verified === 0) return false;
     if (row.anonymized_at !== null) return false;

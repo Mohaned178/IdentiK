@@ -12,6 +12,10 @@ import {
 import { canonicalRedirectUri } from '../applications/redirect-uri';
 import { IdentitiesService, IdentityAuthentication } from '../identities/identities.service';
 import { SessionsService, SsoSession } from '../sessions/sessions.service';
+import {
+  OrganizationSettingsService,
+  type Branding,
+} from '../settings/organization-settings.service';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
 import { parseSupportedScope } from './scopes';
 import { optionalText } from './text';
@@ -32,6 +36,7 @@ export interface AuthorizationRequest {
 export interface SignInPage {
   organizationName: string;
   applicationName: string;
+  branding: Branding;
   request: {
     clientId: string;
     redirectUri: string;
@@ -96,6 +101,7 @@ export class AuthorizeService {
     private readonly identities: IdentitiesService,
     private readonly sessions: SessionsService,
     private readonly enrollments: EnrollmentsService,
+    private readonly settings: OrganizationSettingsService,
     @Inject(DATABASE) private readonly db: Database,
   ) {}
 
@@ -375,6 +381,7 @@ export class AuthorizeService {
     return {
       organizationName: request.application.organizationName,
       applicationName: request.application.name,
+      branding: this.settings.branding(request.application.organizationId),
       request: {
         clientId: request.application.clientId,
         redirectUri: request.redirectUri,

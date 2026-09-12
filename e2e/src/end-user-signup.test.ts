@@ -97,7 +97,7 @@ describe('End-User sign-up with the email verification gate', () => {
   it('the sign-up data endpoint carries the Organization name', async () => {
     const info = await instance.request('/api/end-users/sign-up');
     expect(info.status).toBe(200);
-    expect(await info.json()).toEqual({ organizationName: ORGANIZATION_NAME });
+    expect(await info.json()).toMatchObject({ organizationName: ORGANIZATION_NAME });
   });
 
   it('sign-up with a new email is accepted with a uniform response', async () => {

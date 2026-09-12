@@ -12,6 +12,10 @@ import {
 import type { Request, Response } from 'express';
 import { IsEmail, IsString, MinLength } from 'class-validator';
 import { ThrottleService, type ThrottleScope, type ThrottleSubject } from '../throttle/throttle.service';
+import {
+  OrganizationSettingsService,
+  type Branding,
+} from '../settings/organization-settings.service';
 import { normalizeEmail } from './email';
 import { IdentitiesService } from './identities.service';
 
@@ -51,11 +55,12 @@ export class EndUsersController {
   constructor(
     private readonly identities: IdentitiesService,
     private readonly throttle: ThrottleService,
+    private readonly settings: OrganizationSettingsService,
   ) {}
 
   @Get('sign-up')
-  signUpPageInfo(): { organizationName: string } {
-    return { organizationName: this.identities.hostedOrganization().name };
+  signUpPageInfo(): { organizationName: string; branding: Branding } {
+    return this.pageInfo();
   }
 
   @Post('sign-up')
@@ -99,8 +104,8 @@ export class EndUsersController {
   }
 
   @Get('forgot-password')
-  forgotPasswordPageInfo(): { organizationName: string } {
-    return { organizationName: this.identities.hostedOrganization().name };
+  forgotPasswordPageInfo(): { organizationName: string; branding: Branding } {
+    return this.pageInfo();
   }
 
   /**
@@ -127,11 +132,11 @@ export class EndUsersController {
   resetPasswordPageInfo(@Query('token') token: string | undefined): {
     organizationName: string;
     valid: boolean;
+    branding: Branding;
   } {
-    const organizationName = this.identities.hostedOrganization().name;
     const valid =
       typeof token === 'string' && token.length > 0 && this.identities.validateResetToken(token);
-    return { organizationName, valid };
+    return { ...this.pageInfo(), valid };
   }
 
   /**
@@ -165,5 +170,14 @@ export class EndUsersController {
 
   private resultPath(outcome: 'verified' | 'invalid'): string {
     return `/end-users/verify-email/result?outcome=${outcome}`;
+  }
+
+  /** The Organization's name and branding every hosted page renders. */
+  private pageInfo(): { organizationName: string; branding: Branding } {
+    const organization = this.identities.hostedOrganization();
+    return {
+      organizationName: organization.name,
+      branding: this.settings.branding(organization.id),
+    };
   }
 }

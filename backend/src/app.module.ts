@@ -9,6 +9,7 @@ import { IdentitiesModule } from './identities/identities.module';
 import { ApplicationsModule } from './applications/applications.module';
 import { OidcModule } from './oidc/oidc.module';
 import { AccountCenterModule } from './account-center/account-center.module';
+import { SettingsModule } from './settings/settings.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { AccountCenterModule } from './account-center/account-center.module';
     ApplicationsModule,
     OidcModule,
     AccountCenterModule,
+    SettingsModule,
   ],
 })
 export class AppModule {}

@@ -1,4 +1,4 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import {
   DUMMY_PASSWORD_HASH,
   hashPassword,
@@ -10,6 +10,10 @@ import { parseTtlMs } from '../config/env';
 import { LinkBaseService } from '../config/link-base.service';
 import { MailService } from '../mail/mail.service';
 import { SessionsService } from '../sessions/sessions.service';
+import {
+  OrganizationSettingsService,
+  firstPasswordProblem,
+} from '../settings/organization-settings.service';
 import { recordAuditEvent } from '../storage/audit';
 import { isUniqueViolation } from '../storage/sqlite';
 import { DATABASE, Database } from '../storage/token';
@@ -81,6 +85,7 @@ export class IdentitiesService {
     private readonly mail: MailService,
     private readonly links: LinkBaseService,
     private readonly sessions: SessionsService,
+    private readonly settings: OrganizationSettingsService,
   ) {}
 
   /**
@@ -151,6 +156,10 @@ export class IdentitiesService {
 
   async signUp(input: { email: string; password: string }): Promise<void> {
     const organization = this.hostedOrganization();
+    // The Organization's password policy is a credential gate (ADR-0022):
+    // refuse a weak password before any reservation is made. This is the
+    // visitor's own input, so a 400 reveals nothing about email existence.
+    this.assertPasswordPolicy(organization.id, input.password);
     const email = normalizeEmail(input.email);
     // Uniform work: every path hashes a password and sends exactly one email.
     const passwordHash = await hashPassword(input.password);
@@ -247,6 +256,12 @@ export class IdentitiesService {
    * false without revealing why.
    */
   async resetPassword(token: string, password: string): Promise<boolean> {
+    // The policy gate runs before the token is consumed, so a weak password
+    // does not burn the reset link — the End User can try again with a stronger
+    // one. An invalid link still hashes (uniform work) and reports failure.
+    const preview = this.previewToken('password_reset', token);
+    if (preview) this.assertPasswordPolicy(preview.organizationId, password);
+
     const passwordHash = await hashPassword(password);
     const identityId = this.consumeToken('password_reset', token);
     if (!identityId) return false;
@@ -322,6 +337,9 @@ export class IdentitiesService {
       return false;
     }
 
+    // The Organization's policy applies to every credential its Identities
+    // set (ADR-0022), the self-service change included.
+    this.assertPasswordPolicy(identity.organization_id, input.newPassword);
     const passwordHash = await hashPassword(input.newPassword);
     const otherSessionsRevoked = this.sessions.revokeOthersForIdentity({
       identityId: identity.id,
@@ -625,6 +643,36 @@ export class IdentitiesService {
       )
       .get(hashToken(token), kind, now);
     return row !== undefined;
+  }
+
+  /**
+   * The Identity and Organization behind a live mailbox-proof token, without
+   * consuming it. Used to resolve the Organization's password policy before
+   * the single-use token is spent.
+   */
+  private previewToken(
+    kind: IdentityTokenKind,
+    token: string,
+  ): { identityId: string; organizationId: string } | undefined {
+    const now = new Date().toISOString();
+    return this.db
+      .prepare(
+        `SELECT t.identity_id AS identityId, i.organization_id AS organizationId
+         FROM identity_tokens t JOIN identities i ON i.id = t.identity_id
+         WHERE t.token_hash = ? AND t.kind = ? AND t.consumed_at IS NULL AND t.expires_at > ?`,
+      )
+      .get(hashToken(token), kind, now) as { identityId: string; organizationId: string } | undefined;
+  }
+
+  /** Refuse a password the Organization's policy floors reject (ADR-0022). */
+  private assertPasswordPolicy(organizationId: string, password: string): void {
+    const problem = firstPasswordProblem(this.settings.passwordPolicy(organizationId), password);
+    if (!problem) return;
+    throw new BadRequestException({
+      error: 'password_too_weak',
+      code: problem.code,
+      message: problem.message,
+    });
   }
 
   private async sendVerificationEmail(

@@ -264,6 +264,26 @@ const migrations: Migration[] = [
       db.exec('ALTER TABLE applications ADD COLUMN deleted_at TEXT');
     },
   },
+  {
+    version: 11,
+    up: (db) => {
+      // ADR-0022: Organization-scoped policy is dashboard-governed and
+      // audit-logged, while the instance-scoped trust fabric (SMTP, signing
+      // keys, external providers) lives in deployment configuration and never
+      // appears here. One row per Organization per setting, each a JSON
+      // document the settings service merges with its defaults; the key set is
+      // the allowlist the Management API enforces, so no trust-fabric setting
+      // can be represented in this table.
+      db.exec(`CREATE TABLE organization_settings (
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        key TEXT NOT NULL CHECK (key IN ('branding', 'password_policy', 'session_policy')),
+        value TEXT NOT NULL,
+        updated_by TEXT REFERENCES administrators(id),
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (organization_id, key)
+      )`);
+    },
+  },
 ];
 
 export function migrate(db: DatabaseSync): void {

@@ -3,6 +3,7 @@ import { ApplicationsModule } from '../applications/applications.module';
 import { EnrollmentsModule } from '../enrollments/enrollments.module';
 import { IdentitiesModule } from '../identities/identities.module';
 import { SessionsModule } from '../sessions/sessions.module';
+import { SettingsModule } from '../settings/settings.module';
 import { StorageModule } from '../storage/storage.module';
 import { ThrottleModule } from '../throttle/throttle.module';
 import { AuthorizeController } from './authorize.controller';
@@ -22,6 +23,7 @@ import { UserInfoController } from './userinfo.controller';
     ApplicationsModule,
     IdentitiesModule,
     SessionsModule,
+    SettingsModule,
     EnrollmentsModule,
     ThrottleModule,
   ],
