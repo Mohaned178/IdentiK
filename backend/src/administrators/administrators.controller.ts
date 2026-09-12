@@ -21,6 +21,8 @@ import { OwnerGuard } from './owner.guard';
 import { InvitationsService } from './invitations.service';
 import { LinkBaseService } from '../config/link-base.service';
 import { cookieToken, sessionCookieOptions } from '../config/cookies';
+import { normalizeEmail } from '../identities/email';
+import { ThrottleService, type ThrottleSubject } from '../throttle/throttle.service';
 
 class SignInBody {
   @IsEmail()
@@ -82,15 +84,31 @@ export class AdministratorsController {
     private readonly administrators: AdministratorsService,
     private readonly invitations: InvitationsService,
     private readonly links: LinkBaseService,
+    private readonly throttle: ThrottleService,
   ) {}
 
   @Post('sign-in')
   @HttpCode(200)
-  async signIn(@Body() body: SignInBody, @Res({ passthrough: true }) res: Response) {
+  async signIn(
+    @Req() req: Request,
+    @Body() body: SignInBody,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // The dedicated Administrator population has its own sign-in (ADR-0002),
+    // so it carries its own escalating delay (ADR-0020) — keyed on the
+    // submitted email whether or not an Administrator owns it.
+    const subject: ThrottleSubject = {
+      source: req.ip ?? null,
+      identity: normalizeEmail(body.email),
+    };
+    await this.throttle.wait('administrator-sign-in', subject);
+
     const result = await this.administrators.signIn(body.email, body.password);
     if (!result.ok || !result.session) {
+      this.throttle.record('administrator-sign-in', subject);
       throw new UnauthorizedException();
     }
+    this.throttle.recordSuccess('administrator-sign-in', subject);
     res.cookie(SESSION_COOKIE, result.session.token, {
       ...sessionCookieOptions(this.links.resolve()),
       maxAge: ADMIN_SESSION_TTL_MS,

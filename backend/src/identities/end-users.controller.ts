@@ -11,7 +11,8 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { IsEmail, IsString, MinLength } from 'class-validator';
-import { ThrottleService, type ThrottleSubject } from '../throttle/throttle.service';
+import { ThrottleService, type ThrottleScope, type ThrottleSubject } from '../throttle/throttle.service';
+import { normalizeEmail } from './email';
 import { IdentitiesService } from './identities.service';
 
 class SignUpBody {
@@ -153,10 +154,10 @@ export class EndUsersController {
    * the submitted email exactly as the Identity lookup normalizes it, so the
    * delay never distinguishes email-exists from email-not-exists.
    */
-  private async guardAttempt(scope: string, req: Request, email: string): Promise<void> {
+  private async guardAttempt(scope: ThrottleScope, req: Request, email: string): Promise<void> {
     const subject: ThrottleSubject = {
       source: req.ip ?? null,
-      identity: email.trim().toLowerCase(),
+      identity: normalizeEmail(email),
     };
     await this.throttle.wait(scope, subject);
     this.throttle.record(scope, subject);

@@ -12,7 +12,7 @@ const BACKEND_DIST = backendDistFromWorkspaceRoot(WORKSPACE_ROOT);
  * Identity unusable — the correct credential still signs in afterwards.
  *
  * The thresholds are deployment configuration (the spec leaves them open), so
- * the Instance under test is started with a deliberately aggressive window —
+ * the Instances under test are started with a deliberately aggressive window —
  * two free attempts, then an exponential delay capped at 1.5s — to make the
  * escalation observable without a long-running attack.
  */
@@ -28,7 +28,6 @@ const ORGANIZATION_NAME = 'Acme';
 const OWNER = { email: 'ahmed@example.com', password: 'owner password 123', name: 'Ahmed' };
 const END_USER = { email: 'mohamed@example.com', password: 'end user password 123' };
 const CAMPAIGN_EMAIL = 'campaign@example.com';
-const UNKNOWN_EMAIL = 'ghost@example.com';
 const REDIRECT_URI = 'https://zotac.example.com/oidc/callback';
 
 interface AuditEventView {
@@ -59,41 +58,90 @@ function median(values: number[]): number {
   return sorted[Math.floor(sorted.length / 2)]!;
 }
 
+/** Start an Instance and run the Bootstrap Ceremony so an Organization exists. */
+async function bootstrap(): Promise<Instance> {
+  const instance = await Instance.start(BACKEND_DIST, THROTTLE_ENV);
+  const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
+  if (!match) throw new Error('no setup token in console output');
+  const ceremony = await instance.request('/api/setup', {
+    method: 'POST',
+    query: { token: match[1] },
+    body: { organizationName: ORGANIZATION_NAME, ...OWNER },
+  });
+  if (ceremony.status !== 201) throw new Error(`setup failed: ${ceremony.status}`);
+  return instance;
+}
+
+async function signInOwner(instance: Instance): Promise<string> {
+  const res = await instance.request('/api/administrators/sign-in', {
+    method: 'POST',
+    body: { email: OWNER.email, password: OWNER.password },
+  });
+  if (res.status !== 200) throw new Error(`owner sign-in failed: ${res.status}`);
+  return cookieFrom(res);
+}
+
+async function registerWebApp(
+  instance: Instance,
+  ownerCookie: string,
+): Promise<{ id: string; clientId: string; clientSecret: string }> {
+  const registered = await instance.request('/api/applications', {
+    method: 'POST',
+    headers: { cookie: ownerCookie },
+    body: { name: 'Zotac', type: 'web' },
+  });
+  if (registered.status !== 201) throw new Error(`registration failed: ${registered.status}`);
+  const body = (await registered.json()) as {
+    application: ApplicationView;
+    clientSecret: string;
+  };
+  const redirect = await instance.request(`/api/applications/${body.application.id}/redirect-uris`, {
+    method: 'POST',
+    headers: { cookie: ownerCookie },
+    body: { uri: REDIRECT_URI },
+  });
+  if (redirect.status !== 201) throw new Error(`redirect URI failed: ${redirect.status}`);
+  return { id: body.application.id, clientId: body.application.clientId, clientSecret: body.clientSecret };
+}
+
+/** Sign in on the hosted page, as the page's form would. */
+function attemptSignIn(
+  instance: Instance,
+  clientId: string,
+  email: string,
+  password: string,
+): Promise<Response> {
+  return instance.request('/api/oidc/authorize', {
+    method: 'POST',
+    query: {
+      client_id: clientId,
+      redirect_uri: REDIRECT_URI,
+      response_type: 'code',
+      scope: 'openid',
+      state: 'throttle-state',
+    },
+    body: { email, password },
+    redirect: 'manual',
+  });
+}
+
+async function timed(request: () => Promise<Response>): Promise<{ ms: number; res: Response }> {
+  const start = performance.now();
+  const res = await request();
+  return { ms: performance.now() - start, res };
+}
+
+function failedSignInsFor(events: AuditEventView[], email: string): AuditEventView[] {
+  return events.filter(
+    (event) => event.kind === 'identity.sign_in.failed' && event.detail.email === email,
+  );
+}
+
 describe('Throttling and audited failed authentication, with no lockout', () => {
   let instance: Instance;
   let ownerCookie: string;
   let clientId: string;
   let clientSecret: string;
-
-  const authorize = (
-    query: Record<string, string>,
-    init: { method?: string; body?: unknown; cookie?: string } = {},
-  ): Promise<Response> =>
-    instance.request('/api/oidc/authorize', {
-      method: init.method ?? 'GET',
-      query,
-      body: init.body,
-      redirect: 'manual',
-      headers: init.cookie ? { cookie: init.cookie } : undefined,
-    });
-
-  const attemptSignIn = async (email: string, password: string): Promise<Response> =>
-    authorize(
-      {
-        client_id: clientId,
-        redirect_uri: REDIRECT_URI,
-        response_type: 'code',
-        scope: 'openid',
-        state: 'throttle-state',
-      },
-      { method: 'POST', body: { email, password } },
-    );
-
-  const timed = async (request: () => Promise<Response>): Promise<{ ms: number; res: Response }> => {
-    const start = performance.now();
-    const res = await request();
-    return { ms: performance.now() - start, res };
-  };
 
   const auditEvents = async (): Promise<AuditEventView[]> => {
     const res = await instance.request('/api/audit', { headers: { cookie: ownerCookie } });
@@ -101,47 +149,12 @@ describe('Throttling and audited failed authentication, with no lockout', () => 
     return ((await res.json()) as { events: AuditEventView[] }).events;
   };
 
-  const failedSignInsFor = (events: AuditEventView[], email: string): AuditEventView[] =>
-    events.filter(
-      (event) => event.kind === 'identity.sign_in.failed' && event.detail.email === email,
-    );
-
   beforeAll(async () => {
-    instance = await Instance.start(BACKEND_DIST, THROTTLE_ENV);
-
-    const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
-    const ceremony = await instance.request('/api/setup', {
-      method: 'POST',
-      query: { token: match[1] },
-      body: { organizationName: ORGANIZATION_NAME, ...OWNER },
-    });
-    expect(ceremony.status).toBe(201);
-
-    const owner = await instance.request('/api/administrators/sign-in', {
-      method: 'POST',
-      body: { email: OWNER.email, password: OWNER.password },
-    });
-    expect(owner.status).toBe(200);
-    ownerCookie = cookieFrom(owner);
-
-    const registered = await instance.request('/api/applications', {
-      method: 'POST',
-      headers: { cookie: ownerCookie },
-      body: { name: 'Zotac', type: 'web' },
-    });
-    expect(registered.status).toBe(201);
-    const body = (await registered.json()) as {
-      application: ApplicationView;
-      clientSecret: string;
-    };
-    clientId = body.application.clientId;
-    clientSecret = body.clientSecret;
-    const redirect = await instance.request(
-      `/api/applications/${body.application.id}/redirect-uris`,
-      { method: 'POST', headers: { cookie: ownerCookie }, body: { uri: REDIRECT_URI } },
-    );
-    expect(redirect.status).toBe(201);
+    instance = await bootstrap();
+    ownerCookie = await signInOwner(instance);
+    const application = await registerWebApp(instance, ownerCookie);
+    clientId = application.clientId;
+    clientSecret = application.clientSecret;
 
     const signUp = await instance.request('/api/end-users/sign-up', {
       method: 'POST',
@@ -162,7 +175,9 @@ describe('Throttling and audited failed authentication, with no lockout', () => 
   it('a sustained credential campaign is delayed at the HTTP surface', async () => {
     const durations: number[] = [];
     for (let i = 0; i < 8; i++) {
-      const { ms, res } = await timed(() => attemptSignIn(CAMPAIGN_EMAIL, 'the wrong password'));
+      const { ms, res } = await timed(() =>
+        attemptSignIn(instance, clientId, CAMPAIGN_EMAIL, 'the wrong password'),
+      );
       expect(res.status).toBe(401);
       durations.push(ms);
     }
@@ -176,11 +191,15 @@ describe('Throttling and audited failed authentication, with no lockout', () => 
 
   it('never locks the Identity out — the correct credential still signs in after sustained failures', async () => {
     for (let i = 0; i < 6; i++) {
-      const { res } = await timed(() => attemptSignIn(END_USER.email, 'the wrong password'));
+      const { res } = await timed(() =>
+        attemptSignIn(instance, clientId, END_USER.email, 'the wrong password'),
+      );
       expect(res.status).toBe(401);
     }
 
-    const { res } = await timed(() => attemptSignIn(END_USER.email, END_USER.password));
+    const { res } = await timed(() =>
+      attemptSignIn(instance, clientId, END_USER.email, END_USER.password),
+    );
     expect(res.status).toBe(302);
     const location = res.headers.get('location');
     expect(location).toBeTruthy();
@@ -204,29 +223,6 @@ describe('Throttling and audited failed authentication, with no lockout', () => 
     const targeted = failedSignInsFor(await auditEvents(), END_USER.email);
     expect(targeted.length).toBeGreaterThanOrEqual(6);
     for (const event of targeted) expect(event.detail.source).toBeTruthy();
-  });
-
-  it('throttling does not distinguish an existing email from an unknown one', async () => {
-    const existing: number[] = [];
-    const unknown: number[] = [];
-    let existingResponse = '';
-    let unknownResponse = '';
-    for (let i = 0; i < 4; i++) {
-      const known = await timed(() => attemptSignIn(END_USER.email, 'the wrong password'));
-      expect(known.res.status).toBe(401);
-      existing.push(known.ms);
-      existingResponse = await known.res.text();
-
-      const ghost = await timed(() => attemptSignIn(UNKNOWN_EMAIL, 'the wrong password'));
-      expect(ghost.res.status).toBe(401);
-      unknown.push(ghost.ms);
-      unknownResponse = await ghost.res.text();
-    }
-
-    // The submission above is keyed on the email whether or not an Identity
-    // owns it, so the delay and the refusal are indistinguishable.
-    expect(existingResponse).toBe(unknownResponse);
-    expect(Math.abs(median(existing) - median(unknown))).toBeLessThan(250);
   });
 
   it('sign-up applies the same escalating delay', async () => {
@@ -278,5 +274,92 @@ describe('Throttling and audited failed authentication, with no lockout', () => 
       durations.push(ms);
     }
     expect(durations[6]!).toBeGreaterThan(durations[0]! + 500);
+  });
+
+  it('administrator sign-in applies the same escalating delay', async () => {
+    const durations: number[] = [];
+    for (let i = 0; i < 7; i++) {
+      const { ms, res } = await timed(() =>
+        instance.request('/api/administrators/sign-in', {
+          method: 'POST',
+          body: { email: 'unknown-admin@example.com', password: 'the wrong password' },
+        }),
+      );
+      expect(res.status).toBe(401);
+      durations.push(ms);
+    }
+    expect(durations[6]!).toBeGreaterThan(durations[0]! + 500);
+  });
+});
+
+/**
+ * The uniformity proof ADR-0020 asks for cannot be read off one Instance: once
+ * a source is saturated, both an existing and an unknown email are delayed by
+ * the source key, which hides whether the Identity key is behaving uniformly.
+ * So the same submitted email is attacked against two fresh Instances — one
+ * where it owns a verified Identity, one where it owns nothing — and the two
+ * escalation curves must match.
+ */
+describe('Throttling uniformity across email existence', () => {
+  const TARGET_EMAIL = 'member@example.com';
+  let existingInstance: Instance;
+  let absentInstance: Instance;
+  let existingClientId: string;
+  let absentClientId: string;
+
+  beforeAll(async () => {
+    existingInstance = await bootstrap();
+    absentInstance = await bootstrap();
+    const existingOwner = await signInOwner(existingInstance);
+    const absentOwner = await signInOwner(absentInstance);
+    existingClientId = (await registerWebApp(existingInstance, existingOwner)).clientId;
+    absentClientId = (await registerWebApp(absentInstance, absentOwner)).clientId;
+
+    // The email owns a verified Identity in one Instance only.
+    const signUp = await existingInstance.request('/api/end-users/sign-up', {
+      method: 'POST',
+      body: { email: TARGET_EMAIL, password: 'member password 123' },
+    });
+    expect(signUp.status).toBe(201);
+    const mail = (await existingInstance.capturedEmails()).find(
+      (email) => email.to === TARGET_EMAIL && /verify/i.test(email.subject),
+    );
+    const verified = await fetch(linkFromBody(mail!.body), { redirect: 'manual' });
+    expect(verified.status).toBe(302);
+  });
+
+  afterAll(async () => {
+    await existingInstance.stop();
+    await absentInstance.stop();
+  });
+
+  it('throttles and refuses an existing email exactly like an unknown one', async () => {
+    const existing: number[] = [];
+    const absent: number[] = [];
+    let existingBody = '';
+    let absentBody = '';
+    for (let i = 0; i < 6; i++) {
+      const known = await timed(() =>
+        attemptSignIn(existingInstance, existingClientId, TARGET_EMAIL, 'the wrong password'),
+      );
+      expect(known.res.status).toBe(401);
+      existing.push(known.ms);
+      existingBody = await known.res.text();
+
+      const unknown = await timed(() =>
+        attemptSignIn(absentInstance, absentClientId, TARGET_EMAIL, 'the wrong password'),
+      );
+      expect(unknown.res.status).toBe(401);
+      absent.push(unknown.ms);
+      absentBody = await unknown.res.text();
+    }
+
+    // Both start from a fresh source and Identity, so both escalate; the
+    // refusal shape is identical; and the curves match within noise. The delay
+    // is keyed on the submitted string, never on whether an Identity owns it.
+    expect(existingBody).toBe(absentBody);
+    expect(existing[5]!).toBeGreaterThan(existing[0]! + 300);
+    expect(absent[5]!).toBeGreaterThan(absent[0]! + 300);
+    expect(Math.abs(median(existing) - median(absent))).toBeLessThan(300);
   });
 });

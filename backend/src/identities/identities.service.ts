@@ -14,6 +14,7 @@ import { recordAuditEvent } from '../storage/audit';
 import { isUniqueViolation } from '../storage/sqlite';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
+import { normalizeEmail } from './email';
 import { anonymizedHandle, anonymizedPseudonym } from './identity-state';
 
 type ReservationInsert = { created: true; identityId: string } | { created: false };
@@ -109,7 +110,7 @@ export class IdentitiesService {
     email: string,
     password: string,
   ): Promise<IdentityAuthentication> {
-    const normalized = email.trim().toLowerCase();
+    const normalized = normalizeEmail(email);
     const row = this.db
       .prepare(
         `SELECT id, organization_id, email, email_verified, suspended_at, anonymized_at, password_hash
@@ -150,7 +151,7 @@ export class IdentitiesService {
 
   async signUp(input: { email: string; password: string }): Promise<void> {
     const organization = this.hostedOrganization();
-    const email = input.email.trim().toLowerCase();
+    const email = normalizeEmail(input.email);
     // Uniform work: every path hashes a password and sends exactly one email.
     const passwordHash = await hashPassword(input.password);
 
@@ -209,7 +210,7 @@ export class IdentitiesService {
    */
   async requestPasswordReset(input: { email: string }): Promise<void> {
     const organization = this.hostedOrganization();
-    const email = input.email.trim().toLowerCase();
+    const email = normalizeEmail(input.email);
     const identity = this.findIdentityByEmail(organization.id, email);
 
     this.audit(organization.id, 'identity.password_reset.requested', {

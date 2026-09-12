@@ -5,6 +5,7 @@ import { LinkBaseService } from '../config/link-base.service';
 import { sessionCookieOptions } from '../config/cookies';
 import { SSO_COOKIE, ssoTokenFrom } from '../sessions/sso-cookie';
 import { SessionsService } from '../sessions/sessions.service';
+import { normalizeEmail } from '../identities/email';
 import { ThrottleService, type ThrottleSubject } from '../throttle/throttle.service';
 import {
   AuthorizationRequest,
@@ -54,7 +55,7 @@ export class AuthorizeController {
     // distinguishes email-exists from email-not-exists.
     const subject: ThrottleSubject = {
       source: req.ip ?? null,
-      identity: body.email.trim().toLowerCase(),
+      identity: normalizeEmail(body.email),
     };
     await this.throttle.wait('sign-in', subject);
 

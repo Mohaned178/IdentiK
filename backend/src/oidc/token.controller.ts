@@ -28,11 +28,13 @@ export class TokenController {
     @Res() res: Response,
   ): Promise<void> {
     const credentials = presentedCredentials(req, body);
-    // The token surface has no End-User email; the Client ID is the principal
-    // the grant is bound to, and the source covers everything else (ADR-0020).
+    // The token surface carries no email; throttle against the Identity the
+    // grant targets (resolved from the code or refresh token), so guessing a
+    // credential is slowed per Identity as well as per source (ADR-0020). An
+    // unresolvable grant yields no Identity and only the source applies.
     const subject: ThrottleSubject = {
       source: req.ip ?? null,
-      identity: credentials.clientId ?? null,
+      identity: this.tokens.identityForGrant(body),
     };
     await this.throttle.wait('token', subject);
 

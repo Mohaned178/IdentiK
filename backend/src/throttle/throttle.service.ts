@@ -2,9 +2,21 @@ import { Injectable } from '@nestjs/common';
 import { parseCount, parseTtlMs } from '../config/env';
 
 /**
+ * The public authentication surfaces that carry rate limiting (ADR-0020). One
+ * scope per endpoint so throttling an Administrator's sign-in never throttles
+ * an End User's.
+ */
+export type ThrottleScope =
+  | 'sign-in'
+  | 'administrator-sign-in'
+  | 'sign-up'
+  | 'forgot-password'
+  | 'token';
+
+/**
  * The subject a public authentication request is throttled for: where it came
- * from and which Identity (or Client) it targeted. Either may be absent, and
- * an absent dimension simply does not contribute to the delay.
+ * from and which Identity it targeted. Either may be absent, and an absent
+ * dimension simply does not contribute to the delay.
  */
 export interface ThrottleSubject {
   source?: string | null;
@@ -19,17 +31,17 @@ export interface ThrottleSubject {
  * delay is deliberately observable at the HTTP surface — the caller awaits it
  * before responding — rather than exposed through an internal counter.
  *
- * Throttling is scoped per endpoint and applied on two dimensions — the
- * request source and the targeted Identity (or Client, on the token surface
- * where no End-User email exists). The key is the *submitted* email, whether
- * or not an Identity owns it, so the delay never distinguishes email-exists
- * from email-not-exists (ADR-0020): the rate limiter is as uniform as the
- * response it protects.
+ * Throttling is scoped per endpoint and applied on two dimensions: the
+ * request source and the targeted Identity. The Identity key is the
+ * *submitted* email, whether or not an Identity owns it, so the delay never
+ * distinguishes email-exists from email-not-exists (ADR-0020): the rate
+ * limiter is as uniform as the response it protects. On the token surface,
+ * where requests carry no email, the Identity is the one the grant targets.
  *
  * Thresholds are deployment configuration, deliberately left open by the
  * spec. An attempt that proves the credential (`recordSuccess`) clears the
- * targeted principal's history so a legitimate user is never punished for
- * mistyping; the source history is left alone so scanning stays slow.
+ * targeted Identity's history so an End User is never punished for mistyping;
+ * the source history is left alone so scanning stays slow.
  */
 @Injectable()
 export class ThrottleService {
@@ -40,31 +52,16 @@ export class ThrottleService {
   private readonly baseDelayMs = parseTtlMs('IDENTIK_THROTTLE_BASE_DELAY_MS', 200);
   private readonly maxDelayMs = parseTtlMs('IDENTIK_THROTTLE_MAX_DELAY_MS', 5000);
 
-  /**
-   * The delay this request should incur, without recording it. The larger of
-   * the source and Identity delays wins, so an attack from many sources is
-   * still slowed per Identity and an attack on many Identities is still
-   * slowed per source.
-   */
-  delayFor(scope: string, subject: ThrottleSubject): number {
-    const now = Date.now();
-    return Math.max(
-      this.delayForKey(this.sourceKey(scope, subject.source), now),
-      this.delayForKey(this.identityKey(scope, subject.identity), now),
-    );
-  }
-
-  /** Hold the request for its current escalation, then return the delay applied. */
-  async wait(scope: string, subject: ThrottleSubject): Promise<number> {
+  /** Hold the request for its current escalation. */
+  async wait(scope: ThrottleScope, subject: ThrottleSubject): Promise<void> {
     const delay = this.delayFor(scope, subject);
     if (delay > 0) {
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
-    return delay;
   }
 
   /** Record one attempt (or failure) against both dimensions. */
-  record(scope: string, subject: ThrottleSubject): void {
+  record(scope: ThrottleScope, subject: ThrottleSubject): void {
     const now = Date.now();
     for (const key of [
       this.sourceKey(scope, subject.source),
@@ -77,10 +74,24 @@ export class ThrottleService {
     }
   }
 
-  /** The targeted principal proved its credential: forget its history. */
-  recordSuccess(scope: string, subject: ThrottleSubject): void {
+  /** The targeted Identity proved its credential: forget its history. */
+  recordSuccess(scope: ThrottleScope, subject: ThrottleSubject): void {
     const key = this.identityKey(scope, subject.identity);
     if (key) this.attempts.delete(key);
+  }
+
+  /**
+   * The delay this request should incur, without recording it. The larger of
+   * the source and Identity delays wins, so an attack from many sources is
+   * still slowed per Identity and an attack on many Identities is still
+   * slowed per source.
+   */
+  private delayFor(scope: ThrottleScope, subject: ThrottleSubject): number {
+    const now = Date.now();
+    return Math.max(
+      this.delayForKey(this.sourceKey(scope, subject.source), now),
+      this.delayForKey(this.identityKey(scope, subject.identity), now),
+    );
   }
 
   private delayForKey(key: string | null, now: number): number {
@@ -106,11 +117,11 @@ export class ThrottleService {
     return live;
   }
 
-  private sourceKey(scope: string, source: string | null | undefined): string | null {
+  private sourceKey(scope: ThrottleScope, source: string | null | undefined): string | null {
     return source ? `${scope}:source:${source}` : null;
   }
 
-  private identityKey(scope: string, identity: string | null | undefined): string | null {
+  private identityKey(scope: ThrottleScope, identity: string | null | undefined): string | null {
     return identity ? `${scope}:identity:${identity}` : null;
   }
 }

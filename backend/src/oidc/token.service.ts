@@ -119,6 +119,31 @@ export class TokenService {
     private readonly issuer: IssuerService,
   ) {}
 
+  /**
+   * The Identity a token request targets, for throttling the token surface
+   * per-Identity (ADR-0020). Resolved best-effort from the presented grant: a
+   * code or refresh token names its Identity even when it is expired, spent,
+   * or revoked, so repeated attempts against it are slowed. An unresolvable
+   * grant yields null and only the source dimension applies.
+   */
+  identityForGrant(request: TokenRequest): string | null {
+    const code = optionalText(request.code);
+    if (code) {
+      const row = this.db
+        .prepare('SELECT identity_id FROM authorization_codes WHERE code_hash = ?')
+        .get(hashToken(code)) as { identity_id: string } | undefined;
+      return row?.identity_id ?? null;
+    }
+    const refreshToken = optionalText(request.refresh_token);
+    if (refreshToken) {
+      const row = this.db
+        .prepare('SELECT identity_id FROM refresh_tokens WHERE token_hash = ?')
+        .get(hashToken(refreshToken)) as { identity_id: string } | undefined;
+      return row?.identity_id ?? null;
+    }
+    return null;
+  }
+
   async handleGrant(
     client: AuthenticatedClient,
     request: TokenRequest,
