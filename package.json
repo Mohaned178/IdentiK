@@ -6,6 +6,7 @@
     "e2e"
   ],
   "scripts": {
+    "postinstall": "npm run generate -w backend",
     "build": "npm run build -w backend",
     "start": "npm run start:prod -w backend",
     "dev": "npm run start:dev -w backend",

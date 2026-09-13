@@ -45,7 +45,7 @@ jobs:
         run: |
           mkdir -p release
           archive="release/identik-backend-${GITHUB_REF_NAME}.tar.gz"
-          tar -czf "$archive" -C backend dist package.json
+          tar -czf "$archive" -C backend dist package.json prisma prisma.config.ts
           sha256sum "$archive" > "$archive.sha256"
 
       - name: Publish the GitHub Release

@@ -1,0 +1,320 @@
+// Stage 1 of the PostgreSQL + Prisma migration keeps the legacy storage
+// shapes (text timestamps, integer booleans, string enum columns) so the
+// engine swap is behavior-preserving. Native types land in Stage 2.
+//
+// Table and column names are mapped to the existing snake_case vocabulary so
+// raw exceptions and the domain language stay stable.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Organization {
+  id        String @id
+  name      String
+  createdAt String @map("created_at")
+
+  memberships              Membership[]
+  auditEvents              AuditEvent[]
+  identities               Identity[]
+  administratorInvitations AdministratorInvitation[]
+  applications             Application[]
+  sessions                 Session[]
+  organizationSettings     OrganizationSetting[]
+  emailChangeRequests      EmailChangeRequest[]
+
+  @@map("organizations")
+}
+
+model Administrator {
+  id           String @id
+  email        String @unique
+  name         String
+  passwordHash String @map("password_hash")
+  createdAt    String @map("created_at")
+
+  memberships                 Membership[]
+  administratorInvitations    AdministratorInvitation[]
+  applications                Application[]
+  createdClientSecrets        ClientSecret[]        @relation("ClientSecretCreatedBy")
+  revokedClientSecrets        ClientSecret[]        @relation("ClientSecretRevokedBy")
+  createdRedirectUris         RedirectUri[]         @relation("RedirectUriCreatedBy")
+  updatedRedirectUris         RedirectUri[]         @relation("RedirectUriUpdatedBy")
+  organizationSettings        OrganizationSetting[]
+
+  @@map("administrators")
+}
+
+model Membership {
+  id              String @id
+  organizationId  String @map("organization_id")
+  administratorId String @map("administrator_id")
+  role            String
+
+  organization  Organization  @relation(fields: [organizationId], references: [id])
+  administrator Administrator @relation(fields: [administratorId], references: [id])
+  adminSessions AdminSession[]
+
+  @@unique([organizationId, administratorId])
+  @@map("memberships")
+}
+
+model AdminSession {
+  id           String  @id
+  membershipId String  @map("membership_id")
+  tokenHash    String  @unique @map("token_hash")
+  createdAt    String  @map("created_at")
+  expiresAt    String  @map("expires_at")
+  revokedAt    String? @map("revoked_at")
+
+  membership Membership @relation(fields: [membershipId], references: [id])
+
+  @@map("admin_sessions")
+}
+
+model AuditEvent {
+  id             String  @id
+  organizationId String? @map("organization_id")
+  kind           String
+  actor          String
+  detail         String
+  occurredAt     String  @map("occurred_at")
+  seq            Int     @unique @default(autoincrement())
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([organizationId, occurredAt], map: "audit_events_organization_time_idx")
+  @@map("audit_events")
+}
+
+model InstanceState {
+  key   String @id
+  value String
+
+  @@map("instance_state")
+}
+
+model Identity {
+  id                String  @id
+  organizationId    String  @map("organization_id")
+  email             String
+  emailVerified     Int     @default(0) @map("email_verified")
+  passwordHash      String  @map("password_hash")
+  createdAt         String  @map("created_at")
+  sessionsRevokedAt String? @map("sessions_revoked_at")
+  suspendedAt       String? @map("suspended_at")
+  anonymizedAt      String? @map("anonymized_at")
+
+  organization        Organization         @relation(fields: [organizationId], references: [id])
+  identityTokens      IdentityToken[]
+  enrollments         Enrollment[]
+  sessions            Session[]
+  authorizationCodes  AuthorizationCode[]
+  refreshTokens       RefreshToken[]
+  emailChangeRequests EmailChangeRequest[]
+
+  @@unique([organizationId, email])
+  @@map("identities")
+}
+
+model IdentityToken {
+  id         String  @id
+  identityId String  @map("identity_id")
+  kind       String
+  tokenHash  String  @unique @map("token_hash")
+  expiresAt  String  @map("expires_at")
+  consumedAt String? @map("consumed_at")
+  createdAt  String  @map("created_at")
+
+  identity Identity @relation(fields: [identityId], references: [id])
+
+  @@map("identity_tokens")
+}
+
+model AdministratorInvitation {
+  id              String  @id
+  organizationId  String  @map("organization_id")
+  email           String
+  role            String
+  tokenHash       String  @unique @map("token_hash")
+  invitedBy       String  @map("invited_by")
+  expiresAt       String  @map("expires_at")
+  consumedAt      String? @map("consumed_at")
+  expiryAuditedAt String? @map("expiry_audited_at")
+  createdAt       String  @map("created_at")
+
+  organization Organization  @relation(fields: [organizationId], references: [id])
+  invitedByAdministrator Administrator @relation(fields: [invitedBy], references: [id])
+
+  @@map("administrator_invitations")
+}
+
+model Application {
+  id             String  @id
+  organizationId String  @map("organization_id")
+  name           String
+  type           String
+  clientId       String  @unique @map("client_id")
+  createdBy      String  @map("created_by")
+  createdAt      String  @map("created_at")
+  disabledAt     String? @map("disabled_at")
+  deletedAt      String? @map("deleted_at")
+  allowedScopes  String  @default("openid email profile") @map("allowed_scopes")
+
+  organization       Organization        @relation(fields: [organizationId], references: [id])
+  createdByAdministrator Administrator    @relation(fields: [createdBy], references: [id])
+  clientSecrets      ClientSecret[]
+  redirectUris       RedirectUri[]
+  enrollments        Enrollment[]
+  authorizationCodes AuthorizationCode[]
+  refreshTokens      RefreshToken[]
+
+  @@map("applications")
+}
+
+model ClientSecret {
+  id            String  @id
+  applicationId String  @map("application_id")
+  label         String
+  secretHash    String  @unique @map("secret_hash")
+  createdBy     String  @map("created_by")
+  createdAt     String  @map("created_at")
+  revokedAt     String? @map("revoked_at")
+  revokedBy     String? @map("revoked_by")
+
+  application            Application    @relation(fields: [applicationId], references: [id])
+  createdByAdministrator Administrator  @relation("ClientSecretCreatedBy", fields: [createdBy], references: [id])
+  revokedByAdministrator Administrator? @relation("ClientSecretRevokedBy", fields: [revokedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("client_secrets")
+}
+
+model RedirectUri {
+  id            String  @id
+  applicationId String  @map("application_id")
+  uri           String
+  createdBy     String  @map("created_by")
+  createdAt     String  @map("created_at")
+  updatedBy     String? @map("updated_by")
+  updatedAt     String? @map("updated_at")
+
+  application            Application    @relation(fields: [applicationId], references: [id])
+  createdByAdministrator Administrator  @relation("RedirectUriCreatedBy", fields: [createdBy], references: [id])
+  updatedByAdministrator Administrator? @relation("RedirectUriUpdatedBy", fields: [updatedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([applicationId, uri])
+  @@map("redirect_uris")
+}
+
+model Enrollment {
+  id            String  @id
+  identityId    String  @map("identity_id")
+  applicationId String  @map("application_id")
+  createdAt     String  @map("created_at")
+  suspendedAt   String? @map("suspended_at")
+
+  identity    Identity    @relation(fields: [identityId], references: [id])
+  application Application @relation(fields: [applicationId], references: [id])
+
+  @@unique([identityId, applicationId])
+  @@map("enrollments")
+}
+
+model Session {
+  id             String  @id
+  identityId     String  @map("identity_id")
+  organizationId String  @map("organization_id")
+  ssoTokenHash   String  @unique @map("sso_token_hash")
+  userAgent      String? @map("user_agent")
+  createdAt      String  @map("created_at")
+  lastSeenAt     String  @map("last_seen_at")
+  expiresAt      String  @map("expires_at")
+  revokedAt      String? @map("revoked_at")
+
+  identity           Identity            @relation(fields: [identityId], references: [id])
+  organization       Organization        @relation(fields: [organizationId], references: [id])
+  authorizationCodes AuthorizationCode[]
+  refreshTokens      RefreshToken[]
+
+  @@map("sessions")
+}
+
+model AuthorizationCode {
+  id                  String  @id
+  codeHash            String  @unique @map("code_hash")
+  applicationId       String  @map("application_id")
+  identityId          String  @map("identity_id")
+  sessionId           String  @map("session_id")
+  redirectUri         String  @map("redirect_uri")
+  scope               String
+  codeChallenge       String? @map("code_challenge")
+  codeChallengeMethod String? @map("code_challenge_method")
+  nonce               String?
+  createdAt           String  @map("created_at")
+  expiresAt           String  @map("expires_at")
+  consumedAt          String? @map("consumed_at")
+
+  application Application @relation(fields: [applicationId], references: [id])
+  identity    Identity    @relation(fields: [identityId], references: [id])
+  session     Session     @relation(fields: [sessionId], references: [id])
+
+  @@map("authorization_codes")
+}
+
+model RefreshToken {
+  id            String  @id
+  tokenHash     String  @unique @map("token_hash")
+  sessionId     String  @map("session_id")
+  applicationId String  @map("application_id")
+  identityId    String  @map("identity_id")
+  scope         String
+  createdAt     String  @map("created_at")
+  expiresAt     String  @map("expires_at")
+  rotatedAt     String? @map("rotated_at")
+  revokedAt     String? @map("revoked_at")
+
+  session     Session     @relation(fields: [sessionId], references: [id])
+  application Application @relation(fields: [applicationId], references: [id])
+  identity    Identity    @relation(fields: [identityId], references: [id])
+
+  @@index([sessionId], map: "refresh_tokens_session_idx")
+  @@index([applicationId], map: "refresh_tokens_application_idx")
+  @@map("refresh_tokens")
+}
+
+model OrganizationSetting {
+  organizationId String  @map("organization_id")
+  key            String
+  value          String
+  updatedBy      String? @map("updated_by")
+  updatedAt      String  @map("updated_at")
+
+  organization            Organization   @relation(fields: [organizationId], references: [id])
+  updatedByAdministrator  Administrator? @relation(fields: [updatedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@id([organizationId, key])
+  @@map("organization_settings")
+}
+
+model EmailChangeRequest {
+  id             String  @id
+  organizationId String  @map("organization_id")
+  identityId     String  @map("identity_id")
+  newEmail       String  @map("new_email")
+  tokenHash      String  @unique @map("token_hash")
+  expiresAt      String  @map("expires_at")
+  consumedAt     String? @map("consumed_at")
+  createdAt      String  @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  identity     Identity     @relation(fields: [identityId], references: [id])
+
+  @@index([identityId], map: "email_change_requests_identity_idx")
+  @@map("email_change_requests")
+}

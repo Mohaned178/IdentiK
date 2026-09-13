@@ -4,3 +4,4 @@ dist/
 coverage/
 .env
 .agents/skills/impeccable/scripts/bin/
+backend/src/generated/
