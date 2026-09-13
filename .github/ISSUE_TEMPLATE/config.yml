@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Feature specs and implementation tickets
+    url: https://github.com/Mohaned178/IdentiK/blob/main/docs/agents/issue-tracker.md
+    about: Feature work lives as local markdown under .scratch/. Read the issue tracker guide before proposing new work.
+  - name: Domain glossary and decisions
+    url: https://github.com/Mohaned178/IdentiK/blob/main/CONTEXT.md
+    about: The single authority on what our domain terms mean, backed by docs/adr/.
