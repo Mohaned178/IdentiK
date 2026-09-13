@@ -4,8 +4,8 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] ADR-0026 and ADR-0027 are committed under the ADR directory, following the repository's numbering and format
-- [ ] ADR-0024's status points at both superseding records
-- [ ] No application code changes
+- [x] ADR-0026 and ADR-0027 are committed under the ADR directory, following the repository's numbering and format
+- [x] ADR-0024's status points at both superseding records
+- [x] No application code changes
