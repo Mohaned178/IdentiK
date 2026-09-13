@@ -62,7 +62,7 @@ export class EndUsersController {
   ) {}
 
   @Get('sign-up')
-  signUpPageInfo(): { organizationName: string; branding: Branding } {
+  signUpPageInfo(): Promise<{ organizationName: string; branding: Branding }> {
     return this.pageInfo();
   }
 
@@ -83,37 +83,37 @@ export class EndUsersController {
    * lives in the redirect, and the SPA renders it.
    */
   @Get('verify-email')
-  verifyEmail(
+  async verifyEmail(
     @Query('token') token: string | undefined,
-    @Res({ passthrough: true }) res: Response,
-  ): void {
+    @Res() res: Response,
+  ): Promise<void> {
     // Refuse without a token synchronously: redirect-with-empty-string below
     // would otherwise construct a URL ending in "token=".
     if (typeof token !== 'string' || token.length === 0) {
       res.redirect(302, this.resultPath('invalid'));
       return;
     }
-    this.identities
-      .verifyEmail(token)
-      .then((verified) => res.redirect(302, this.resultPath(verified ? 'verified' : 'invalid')))
-      .catch((error: unknown) => {
-        // A dead link and a failed write both answer "invalid" so nothing is
-        // revealed at the surface; the failure itself still needs to be
-        // diagnosable from the Instance log.
-        this.logger.error(
-          `email verification click failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        res.redirect(302, this.resultPath('invalid'));
-      });
+    try {
+      const verified = await this.identities.verifyEmail(token);
+      res.redirect(302, this.resultPath(verified ? 'verified' : 'invalid'));
+    } catch (error) {
+      // A dead link and a failed write both answer "invalid" so nothing is
+      // revealed at the surface; the failure itself still needs to be
+      // diagnosable from the Instance log.
+      this.logger.error(
+        `email verification click failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      res.redirect(302, this.resultPath('invalid'));
+    }
   }
 
   /** Shape-checked outcome for the hosted result page, branded like the rest. */
   @Get('verify-email/result')
-  resultPageInfo(
+  async resultPageInfo(
     @Query('outcome') outcome: string | undefined,
-  ): { outcome: string; organizationName: string; branding: Branding } {
+  ): Promise<{ outcome: string; organizationName: string; branding: Branding }> {
     if (outcome === 'verified' || outcome === 'invalid') {
-      return { outcome, ...this.pageInfo() };
+      return { outcome, ...(await this.pageInfo()) };
     }
     throw new BadRequestException('outcome must be "verified" or "invalid"');
   }
@@ -125,39 +125,39 @@ export class EndUsersController {
    * change is applied by the service only when the single-use link is live.
    */
   @Get('change-email')
-  changeEmail(
+  async changeEmail(
     @Query('token') token: string | undefined,
-    @Res({ passthrough: true }) res: Response,
-  ): void {
+    @Res() res: Response,
+  ): Promise<void> {
     if (typeof token !== 'string' || token.length === 0) {
       res.redirect(302, this.changeEmailResultPath('invalid'));
       return;
     }
-    this.identities
-      .verifyEmailChange(token)
-      .then((changed) => res.redirect(302, this.changeEmailResultPath(changed ? 'changed' : 'invalid')))
-      .catch((error: unknown) => {
-        // Same posture as the verification click: uniform redirect, diagnosable log.
-        this.logger.error(
-          `email change click failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        res.redirect(302, this.changeEmailResultPath('invalid'));
-      });
+    try {
+      const changed = await this.identities.verifyEmailChange(token);
+      res.redirect(302, this.changeEmailResultPath(changed ? 'changed' : 'invalid'));
+    } catch (error) {
+      // Same posture as the verification click: uniform redirect, diagnosable log.
+      this.logger.error(
+        `email change click failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      res.redirect(302, this.changeEmailResultPath('invalid'));
+    }
   }
 
   /** Shape-checked outcome for the hosted email-change result page. */
   @Get('change-email/result')
-  changeEmailResultPageInfo(
+  async changeEmailResultPageInfo(
     @Query('outcome') outcome: string | undefined,
-  ): { outcome: string; organizationName: string; branding: Branding } {
+  ): Promise<{ outcome: string; organizationName: string; branding: Branding }> {
     if (outcome === 'changed' || outcome === 'invalid') {
-      return { outcome, ...this.pageInfo() };
+      return { outcome, ...(await this.pageInfo()) };
     }
     throw new BadRequestException('outcome must be "changed" or "invalid"');
   }
 
   @Get('forgot-password')
-  forgotPasswordPageInfo(): { organizationName: string; branding: Branding } {
+  forgotPasswordPageInfo(): Promise<{ organizationName: string; branding: Branding }> {
     return this.pageInfo();
   }
 
@@ -182,14 +182,16 @@ export class EndUsersController {
    * page is it? Never consumes the token — only completing the reset does.
    */
   @Get('reset-password')
-  resetPasswordPageInfo(@Query('token') token: string | undefined): {
+  async resetPasswordPageInfo(@Query('token') token: string | undefined): Promise<{
     organizationName: string;
     valid: boolean;
     branding: Branding;
-  } {
+  }> {
     const valid =
-      typeof token === 'string' && token.length > 0 && this.identities.validateResetToken(token);
-    return { ...this.pageInfo(), valid };
+      typeof token === 'string' &&
+      token.length > 0 &&
+      (await this.identities.validateResetToken(token));
+    return { ...(await this.pageInfo()), valid };
   }
 
   /**
@@ -230,8 +232,8 @@ export class EndUsersController {
   }
 
   /** The Organization's name and branding every hosted page renders. */
-  private pageInfo(): { organizationName: string; branding: Branding } {
-    const organization = this.identities.hostedOrganization();
+  private async pageInfo(): Promise<{ organizationName: string; branding: Branding }> {
+    const organization = await this.identities.hostedOrganization();
     return {
       organizationName: organization.name,
       branding: this.settings.branding(organization.id),

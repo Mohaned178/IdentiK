@@ -60,12 +60,12 @@ export class AccountCenterService {
     private readonly identities: IdentitiesService,
   ) {}
 
-  view(session: SsoSession): AccountCenterView {
+  async view(session: SsoSession): Promise<AccountCenterView> {
     return {
       organizationName: this.organizationName(session.organizationId),
       branding: this.settings.branding(session.organizationId),
       identity: { email: session.email },
-      pendingEmail: this.identities.pendingEmailChange(session.identityId),
+      pendingEmail: await this.identities.pendingEmailChange(session.identityId),
       currentSessionId: session.id,
       sessions: this.sessions
         .listForIdentity(session.identityId)

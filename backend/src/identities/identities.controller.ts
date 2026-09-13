@@ -54,12 +54,12 @@ export class IdentitiesController {
   /** Suspend Identity: block Organization-wide and kill every Session now. */
   @Post(':id/suspend')
   @HttpCode(200)
-  suspend(
+  async suspend(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
-  ): { identity: IdentityDetail } {
+  ): Promise<{ identity: IdentityDetail }> {
     const session = requireAdministratorSession(req);
-    this.identities.suspend({
+    await this.identities.suspend({
       organizationId: session.organizationId,
       identityId: id,
       actor: session.administratorId,
@@ -70,12 +70,12 @@ export class IdentitiesController {
   /** Unsuspend Identity: authentication returns; the killed Sessions do not. */
   @Post(':id/unsuspend')
   @HttpCode(200)
-  unsuspend(
+  async unsuspend(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
-  ): { identity: IdentityDetail } {
+  ): Promise<{ identity: IdentityDetail }> {
     const session = requireAdministratorSession(req);
-    this.identities.unsuspend({
+    await this.identities.unsuspend({
       organizationId: session.organizationId,
       identityId: id,
       actor: session.administratorId,
@@ -86,13 +86,13 @@ export class IdentitiesController {
   /** Revoke-all-Sessions: evict every device in one action. */
   @Post(':id/sessions/revoke-all')
   @HttpCode(200)
-  revokeAllSessions(
+  async revokeAllSessions(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
-  ): { revoked: number } {
+  ): Promise<{ revoked: number }> {
     const session = requireAdministratorSession(req);
     return {
-      revoked: this.identities.revokeAllSessions({
+      revoked: await this.identities.revokeAllSessions({
         organizationId: session.organizationId,
         identityId: id,
         actor: session.administratorId,
@@ -130,11 +130,11 @@ export class IdentitiesController {
    */
   @Post(':id/anonymize')
   @HttpCode(200)
-  anonymize(
+  async anonymize(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
     @Body() body: { confirm?: unknown },
-  ): { identity: IdentityDetail } {
+  ): Promise<{ identity: IdentityDetail }> {
     const session = requireAdministratorSession(req);
     if (body?.confirm !== true) {
       throw new BadRequestException(
@@ -143,7 +143,7 @@ export class IdentitiesController {
           'to proceed.',
       );
     }
-    this.identities.anonymize({
+    await this.identities.anonymize({
       organizationId: session.organizationId,
       identityId: id,
       actor: session.administratorId,

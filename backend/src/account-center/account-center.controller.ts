@@ -60,7 +60,7 @@ export class AccountCenterController {
 
   @Get()
   @UseGuards(EndUserSessionGuard)
-  page(@Req() req: EndUserRequest): AccountCenterView {
+  async page(@Req() req: EndUserRequest): Promise<AccountCenterView> {
     const session = req.endUserSession;
     if (!session) throw new UnauthorizedException();
     return this.accountCenter.view(session);
