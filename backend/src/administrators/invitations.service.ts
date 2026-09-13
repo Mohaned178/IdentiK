@@ -4,6 +4,7 @@ import { parseTtlMs } from '../config/env';
 import { LinkBaseService } from '../config/link-base.service';
 import { normalizeEmail } from '../identities/email';
 import { MailService } from '../mail/mail.service';
+import type { Prisma } from '../generated/prisma/client';
 import { recordAuditEvent } from '../storage/audit';
 import { isUniqueViolation } from '../storage/postgres';
 import { DATABASE, Database } from '../storage/token';
@@ -28,16 +29,13 @@ export type InvitationAcceptance =
     }
   | { ok: false; reason: 'invalid' | 'expired' };
 
-interface InvitationRow {
-  id: string;
-  organization_id: string;
-  email: string;
-  role: AdministratorRole;
-  invited_by: string;
-  expires_at: string;
-  consumed_at: string | null;
-  organization_name: string;
-}
+const INVITATION_WITH_ORGANIZATION = {
+  organization: { select: { name: true } },
+} satisfies Prisma.AdministratorInvitationInclude;
+
+type InvitationWithOrganization = Prisma.AdministratorInvitationGetPayload<{
+  include: typeof INVITATION_WITH_ORGANIZATION;
+}>;
 
 /**
  * The Administrator membership lifecycle (ADR-0021) obeying the rules the
@@ -68,43 +66,36 @@ export class InvitationsService {
     role: AdministratorRole;
   }): Promise<{ invitationId: string; email: string; role: AdministratorRole }> {
     const email = normalizeEmail(input.email);
-    const existing = await this.db.get<{ id: string }>(
-      'SELECT id FROM administrators WHERE email = ?',
-      [email],
-    );
-    if (existing) {
+    if (await this.administratorExists(email)) {
       throw new ConflictException('an administrator with this email already exists');
     }
 
-    const organization = await this.db.get<{ name: string }>(
-      'SELECT name FROM organizations WHERE id = ?',
-      [input.organizationId],
-    );
+    const organization = await this.db.organization.findUnique({
+      where: { id: input.organizationId },
+      select: { name: true },
+    });
     if (!organization) throw new ConflictException('no such organization');
 
-    const inviter = await this.db.get<{ name: string }>(
-      'SELECT name FROM administrators WHERE id = ?',
-      [input.invitedBy],
-    );
+    const inviter = await this.db.administrator.findUnique({
+      where: { id: input.invitedBy },
+      select: { name: true },
+    });
 
     const invitationId = uuid();
     const token = randomToken(32);
     const now = new Date().toISOString();
-    await this.db.run(
-      `INSERT INTO administrator_invitations
-           (id, organization_id, email, role, token_hash, invited_by, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        invitationId,
-        input.organizationId,
+    await this.db.administratorInvitation.create({
+      data: {
+        id: invitationId,
+        organizationId: input.organizationId,
         email,
-        input.role,
-        hashToken(token),
-        input.invitedBy,
-        new Date(Date.now() + this.invitationTtlMs()).toISOString(),
-        now,
-      ],
-    );
+        role: input.role,
+        tokenHash: hashToken(token),
+        invitedBy: input.invitedBy,
+        expiresAt: new Date(Date.now() + this.invitationTtlMs()).toISOString(),
+        createdAt: now,
+      },
+    });
 
     await recordAuditEvent(this.db, {
       organizationId: input.organizationId,
@@ -141,13 +132,13 @@ export class InvitationsService {
     if (!row) {
       return { valid: false, organizationName: '', email: null, role: null };
     }
-    const live = row.consumed_at === null && new Date(row.expires_at).getTime() > Date.now();
-    if (!live && row.consumed_at === null) await this.auditExpiryOnce(row);
+    const live = row.consumedAt === null && new Date(row.expiresAt).getTime() > Date.now();
+    if (!live && row.consumedAt === null) await this.auditExpiryOnce(row);
     return {
       valid: live,
-      organizationName: row.organization_name,
+      organizationName: row.organization.name,
       email: live ? row.email : null,
-      role: live ? row.role : null,
+      role: live ? (row.role as AdministratorRole) : null,
     };
   }
 
@@ -164,19 +155,17 @@ export class InvitationsService {
     password: string;
   }): Promise<InvitationAcceptance> {
     const invitation = await this.findByToken(input.token);
-    if (!invitation || invitation.consumed_at !== null) {
+    if (!invitation || invitation.consumedAt !== null) {
       return { ok: false, reason: 'invalid' };
     }
-    if (new Date(invitation.expires_at).getTime() <= Date.now()) {
+    if (new Date(invitation.expiresAt).getTime() <= Date.now()) {
       await this.auditExpiryOnce(invitation);
       return { ok: false, reason: 'expired' };
     }
 
-    const existing = await this.db.get<{ id: string }>(
-      'SELECT id FROM administrators WHERE email = ?',
-      [invitation.email],
-    );
-    if (existing) return { ok: false, reason: 'invalid' };
+    if (await this.administratorExists(invitation.email)) {
+      return { ok: false, reason: 'invalid' };
+    }
 
     const passwordHash = await hashPassword(input.password);
     const administratorId = uuid();
@@ -186,25 +175,32 @@ export class InvitationsService {
     let consumed: boolean;
     try {
       consumed = await this.db.transaction(async (tx) => {
-        const claimed = await tx.get<{ id: string }>(
-          `UPDATE administrator_invitations SET consumed_at = ?
-           WHERE id = ? AND consumed_at IS NULL AND expires_at > ?
-           RETURNING id`,
-          [now, invitation.id, now],
-        );
-        if (!claimed) return false;
+        const claimed = await tx.administratorInvitation.updateMany({
+          where: { id: invitation.id, consumedAt: null, expiresAt: { gt: now } },
+          data: { consumedAt: now },
+        });
+        if (claimed.count !== 1) return false;
 
-        await tx.run(
-          'INSERT INTO administrators (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)',
-          [administratorId, invitation.email, input.name, passwordHash, now],
-        );
-        await tx.run(
-          'INSERT INTO memberships (id, organization_id, administrator_id, role) VALUES (?, ?, ?, ?)',
-          [membershipId, invitation.organization_id, administratorId, invitation.role],
-        );
+        await tx.administrator.create({
+          data: {
+            id: administratorId,
+            email: invitation.email,
+            name: input.name,
+            passwordHash,
+            createdAt: now,
+          },
+        });
+        await tx.membership.create({
+          data: {
+            id: membershipId,
+            organizationId: invitation.organizationId,
+            administratorId,
+            role: invitation.role,
+          },
+        });
 
         await recordAuditEvent(tx, {
-          organizationId: invitation.organization_id,
+          organizationId: invitation.organizationId,
           actor: administratorId,
           kind: 'administrator.invitation.accepted',
           detail: {
@@ -227,22 +223,30 @@ export class InvitationsService {
     return {
       ok: true,
       administratorId,
-      organizationId: invitation.organization_id,
-      organizationName: invitation.organization_name,
+      organizationId: invitation.organizationId,
+      organizationName: invitation.organization.name,
       email: invitation.email,
-      role: invitation.role,
+      role: invitation.role as AdministratorRole,
     };
   }
 
-  private async findByToken(token: string): Promise<InvitationRow | undefined> {
-    return this.db.get<InvitationRow>(
-      `SELECT i.id, i.organization_id, i.email, i.role, i.invited_by, i.expires_at,
-                i.consumed_at, o.name AS organization_name
-         FROM administrator_invitations i
-         JOIN organizations o ON o.id = i.organization_id
-         WHERE i.token_hash = ?`,
-      [hashToken(token)],
-    );
+  /**
+   * The invitee uniqueness check: the email must not already name an
+   * Administrator. The unique constraint remains the race arbiter.
+   */
+  private async administratorExists(email: string): Promise<boolean> {
+    const administrator = await this.db.administrator.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+    return administrator !== null;
+  }
+
+  private async findByToken(token: string): Promise<InvitationWithOrganization | null> {
+    return this.db.administratorInvitation.findUnique({
+      where: { tokenHash: hashToken(token) },
+      include: INVITATION_WITH_ORGANIZATION,
+    });
   }
 
   /**
@@ -250,16 +254,15 @@ export class InvitationsService {
    * presented (page load or accept). The guarded UPDATE makes "audit once"
    * race-free across both paths.
    */
-  private async auditExpiryOnce(invitation: InvitationRow): Promise<void> {
+  private async auditExpiryOnce(invitation: InvitationWithOrganization): Promise<void> {
     const now = new Date().toISOString();
-    const marked = await this.db.run(
-      `UPDATE administrator_invitations SET expiry_audited_at = ?
-         WHERE id = ? AND expiry_audited_at IS NULL`,
-      [now, invitation.id],
-    );
-    if (marked.rowCount !== 1) return;
+    const marked = await this.db.administratorInvitation.updateMany({
+      where: { id: invitation.id, expiryAuditedAt: null },
+      data: { expiryAuditedAt: now },
+    });
+    if (marked.count !== 1) return;
     await recordAuditEvent(this.db, {
-      organizationId: invitation.organization_id,
+      organizationId: invitation.organizationId,
       actor: 'instance',
       kind: 'administrator.invitation.expired',
       detail: { invitationId: invitation.id, email: invitation.email },

@@ -27,6 +27,11 @@ export type CeremonyResult =
     }
   | { ok: false; reason: CeremonyRefusedReason };
 
+/** The ceremony's rows in instance_state: the completion claim and the armed window. */
+const BOOTSTRAP_KEY = 'bootstrap';
+const BOOTSTRAP_COMPLETED = 'completed';
+const BOOTSTRAP_ARMED_KEY = 'bootstrap_armed';
+
 interface ArmedCeremony {
   token_hash: string;
   expires_at: string;
@@ -67,16 +72,15 @@ export class BootstrapService implements OnModuleInit {
     const token = randomToken(32);
     const tokenHash = hashToken(token);
     const expiresAt = Date.now() + this.tokenTtlMs();
-    await this.db.run(
-      `INSERT INTO instance_state (key, value) VALUES ('bootstrap_armed', ?)
-       ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
-      [
-        JSON.stringify({
-          token_hash: tokenHash,
-          expires_at: new Date(expiresAt).toISOString(),
-        } satisfies ArmedCeremony),
-      ],
-    );
+    const value = JSON.stringify({
+      token_hash: tokenHash,
+      expires_at: new Date(expiresAt).toISOString(),
+    } satisfies ArmedCeremony);
+    await this.db.instanceState.upsert({
+      where: { key: BOOTSTRAP_ARMED_KEY },
+      create: { key: BOOTSTRAP_ARMED_KEY, value },
+      update: { value },
+    });
     this.tokenHash = tokenHash;
     this.expiresAt = expiresAt;
     console.log(
@@ -112,28 +116,37 @@ export class BootstrapService implements OnModuleInit {
     // write path and the sign-in lookup (ADR-0021).
     const email = normalizeEmail(input.email);
 
-    // The claim itself is the race-free arbiter: whichever request inserts
-    // this row first completes the ceremony; every later request loses.
+    // The claim itself is the race-free arbiter: the insert that returns a
+    // count of one completes the ceremony, and every duplicate skip loses. The
+    // duplicate-skipping insert has no error path, so the aborted-transaction
+    // rule is never in play.
     const claimed = await this.db.transaction(async (tx) => {
-      const { rowCount } = await tx.run(
-        `INSERT INTO instance_state (key, value) VALUES ('bootstrap', 'completed')
-         ON CONFLICT (key) DO NOTHING`,
-      );
-      if (rowCount !== 1) return false;
+      const { count } = await tx.instanceState.createMany({
+        data: [{ key: BOOTSTRAP_KEY, value: BOOTSTRAP_COMPLETED }],
+        skipDuplicates: true,
+      });
+      if (count !== 1) return false;
 
-      await tx.run('INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)', [
-        organizationId,
-        input.organizationName,
-        now,
-      ]);
-      await tx.run(
-        'INSERT INTO administrators (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)',
-        [administratorId, email, input.name, passwordHash, now],
-      );
-      await tx.run(
-        'INSERT INTO memberships (id, organization_id, administrator_id, role) VALUES (?, ?, ?, ?)',
-        [membershipId, organizationId, administratorId, 'owner'],
-      );
+      await tx.organization.create({
+        data: { id: organizationId, name: input.organizationName, createdAt: now },
+      });
+      await tx.administrator.create({
+        data: {
+          id: administratorId,
+          email,
+          name: input.name,
+          passwordHash,
+          createdAt: now,
+        },
+      });
+      await tx.membership.create({
+        data: {
+          id: membershipId,
+          organizationId,
+          administratorId,
+          role: 'owner',
+        },
+      });
       await recordAuditEvent(tx, {
         organizationId,
         actor: 'instance',
@@ -163,16 +176,14 @@ export class BootstrapService implements OnModuleInit {
   }
 
   private async completed(): Promise<boolean> {
-    const row = await this.db.get<{ value: string }>(
-      "SELECT value FROM instance_state WHERE key = 'bootstrap'",
-    );
-    return row?.value === 'completed';
+    const row = await this.db.instanceState.findUnique({ where: { key: BOOTSTRAP_KEY } });
+    return row?.value === BOOTSTRAP_COMPLETED;
   }
 
   private async readArmed(): Promise<ArmedCeremony | null> {
-    const row = await this.db.get<{ value: string }>(
-      "SELECT value FROM instance_state WHERE key = 'bootstrap_armed'",
-    );
+    const row = await this.db.instanceState.findUnique({
+      where: { key: BOOTSTRAP_ARMED_KEY },
+    });
     if (!row) return null;
     try {
       return JSON.parse(row.value) as ArmedCeremony;

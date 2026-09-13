@@ -37,32 +37,25 @@ export class AdministratorsService {
     context: { source: string | null },
   ): Promise<AdministratorSignInResult> {
     const normalized = normalizeEmail(email);
-    const admin = await this.db.get<{ id: string; password_hash: string }>(
-      'SELECT id, password_hash FROM administrators WHERE email = ?',
-      [normalized],
-    );
+    const admin = await this.db.administrator.findUnique({
+      where: { email: normalized },
+      select: { id: true, passwordHash: true },
+    });
 
     // Verify even on unknown email so response timing does not reveal existence.
     const passwordOk = await verifyPassword(
       password,
-      admin?.password_hash ?? DUMMY_PASSWORD_HASH,
+      admin?.passwordHash ?? DUMMY_PASSWORD_HASH,
     );
     if (!admin || !passwordOk) {
       await this.auditFailure(normalized, context.source);
       return { ok: false };
     }
 
-    const membership = await this.db.get<{
-      membership_id: string;
-      role: string;
-      organization_id: string;
-      organization_name: string;
-    }>(
-      `SELECT m.id AS membership_id, m.role, o.id AS organization_id, o.name AS organization_name
-         FROM memberships m JOIN organizations o ON o.id = m.organization_id
-         WHERE m.administrator_id = ?`,
-      [admin.id],
-    );
+    const membership = await this.db.membership.findFirst({
+      where: { administratorId: admin.id },
+      include: { organization: { select: { id: true, name: true } } },
+    });
     if (!membership) {
       await this.auditFailure(normalized, context.source);
       return { ok: false };
@@ -71,25 +64,24 @@ export class AdministratorsService {
     const token = randomToken(32);
     const now = new Date();
     const expires = new Date(now.getTime() + ADMIN_SESSION_TTL_MS);
-    await this.db.run(
-      'INSERT INTO admin_sessions (id, membership_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
-      [
-        uuid(),
-        membership.membership_id,
-        await hashToken(token),
-        now.toISOString(),
-        expires.toISOString(),
-      ],
-    );
+    await this.db.adminSession.create({
+      data: {
+        id: uuid(),
+        membershipId: membership.id,
+        tokenHash: await hashToken(token),
+        createdAt: now.toISOString(),
+        expiresAt: expires.toISOString(),
+      },
+    });
 
     return {
       ok: true,
       session: {
         token,
-        membershipId: membership.membership_id,
+        membershipId: membership.id,
         administratorId: admin.id,
-        organizationId: membership.organization_id,
-        organizationName: membership.organization_name,
+        organizationId: membership.organization.id,
+        organizationName: membership.organization.name,
         role: membership.role as AdministratorRole,
       },
     };
@@ -115,55 +107,43 @@ export class AdministratorsService {
   }
 
   private async failureOrganizationId(email: string): Promise<string | undefined> {
-    const member = await this.db.get<{ organization_id: string }>(
-      `SELECT m.organization_id FROM administrators a
-         JOIN memberships m ON m.administrator_id = a.id
-         WHERE a.email = ?`,
-      [email],
-    );
-    if (member) return member.organization_id;
+    const membership = await this.db.membership.findFirst({
+      where: { administrator: { email } },
+      select: { organizationId: true },
+    });
+    if (membership) return membership.organizationId;
     // Unknown email: there is exactly one Organization in this release, so
     // its surface is the honest home for the attempt until hosted mode exists.
-    const hosted = await this.db.get<{ id: string }>(
-      'SELECT id FROM organizations ORDER BY created_at LIMIT 1',
-    );
-    return hosted?.id;
+    const fallbackOrganization = await this.db.organization.findFirst({
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    return fallbackOrganization?.id;
   }
 
   async resolveSession(token: string): Promise<AdministratorSessionInfo | null> {
-    const row = await this.db.get<{
-      expires_at: string;
-      revoked_at: string | null;
-      membership_id: string;
-      role: string;
-      organization_id: string;
-      organization_name: string;
-      administrator_id: string;
-    }>(
-      `SELECT s.expires_at, s.revoked_at, m.id AS membership_id, m.role,
-                m.organization_id, o.name AS organization_name, m.administrator_id
-         FROM admin_sessions s
-         JOIN memberships m ON m.id = s.membership_id
-         JOIN organizations o ON o.id = m.organization_id
-         WHERE s.token_hash = ?`,
-      [await hashToken(token)],
-    );
+    const row = await this.db.adminSession.findUnique({
+      where: { tokenHash: await hashToken(token) },
+      include: {
+        membership: { include: { organization: { select: { name: true } } } },
+      },
+    });
     if (!row) return null;
-    if (row.revoked_at !== null) return null;
-    if (new Date(row.expires_at).getTime() < Date.now()) return null;
+    if (row.revokedAt !== null) return null;
+    if (new Date(row.expiresAt).getTime() < Date.now()) return null;
     return {
-      membershipId: row.membership_id,
-      role: row.role as AdministratorRole,
-      organizationId: row.organization_id,
-      organizationName: row.organization_name,
-      administratorId: row.administrator_id,
+      membershipId: row.membershipId,
+      role: row.membership.role as AdministratorRole,
+      organizationId: row.membership.organizationId,
+      organizationName: row.membership.organization.name,
+      administratorId: row.membership.administratorId,
     };
   }
 
   async signOut(token: string): Promise<void> {
-    await this.db.run('UPDATE admin_sessions SET revoked_at = ? WHERE token_hash = ?', [
-      new Date().toISOString(),
-      await hashToken(token),
-    ]);
+    await this.db.adminSession.updateMany({
+      where: { tokenHash: await hashToken(token) },
+      data: { revokedAt: new Date().toISOString() },
+    });
   }
 }

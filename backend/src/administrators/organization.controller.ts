@@ -13,10 +13,10 @@ export class OrganizationController {
   async organization(@Req() req: AdministratorRequest): Promise<{ id: string; name: string }> {
     const session = req.administratorSession;
     if (!session) throw new UnauthorizedException();
-    const row = await this.db.get<{ id: string; name: string }>(
-      'SELECT id, name FROM organizations WHERE id = ?',
-      [session.organizationId],
-    );
+    const row = await this.db.organization.findUnique({
+      where: { id: session.organizationId },
+      select: { id: true, name: true },
+    });
     // The session's Membership references this Organization, so the row exists.
     return row!;
   }
