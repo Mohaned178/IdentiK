@@ -364,8 +364,17 @@ export class SessionsService {
     if (row.expires_at <= now) return false;
     // The Identity's own gate is shared with the credential and token paths,
     // so suspension, anonymization, and an unverified handle cannot be
-    // half-enforced here (ADR-0006/0007/0011).
-    if (identityGate(row) !== 'live') return false;
+    // half-enforced here (ADR-0006/0007/0011). The row is still raw; ticket 13
+    // converts it and this mapping disappears.
+    if (
+      identityGate({
+        emailVerified: row.email_verified,
+        suspendedAt: row.suspended_at,
+        anonymizedAt: row.anonymized_at,
+      }) !== 'live'
+    ) {
+      return false;
+    }
     if (row.sessions_revoked_at !== null && row.created_at <= row.sessions_revoked_at) return false;
     return true;
   }

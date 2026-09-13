@@ -25,24 +25,31 @@ type ReservationInsert = { created: true; identityId: string } | { created: fals
 
 type IdentityTokenKind = 'email_verification' | 'password_reset';
 
-interface IdentityRow {
+/**
+ * The Identity fields the mailbox-proof and state-lever flows need. The
+ * password hash is deliberately absent: anything that authenticates stays in
+ * the credential paths, never in a row handed to an Administrator lever
+ * (ADR-0008).
+ */
+const IDENTITY_SUMMARY_SELECT = {
+  id: true,
+  organizationId: true,
+  email: true,
+  emailVerified: true,
+  anonymizedAt: true,
+} as const;
+
+type IdentitySummary = {
   id: string;
-  organization_id: string;
+  organizationId: string;
   email: string;
-  email_verified: number;
-  anonymized_at: string | null;
-}
+  emailVerified: number;
+  anonymizedAt: string | null;
+};
 
 /** The state levers' Organization-scoped target: enough to find, name, and
  * gate the Identity, and nothing that authenticates. */
-interface IdentityTarget {
-  id: string;
-  organization_id: string;
-  organization_name: string;
-  email: string;
-  email_verified: number;
-  anonymized_at: string | null;
-}
+type IdentityTarget = IdentitySummary & { organization: { name: string } };
 
 export interface AuthenticatedIdentity {
   id: string;
@@ -94,9 +101,10 @@ export class IdentitiesService {
    * later.
    */
   async hostedOrganization(): Promise<{ id: string; name: string }> {
-    const row = await this.db.get<{ id: string; name: string }>(
-      'SELECT id, name FROM organizations ORDER BY created_at LIMIT 1',
-    );
+    const row = await this.db.organization.findFirst({
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, name: true },
+    });
     if (!row) throw new NotFoundException('no organization exists on this Instance');
     return row;
   }
@@ -116,21 +124,11 @@ export class IdentitiesService {
     password: string,
   ): Promise<IdentityAuthentication> {
     const normalized = normalizeEmail(email);
-    const row = await this.db.get<{
-      id: string;
-      organization_id: string;
-      email: string;
-      email_verified: number;
-      suspended_at: string | null;
-      anonymized_at: string | null;
-      password_hash: string;
-    }>(
-      `SELECT id, organization_id, email, email_verified, suspended_at, anonymized_at, password_hash
-         FROM identities WHERE organization_id = ? AND email = ?`,
-      [organizationId, normalized],
-    );
+    const row = await this.db.identity.findUnique({
+      where: { organizationId_email: { organizationId, email: normalized } },
+    });
 
-    const passwordOk = await verifyPassword(password, row?.password_hash ?? DUMMY_PASSWORD_HASH);
+    const passwordOk = await verifyPassword(password, row?.passwordHash ?? DUMMY_PASSWORD_HASH);
     if (!row || !passwordOk) {
       return { ok: false, reason: 'invalid', ...(row ? { identityId: row.id } : {}) };
     }
@@ -143,7 +141,7 @@ export class IdentitiesService {
     }
     return {
       ok: true,
-      identity: { id: row.id, organizationId: row.organization_id, email: row.email },
+      identity: { id: row.id, organizationId: row.organizationId, email: row.email },
     };
   }
 
@@ -193,20 +191,20 @@ export class IdentitiesService {
     const identityId = await this.consumeToken('email_verification', token);
     if (!identityId) return false;
 
-    const activated = await this.db.run(
-      'UPDATE identities SET email_verified = 1 WHERE id = ? AND email_verified = 0 AND anonymized_at IS NULL',
-      [identityId],
-    );
-    if (activated.rowCount !== 1) return false;
+    const activated = await this.db.identity.updateMany({
+      where: { id: identityId, emailVerified: 0, anonymizedAt: null },
+      data: { emailVerified: 1 },
+    });
+    if (activated.count !== 1) return false;
 
-    const identity = await this.db.get<{ organization_id: string; email: string }>(
-      'SELECT organization_id, email FROM identities WHERE id = ?',
-      [identityId],
-    );
+    const identity = await this.db.identity.findUnique({
+      where: { id: identityId },
+      select: { organizationId: true, email: true },
+    });
     if (!identity) return false;
 
     await recordAuditEvent(this.db, {
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       actor: 'end-user',
       kind: 'identity.verification.completed',
       detail: { identityId, email: identity.email },
@@ -275,26 +273,26 @@ export class IdentitiesService {
     if (!identityId) return false;
 
     const identity = await this.findIdentityById(identityId);
-    if (!identity || identity.anonymized_at !== null) return false;
+    if (!identity || identity.anonymizedAt !== null) return false;
 
     const now = new Date().toISOString();
-    await this.db.run(
-      'UPDATE identities SET password_hash = ?, email_verified = 1, sessions_revoked_at = ? WHERE id = ?',
-      [passwordHash, now, identity.id],
-    );
+    await this.db.identity.update({
+      where: { id: identity.id },
+      data: { passwordHash, emailVerified: 1, sessionsRevokedAt: now },
+    });
 
     // Mailbox proof is mailbox proof (ADR-0011): a reset on an Unverified
     // Reservation activates it, audited like a verification click.
-    if (identity.email_verified === 0) {
+    if (identity.emailVerified === 0) {
       await recordAuditEvent(this.db, {
-        organizationId: identity.organization_id,
+        organizationId: identity.organizationId,
         actor: 'end-user',
         kind: 'identity.verification.completed',
         detail: { identityId: identity.id, email: identity.email },
       });
     }
     await recordAuditEvent(this.db, {
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       actor: 'end-user',
       kind: 'identity.password_reset.completed',
       detail: { identityId: identity.id, email: identity.email },
@@ -323,22 +321,22 @@ export class IdentitiesService {
     currentPassword: string;
     newPassword: string;
   }): Promise<boolean> {
-    const identity = await this.db.get<{
-      id: string;
-      organization_id: string;
-      email: string;
-      password_hash: string;
-      anonymized_at: string | null;
-    }>(
-      'SELECT id, organization_id, email, password_hash, anonymized_at FROM identities WHERE id = ?',
-      [input.identityId],
-    );
-    if (!identity || identity.anonymized_at !== null) return false;
+    const identity = await this.db.identity.findUnique({
+      where: { id: input.identityId },
+      select: {
+        id: true,
+        organizationId: true,
+        email: true,
+        passwordHash: true,
+        anonymizedAt: true,
+      },
+    });
+    if (!identity || identity.anonymizedAt !== null) return false;
 
-    const currentOk = await verifyPassword(input.currentPassword, identity.password_hash);
+    const currentOk = await verifyPassword(input.currentPassword, identity.passwordHash);
     if (!currentOk) {
       await recordAuditEvent(this.db, {
-        organizationId: identity.organization_id,
+        organizationId: identity.organizationId,
         actor: 'end-user',
         kind: 'identity.password_change.failed',
         detail: {
@@ -352,22 +350,22 @@ export class IdentitiesService {
 
     // The Organization's policy applies to every credential its Identities
     // set (ADR-0022), the self-service change included.
-    await this.assertPasswordPolicy(identity.organization_id, input.newPassword);
+    await this.assertPasswordPolicy(identity.organizationId, input.newPassword);
     const passwordHash = await hashPassword(input.newPassword);
     const otherSessionsRevoked = await this.sessions.revokeOthersForIdentity({
       identityId: identity.id,
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       keepSessionId: input.currentSessionId,
       reason: 'password_change',
       actor: 'end-user',
     });
-    await this.db.run('UPDATE identities SET password_hash = ? WHERE id = ?', [
-      passwordHash,
-      identity.id,
-    ]);
+    await this.db.identity.update({
+      where: { id: identity.id },
+      data: { passwordHash },
+    });
 
     await recordAuditEvent(this.db, {
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       actor: 'end-user',
       kind: 'identity.password_change.completed',
       detail: {
@@ -392,13 +390,13 @@ export class IdentitiesService {
    */
   async requestEmailChange(input: { identityId: string; newEmail: string }): Promise<void> {
     const identity = await this.findIdentityById(input.identityId);
-    if (!identity || identity.anonymized_at !== null) return;
-    const organizationName = await this.organizationName(identity.organization_id);
+    if (!identity || identity.anonymizedAt !== null) return;
+    const organizationName = await this.organizationName(identity.organizationId);
     const newEmail = normalizeEmail(input.newEmail);
 
     if (!(await this.emailChangeAvailable(identity, newEmail))) {
       await recordAuditEvent(this.db, {
-        organizationId: identity.organization_id,
+        organizationId: identity.organizationId,
         actor: 'end-user',
         kind: 'identity.email_change.refused',
         detail: {
@@ -412,29 +410,25 @@ export class IdentitiesService {
     }
 
     // One pending change per Identity: a fresh request invalidates the last.
-    await this.db.run(
-      'DELETE FROM email_change_requests WHERE identity_id = ? AND consumed_at IS NULL',
-      [identity.id],
-    );
+    await this.db.emailChangeRequest.deleteMany({
+      where: { identityId: identity.id, consumedAt: null },
+    });
 
     const token = randomToken(32);
     const now = new Date();
-    await this.db.run(
-      `INSERT INTO email_change_requests
-           (id, organization_id, identity_id, new_email, token_hash, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        uuid(),
-        identity.organization_id,
-        identity.id,
+    await this.db.emailChangeRequest.create({
+      data: {
+        id: uuid(),
+        organizationId: identity.organizationId,
+        identityId: identity.id,
         newEmail,
-        hashToken(token),
-        new Date(now.getTime() + this.emailChangeTtlMs()).toISOString(),
-        now.toISOString(),
-      ],
-    );
+        tokenHash: hashToken(token),
+        expiresAt: new Date(now.getTime() + this.emailChangeTtlMs()).toISOString(),
+        createdAt: now.toISOString(),
+      },
+    });
     await recordAuditEvent(this.db, {
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       actor: 'end-user',
       kind: 'identity.email_change.requested',
       detail: {
@@ -455,44 +449,43 @@ export class IdentitiesService {
    */
   async verifyEmailChange(token: string): Promise<boolean> {
     const now = new Date().toISOString();
-    const request = await this.db.get<{
-      identity_id: string;
-      organization_id: string;
-      new_email: string;
-    }>(
-      `UPDATE email_change_requests SET consumed_at = ?
-         WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?
-         RETURNING identity_id, organization_id, new_email`,
-      [now, hashToken(token), now],
-    );
+    const tokenHash = hashToken(token);
+    // The guarded claim is the single-use arbiter; the request is read back
+    // only once it is ours.
+    const claimed = await this.db.emailChangeRequest.updateMany({
+      where: { tokenHash, consumedAt: null, expiresAt: { gt: now } },
+      data: { consumedAt: now },
+    });
+    if (claimed.count !== 1) return false;
+    const request = await this.db.emailChangeRequest.findUnique({ where: { tokenHash } });
     if (!request) return false;
 
-    const identity = await this.findIdentityById(request.identity_id);
-    if (!identity || identity.anonymized_at !== null) return false;
+    const identity = await this.findIdentityById(request.identityId);
+    if (!identity || identity.anonymizedAt !== null) return false;
 
     try {
-      const moved = await this.db.run(
-        'UPDATE identities SET email = ?, email_verified = 1 WHERE id = ? AND anonymized_at IS NULL',
-        [request.new_email, identity.id],
-      );
-      if (moved.rowCount !== 1) return false;
+      const moved = await this.db.identity.updateMany({
+        where: { id: identity.id, anonymizedAt: null },
+        data: { email: request.newEmail, emailVerified: 1 },
+      });
+      if (moved.count !== 1) return false;
     } catch (error) {
       if (isUniqueViolation(error)) {
         await recordAuditEvent(this.db, {
-          organizationId: request.organization_id,
+          organizationId: request.organizationId,
           actor: 'end-user',
           kind: 'identity.email_change.refused',
           detail: {
             identityId: identity.id,
             email: identity.email,
-            newEmail: request.new_email,
+            newEmail: request.newEmail,
           },
         });
         // The address was claimed between request and proof: the refusal
         // reaches the mailbox, like every other refusal in this flow.
         await this.sendEmailChangeRefusedEmail(
-          request.new_email,
-          await this.organizationName(request.organization_id),
+          request.newEmail,
+          await this.organizationName(request.organizationId),
         );
         return false;
       }
@@ -500,12 +493,12 @@ export class IdentitiesService {
     }
 
     await recordAuditEvent(this.db, {
-      organizationId: request.organization_id,
+      organizationId: request.organizationId,
       actor: 'end-user',
       kind: 'identity.email_change.completed',
       detail: {
         identityId: identity.id,
-        email: request.new_email,
+        email: request.newEmail,
         previousEmail: identity.email,
       },
     });
@@ -515,13 +508,12 @@ export class IdentitiesService {
   /** The address a live email-change request would move the Identity to. */
   async pendingEmailChange(identityId: string): Promise<string | null> {
     const now = new Date().toISOString();
-    const row = await this.db.get<{ new_email: string }>(
-      `SELECT new_email FROM email_change_requests
-         WHERE identity_id = ? AND consumed_at IS NULL AND expires_at > ?
-         ORDER BY created_at DESC, id DESC LIMIT 1`,
-      [identityId, now],
-    );
-    return row?.new_email ?? null;
+    const row = await this.db.emailChangeRequest.findFirst({
+      where: { identityId, consumedAt: null, expiresAt: { gt: now } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { newEmail: true },
+    });
+    return row?.newEmail ?? null;
   }
 
   /**
@@ -529,27 +521,31 @@ export class IdentitiesService {
    * current handle, not held by any Identity (verified or inert reservation),
    * and not the target of another Identity's live request.
    */
-  private async emailChangeAvailable(identity: IdentityRow, newEmail: string): Promise<boolean> {
+  private async emailChangeAvailable(identity: IdentitySummary, newEmail: string): Promise<boolean> {
     if (newEmail === normalizeEmail(identity.email)) return false;
-    const holder = await this.db.get(
-      'SELECT 1 FROM identities WHERE organization_id = ? AND email = ?',
-      [identity.organization_id, newEmail],
-    );
+    const holder = await this.db.identity.findFirst({
+      where: { organizationId: identity.organizationId, email: newEmail },
+      select: { id: true },
+    });
     if (holder) return false;
-    const pending = await this.db.get(
-      `SELECT 1 FROM email_change_requests
-         WHERE organization_id = ? AND new_email = ? AND identity_id != ?
-           AND consumed_at IS NULL AND expires_at > ?`,
-      [identity.organization_id, newEmail, identity.id, new Date().toISOString()],
-    );
-    return pending === undefined;
+    const pending = await this.db.emailChangeRequest.findFirst({
+      where: {
+        organizationId: identity.organizationId,
+        newEmail,
+        identityId: { not: identity.id },
+        consumedAt: null,
+        expiresAt: { gt: new Date().toISOString() },
+      },
+      select: { id: true },
+    });
+    return pending === null;
   }
 
   private async organizationName(organizationId: string): Promise<string> {
-    const row = await this.db.get<{ name: string }>(
-      'SELECT name FROM organizations WHERE id = ?',
-      [organizationId],
-    );
+    const row = await this.db.organization.findUnique({
+      where: { id: organizationId },
+      select: { name: true },
+    });
     return row?.name ?? '';
   }
 
@@ -573,14 +569,14 @@ export class IdentitiesService {
     actor: string;
   }): Promise<void> {
     const identity = await this.requireIdentity(input.organizationId, input.identityId);
-    if (identity.anonymized_at !== null) {
+    if (identity.anonymizedAt !== null) {
       throw new ConflictException('the Identity has been anonymized');
     }
     // The lever's premise is an Identity with a proven mailbox: an Unverified
     // Reservation has no verified email to deliver to, and "force password
     // reset" would be a contradiction — there is no credential its owner has
     // ever held. Reservations heal through the mailbox-proof flows instead.
-    if (identity.email_verified === 0) {
+    if (identity.emailVerified === 0) {
       throw new ConflictException('the Identity has no verified email');
     }
 
@@ -589,15 +585,15 @@ export class IdentitiesService {
     // request: an Administrator's security action must be auditable even when
     // the transport fails afterwards.
     await recordAuditEvent(this.db, {
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       actor: input.actor,
       kind: 'identity.password_reset.forced',
       detail: { identityId: identity.id, email: identity.email },
     });
-    await this.sendPasswordResetEmail(identity.email, identity.organization_name, token);
+    await this.sendPasswordResetEmail(identity.email, identity.organization.name, token);
     await this.sessions.revokeAllForIdentity({
       identityId: identity.id,
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       reason: 'password_reset',
       actor: input.actor,
     });
@@ -618,21 +614,21 @@ export class IdentitiesService {
     const identity = await this.requireIdentity(input.organizationId, input.identityId);
     // An anonymized shell is terminal: there is no actor left to suspend, and
     // the state must not be mutated (ADR-0007).
-    if (identity.anonymized_at !== null) return;
-    const changed = await this.db.run(
-      'UPDATE identities SET suspended_at = ? WHERE id = ? AND suspended_at IS NULL',
-      [new Date().toISOString(), identity.id],
-    );
-    if (changed.rowCount !== 1) return;
+    if (identity.anonymizedAt !== null) return;
+    const changed = await this.db.identity.updateMany({
+      where: { id: identity.id, suspendedAt: null },
+      data: { suspendedAt: new Date().toISOString() },
+    });
+    if (changed.count !== 1) return;
 
     await this.sessions.revokeAllForIdentity({
       identityId: identity.id,
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       reason: 'suspension',
       actor: input.actor,
     });
     await recordAuditEvent(this.db, {
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       actor: input.actor,
       kind: 'identity.suspended',
       detail: { identityId: identity.id, email: identity.email },
@@ -651,13 +647,13 @@ export class IdentitiesService {
     actor: string;
   }): Promise<void> {
     const identity = await this.requireIdentity(input.organizationId, input.identityId);
-    const changed = await this.db.run(
-      'UPDATE identities SET suspended_at = NULL, sessions_revoked_at = ? WHERE id = ? AND suspended_at IS NOT NULL',
-      [new Date().toISOString(), identity.id],
-    );
-    if (changed.rowCount === 1) {
+    const changed = await this.db.identity.updateMany({
+      where: { id: identity.id, suspendedAt: { not: null } },
+      data: { suspendedAt: null, sessionsRevokedAt: new Date().toISOString() },
+    });
+    if (changed.count === 1) {
       await recordAuditEvent(this.db, {
-        organizationId: identity.organization_id,
+        organizationId: identity.organizationId,
         actor: input.actor,
         kind: 'identity.unsuspended',
         detail: { identityId: identity.id, email: identity.email },
@@ -677,7 +673,7 @@ export class IdentitiesService {
     const identity = await this.requireIdentity(input.organizationId, input.identityId);
     return this.sessions.revokeAllForIdentity({
       identityId: identity.id,
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       reason: 'administrator',
       actor: input.actor,
     });
@@ -700,7 +696,7 @@ export class IdentitiesService {
     actor: string;
   }): Promise<void> {
     const identity = await this.requireIdentity(input.organizationId, input.identityId);
-    if (identity.anonymized_at !== null) return;
+    if (identity.anonymizedAt !== null) return;
 
     const now = new Date().toISOString();
     const pseudonym = anonymizedPseudonym(identity.id);
@@ -711,30 +707,41 @@ export class IdentitiesService {
     // NULL` is the race-free arbiter: a concurrent second anonymize commits
     // without duplicating the event.
     await this.db.transaction(async (tx) => {
-      const marked = await tx.run(
-        `UPDATE identities
-              SET email = ?, password_hash = ?, email_verified = 0, suspended_at = NULL,
-                  anonymized_at = ?, sessions_revoked_at = ?
-            WHERE id = ? AND anonymized_at IS NULL`,
-        [shellHandle, DUMMY_PASSWORD_HASH, now, now, identity.id],
-      );
-      if (marked.rowCount !== 1) return;
+      const marked = await tx.identity.updateMany({
+        where: { id: identity.id, anonymizedAt: null },
+        data: {
+          email: shellHandle,
+          passwordHash: DUMMY_PASSWORD_HASH,
+          emailVerified: 0,
+          suspendedAt: null,
+          anonymizedAt: now,
+          sessionsRevokedAt: now,
+        },
+      });
+      if (marked.count !== 1) return;
 
-      await tx.run('DELETE FROM enrollments WHERE identity_id = ?', [identity.id]);
-      await tx.run('DELETE FROM identity_tokens WHERE identity_id = ?', [identity.id]);
-      await tx.run('DELETE FROM authorization_codes WHERE identity_id = ?', [identity.id]);
+      await tx.enrollment.deleteMany({ where: { identityId: identity.id } });
+      await tx.identityToken.deleteMany({ where: { identityId: identity.id } });
+      await tx.authorizationCode.deleteMany({ where: { identityId: identity.id } });
       // Pending changes to the address being freed die with it, and the freed
       // address is released from any other Identity's request trail below.
-      await tx.run(
-        `DELETE FROM email_change_requests
-           WHERE identity_id = ? OR (organization_id = ? AND new_email = ?)`,
-        [identity.id, identity.organization_id, identity.email],
-      );
-      // The durable key is the identityId; the email in historical details is
-      // PII, so the old trail is re-attributed to the shell, never left naming
-      // the person. Scoped to this Identity's events and the End-User
-      // lifecycle kinds that carry only an email, so an Administrator
-      // invitation mentioning the same address is never rewritten.
+      await tx.emailChangeRequest.deleteMany({
+        where: {
+          OR: [
+            { identityId: identity.id },
+            { organizationId: identity.organizationId, newEmail: identity.email },
+          ],
+        },
+      });
+      // Deliberate raw-SQL exceptions (ADR-0027): the audit detail is a JSON
+      // text column and these are jsonb_set field rewrites — typed updates
+      // cannot express them. Every statement is parameterized, never
+      // interpolated. The durable key is the identityId; the email in
+      // historical details is PII, so the old trail is re-attributed to the
+      // shell, never left naming the person. Scoped to this Identity's events
+      // and the End-User lifecycle kinds that carry only an email, so an
+      // Administrator invitation mentioning the same address is never
+      // rewritten.
       await tx.run(
         `UPDATE audit_events
             SET detail = jsonb_set(detail::jsonb, '{email}', to_jsonb(?::text))::text
@@ -742,7 +749,7 @@ export class IdentitiesService {
             AND (detail::jsonb ->> 'email') = ?
             AND ((detail::jsonb ->> 'identityId') = ?
                  OR kind LIKE 'identity.%' OR kind LIKE 'enrollment.%')`,
-        [pseudonym, identity.organization_id, identity.email, identity.id],
+        [pseudonym, identity.organizationId, identity.email, identity.id],
       );
       // An email-change trail names the requested (`newEmail`) and previous
       // (`previousEmail`) addresses, and its own `email` may not equal the
@@ -753,21 +760,21 @@ export class IdentitiesService {
             SET detail = jsonb_set(detail::jsonb, '{email}', to_jsonb(?::text))::text
           WHERE organization_id = ? AND (detail::jsonb ->> 'identityId') = ?
             AND kind LIKE 'identity.email_change.%'`,
-        [pseudonym, identity.organization_id, identity.id],
+        [pseudonym, identity.organizationId, identity.id],
       );
       await tx.run(
         `UPDATE audit_events
             SET detail = jsonb_set(detail::jsonb, '{newEmail}', to_jsonb(?::text))::text
           WHERE organization_id = ? AND (detail::jsonb ->> 'newEmail') IS NOT NULL
             AND (detail::jsonb ->> 'identityId') = ?`,
-        [pseudonym, identity.organization_id, identity.id],
+        [pseudonym, identity.organizationId, identity.id],
       );
       await tx.run(
         `UPDATE audit_events
             SET detail = jsonb_set(detail::jsonb, '{previousEmail}', to_jsonb(?::text))::text
           WHERE organization_id = ? AND (detail::jsonb ->> 'previousEmail') IS NOT NULL
             AND (detail::jsonb ->> 'identityId') = ?`,
-        [pseudonym, identity.organization_id, identity.id],
+        [pseudonym, identity.organizationId, identity.id],
       );
       // The freed address may also appear as some *other* Identity's requested
       // or previous address; destroy it there too so deletion leaves no trace
@@ -776,16 +783,16 @@ export class IdentitiesService {
         `UPDATE audit_events
             SET detail = jsonb_set(detail::jsonb, '{newEmail}', to_jsonb(?::text))::text
           WHERE organization_id = ? AND (detail::jsonb ->> 'newEmail') = ?`,
-        [pseudonym, identity.organization_id, identity.email],
+        [pseudonym, identity.organizationId, identity.email],
       );
       await tx.run(
         `UPDATE audit_events
             SET detail = jsonb_set(detail::jsonb, '{previousEmail}', to_jsonb(?::text))::text
           WHERE organization_id = ? AND (detail::jsonb ->> 'previousEmail') = ?`,
-        [pseudonym, identity.organization_id, identity.email],
+        [pseudonym, identity.organizationId, identity.email],
       );
       await recordAuditEvent(tx, {
-        organizationId: identity.organization_id,
+        organizationId: identity.organizationId,
         actor: input.actor,
         kind: 'identity.anonymized',
         detail: { identityId: identity.id, pseudonym },
@@ -797,7 +804,7 @@ export class IdentitiesService {
     // the descendant refresh tokens explicitly.
     await this.sessions.revokeAllForIdentity({
       identityId: identity.id,
-      organizationId: identity.organization_id,
+      organizationId: identity.organizationId,
       reason: 'anonymization',
       actor: input.actor,
     });
@@ -815,10 +822,16 @@ export class IdentitiesService {
   ): Promise<ReservationInsert> {
     const identityId = uuid();
     try {
-      await this.db.run(
-        'INSERT INTO identities (id, organization_id, email, email_verified, password_hash, created_at) VALUES (?, ?, ?, 0, ?, ?)',
-        [identityId, organizationId, email, passwordHash, new Date().toISOString()],
-      );
+      await this.db.identity.create({
+        data: {
+          id: identityId,
+          organizationId,
+          email,
+          emailVerified: 0,
+          passwordHash,
+          createdAt: new Date().toISOString(),
+        },
+      });
       return { created: true, identityId };
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
@@ -834,35 +847,34 @@ export class IdentitiesService {
   ): Promise<string> {
     const token = randomToken(32);
     const expiresAt = new Date(Date.now() + ttlMs);
-    await this.db.run(
-      'INSERT INTO identity_tokens (id, identity_id, kind, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-      [
-        uuid(),
+    await this.db.identityToken.create({
+      data: {
+        id: uuid(),
         identityId,
         kind,
-        hashToken(token),
-        expiresAt.toISOString(),
-        new Date().toISOString(),
-      ],
-    );
+        tokenHash: hashToken(token),
+        expiresAt: expiresAt.toISOString(),
+        createdAt: new Date().toISOString(),
+      },
+    });
     return token;
   }
 
   private async findIdentityByEmail(
     organizationId: string,
     email: string,
-  ): Promise<IdentityRow | undefined> {
-    return this.db.get<IdentityRow>(
-      'SELECT id, organization_id, email, email_verified, anonymized_at FROM identities WHERE organization_id = ? AND email = ?',
-      [organizationId, email],
-    );
+  ): Promise<IdentitySummary | null> {
+    return this.db.identity.findUnique({
+      where: { organizationId_email: { organizationId, email } },
+      select: IDENTITY_SUMMARY_SELECT,
+    });
   }
 
-  private async findIdentityById(identityId: string): Promise<IdentityRow | undefined> {
-    return this.db.get<IdentityRow>(
-      'SELECT id, organization_id, email, email_verified, anonymized_at FROM identities WHERE id = ?',
-      [identityId],
-    );
+  private async findIdentityById(identityId: string): Promise<IdentitySummary | null> {
+    return this.db.identity.findUnique({
+      where: { id: identityId },
+      select: IDENTITY_SUMMARY_SELECT,
+    });
   }
 
   /** The state levers' Organization-scoped target, or a 404. */
@@ -870,44 +882,49 @@ export class IdentitiesService {
     organizationId: string,
     identityId: string,
   ): Promise<IdentityTarget> {
-    const row = await this.db.get<IdentityTarget>(
-      `SELECT i.id, i.organization_id, o.name AS organization_name, i.email, i.email_verified,
-                i.anonymized_at
-         FROM identities i JOIN organizations o ON o.id = i.organization_id
-         WHERE i.id = ? AND i.organization_id = ?`,
-      [identityId, organizationId],
-    );
+    const row = await this.db.identity.findFirst({
+      where: { id: identityId, organizationId },
+      select: {
+        ...IDENTITY_SUMMARY_SELECT,
+        organization: { select: { name: true } },
+      },
+    });
     if (!row) throw new NotFoundException('no such Identity');
     return row;
   }
 
   /**
    * Consume a live mailbox-proof token of one kind, returning its Identity, or
-   * undefined if it is missing, already used, or expired. The WHERE clause is
-   * the race-free single-use arbiter.
+   * undefined if it is missing, already used, or expired. The guarded update's
+   * count is the race-free single-use arbiter; the row is read back only after
+   * the claim succeeds.
    */
   private async consumeToken(
     kind: IdentityTokenKind,
     token: string,
   ): Promise<string | undefined> {
     const now = new Date().toISOString();
-    const row = await this.db.get<{ identity_id: string }>(
-      `UPDATE identity_tokens SET consumed_at = ?
-         WHERE token_hash = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ?
-         RETURNING identity_id`,
-      [now, hashToken(token), kind, now],
-    );
-    return row?.identity_id;
+    const tokenHash = hashToken(token);
+    const claimed = await this.db.identityToken.updateMany({
+      where: { tokenHash, kind, consumedAt: null, expiresAt: { gt: now } },
+      data: { consumedAt: now },
+    });
+    if (claimed.count !== 1) return undefined;
+    const row = await this.db.identityToken.findUnique({
+      where: { tokenHash },
+      select: { identityId: true },
+    });
+    return row?.identityId;
   }
 
   /** Whether a live mailbox-proof token of one kind exists — without consuming it. */
   private async peekToken(kind: IdentityTokenKind, token: string): Promise<boolean> {
     const now = new Date().toISOString();
-    const row = await this.db.get(
-      'SELECT 1 FROM identity_tokens WHERE token_hash = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ?',
-      [hashToken(token), kind, now],
-    );
-    return row !== undefined;
+    const row = await this.db.identityToken.findFirst({
+      where: { tokenHash: hashToken(token), kind, consumedAt: null, expiresAt: { gt: now } },
+      select: { id: true },
+    });
+    return row !== null;
   }
 
   /**
@@ -920,12 +937,15 @@ export class IdentitiesService {
     token: string,
   ): Promise<{ identityId: string; organizationId: string } | undefined> {
     const now = new Date().toISOString();
-    return this.db.get<{ identityId: string; organizationId: string }>(
-      `SELECT t.identity_id AS identityId, i.organization_id AS organizationId
-         FROM identity_tokens t JOIN identities i ON i.id = t.identity_id
-         WHERE t.token_hash = ? AND t.kind = ? AND t.consumed_at IS NULL AND t.expires_at > ?`,
-      [hashToken(token), kind, now],
-    );
+    const row = await this.db.identityToken.findFirst({
+      where: { tokenHash: hashToken(token), kind, consumedAt: null, expiresAt: { gt: now } },
+      select: {
+        identityId: true,
+        identity: { select: { organizationId: true } },
+      },
+    });
+    if (!row) return undefined;
+    return { identityId: row.identityId, organizationId: row.identity.organizationId };
   }
 
   /** Refuse a password the Organization's policy floors reject (ADR-0022). */

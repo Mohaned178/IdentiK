@@ -571,9 +571,15 @@ export class TokenService {
   }
 
   /** An Identity is usable only while verified, not suspended, not anonymized
-   * (ADR-0006/0011/0007). */
+   * (ADR-0006/0011/0007). The row is still raw; ticket 13 converts it. */
   private isLive(identity: IdentityRow): boolean {
-    return identityGate(identity) === 'live';
+    return (
+      identityGate({
+        emailVerified: identity.email_verified,
+        suspendedAt: identity.suspended_at,
+        anonymizedAt: identity.anonymized_at,
+      }) === 'live'
+    );
   }
 
   private accessTtlMs(): number {

@@ -26,13 +26,13 @@ export function identityState(input: {
 export type IdentityGate = 'live' | 'unverified' | 'suspended' | 'anonymized';
 
 export function identityGate(state: {
-  email_verified: number;
-  suspended_at: string | null;
-  anonymized_at: string | null;
+  emailVerified: number;
+  suspendedAt: string | null;
+  anonymizedAt: string | null;
 }): IdentityGate {
-  if (state.anonymized_at !== null) return 'anonymized';
-  if (state.suspended_at !== null) return 'suspended';
-  if (state.email_verified === 0) return 'unverified';
+  if (state.anonymizedAt !== null) return 'anonymized';
+  if (state.suspendedAt !== null) return 'suspended';
+  if (state.emailVerified === 0) return 'unverified';
   return 'live';
 }
 
