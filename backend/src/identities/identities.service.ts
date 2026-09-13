@@ -820,6 +820,17 @@ export class IdentitiesService {
     email: string,
     passwordHash: string,
   ): Promise<ReservationInsert> {
+    // Duplicate detection is a read, not a failed insert: a typed unique
+    // violation costs tens of milliseconds inside the ORM, and the caught
+    // exception would time-leak email existence at the sign-up boundary
+    // (ADR-0005). The unique constraint remains the race arbiter — a lost
+    // race still surfaces as the violation caught below.
+    const existing = await this.db.identity.findUnique({
+      where: { organizationId_email: { organizationId, email } },
+      select: { id: true },
+    });
+    if (existing) return { created: false };
+
     const identityId = uuid();
     try {
       await this.db.identity.create({

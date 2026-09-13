@@ -75,10 +75,6 @@ const ORG_SECTIONS = {
 type SectionField = keyof typeof ORG_SECTIONS;
 type SectionKey = (typeof ORG_SECTIONS)[SectionField];
 
-interface StoredRow {
-  value: string;
-}
-
 interface SectionUpdate {
   key: SectionKey;
   auditKind: string;
@@ -199,14 +195,18 @@ export class OrganizationSettingsService {
     const now = new Date().toISOString();
     await this.db.transaction(async (tx) => {
       for (const update of updates) {
-        await tx.run(
-          `INSERT INTO organization_settings (organization_id, key, value, updated_by, updated_at)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT (organization_id, key)
-             DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by,
-                           updated_at = excluded.updated_at`,
-          [organizationId, update.key, JSON.stringify(update.value), actor, now],
-        );
+        const data = {
+          value: JSON.stringify(update.value),
+          updatedBy: actor,
+          updatedAt: now,
+        };
+        await tx.organizationSetting.upsert({
+          where: {
+            organizationId_key: { organizationId, key: update.key },
+          },
+          create: { organizationId, key: update.key, ...data },
+          update: data,
+        });
         await recordAuditEvent(tx, {
           organizationId,
           actor,
@@ -219,10 +219,10 @@ export class OrganizationSettingsService {
   }
 
   private async organizationName(organizationId: string): Promise<string> {
-    const organization = await this.db.get<{ name: string }>(
-      'SELECT name FROM organizations WHERE id = ?',
-      [organizationId],
-    );
+    const organization = await this.db.organization.findUnique({
+      where: { id: organizationId },
+      select: { name: true },
+    });
     return organization?.name ?? '';
   }
 
@@ -230,10 +230,10 @@ export class OrganizationSettingsService {
     organizationId: string,
     key: SectionKey,
   ): Promise<Partial<T> | undefined> {
-    const row = await this.db.get<StoredRow>(
-      'SELECT value FROM organization_settings WHERE organization_id = ? AND key = ?',
-      [organizationId, key],
-    );
+    const row = await this.db.organizationSetting.findUnique({
+      where: { organizationId_key: { organizationId, key } },
+      select: { value: true },
+    });
     if (!row) return undefined;
     try {
       return JSON.parse(row.value) as Partial<T>;

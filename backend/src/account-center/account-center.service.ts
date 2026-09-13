@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { ApplicationType } from '../applications/applications.service';
+import type { Prisma } from '../generated/prisma/client';
 import { IdentitiesService } from '../identities/identities.service';
 import {
   OrganizationSettingsService,
@@ -35,13 +36,10 @@ export interface AccountCenterView {
   connectedApplications: ConnectedApplicationView[];
 }
 
-interface ConnectedApplicationRow {
-  application_id: string;
-  name: string;
-  type: ApplicationType;
-  created_at: string;
-  suspended_at: string | null;
-}
+/** The Application facts a connected-Application entry carries. */
+const CONNECTED_APPLICATION = {
+  application: { select: { name: true, type: true } },
+} as const satisfies Prisma.EnrollmentInclude;
 
 /**
  * The Account Center's data (ADR-0018): the End User's own Sessions, each
@@ -76,27 +74,25 @@ export class AccountCenterService {
   }
 
   private async organizationName(organizationId: string): Promise<string> {
-    const row = await this.db.get<{ name: string }>(
-      'SELECT name FROM organizations WHERE id = ?',
-      [organizationId],
-    );
+    const row = await this.db.organization.findUnique({
+      where: { id: organizationId },
+      select: { name: true },
+    });
     return row?.name ?? '';
   }
 
   private async connectedApplications(identityId: string): Promise<ConnectedApplicationView[]> {
-    const rows = await this.db.all<ConnectedApplicationRow>(
-      `SELECT e.application_id, a.name, a.type, e.created_at, e.suspended_at
-       FROM enrollments e JOIN applications a ON a.id = e.application_id
-       WHERE e.identity_id = ?
-       ORDER BY e.created_at, e.id`,
-      [identityId],
-    );
+    const rows = await this.db.enrollment.findMany({
+      where: { identityId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: CONNECTED_APPLICATION,
+    });
     return rows.map((row) => ({
-      applicationId: row.application_id,
-      name: row.name,
-      type: row.type,
-      enrolledAt: row.created_at,
-      suspended: row.suspended_at !== null,
+      applicationId: row.applicationId,
+      name: row.application.name,
+      type: row.application.type as ApplicationType,
+      enrolledAt: row.createdAt,
+      suspended: row.suspendedAt !== null,
     }));
   }
 }

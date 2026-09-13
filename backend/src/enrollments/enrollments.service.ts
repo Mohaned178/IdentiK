@@ -1,8 +1,9 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { identityState, type IdentityState } from '../identities/identity-state';
+import type { Prisma } from '../generated/prisma/client';
 import { SessionsService } from '../sessions/sessions.service';
 import { recordAuditEvent } from '../storage/audit';
-import type { DataAccess } from '../storage/data-access';
+import type { DataHandle } from '../storage/data-access';
 import { isUniqueViolation } from '../storage/postgres';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
@@ -19,15 +20,21 @@ export interface ApplicationEnrollmentView {
   suspended: boolean;
 }
 
-interface ApplicationEnrollmentRow {
-  identity_id: string;
-  email: string;
-  email_verified: number;
-  identity_suspended_at: string | null;
-  identity_anonymized_at: string | null;
-  created_at: string;
-  suspended_at: string | null;
-}
+/** The Identity fields an Enrollment view carries: never a credential. */
+const ENROLLMENT_WITH_IDENTITY = {
+  identity: {
+    select: {
+      email: true,
+      emailVerified: true,
+      suspendedAt: true,
+      anonymizedAt: true,
+    },
+  },
+} as const satisfies Prisma.EnrollmentInclude;
+
+type EnrollmentWithIdentity = Prisma.EnrollmentGetPayload<{
+  include: typeof ENROLLMENT_WITH_IDENTITY;
+}>;
 
 /**
  * An Enrollment is an Identity's membership in one Application, created
@@ -58,10 +65,14 @@ export class EnrollmentsService {
     if (existing) return this.gate(existing);
 
     try {
-      await this.db.run(
-        'INSERT INTO enrollments (id, identity_id, application_id, created_at) VALUES (?, ?, ?, ?)',
-        [uuid(), input.identityId, input.applicationId, new Date().toISOString()],
-      );
+      await this.db.enrollment.create({
+        data: {
+          id: uuid(),
+          identityId: input.identityId,
+          applicationId: input.applicationId,
+          createdAt: new Date().toISOString(),
+        },
+      });
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
       const raced = await this.find(input.identityId, input.applicationId);
@@ -95,15 +106,11 @@ export class EnrollmentsService {
   ): Promise<ApplicationEnrollmentView[]> {
     await this.requireApplication(organizationId, applicationId);
 
-    const rows = await this.db.all<ApplicationEnrollmentRow>(
-      `SELECT e.identity_id, e.created_at, e.suspended_at,
-              i.email, i.email_verified, i.suspended_at AS identity_suspended_at,
-              i.anonymized_at AS identity_anonymized_at
-       FROM enrollments e JOIN identities i ON i.id = e.identity_id
-       WHERE e.application_id = ? AND i.organization_id = ?
-       ORDER BY e.created_at, e.id`,
-      [applicationId, organizationId],
-    );
+    const rows = await this.db.enrollment.findMany({
+      where: { applicationId, identity: { organizationId } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: ENROLLMENT_WITH_IDENTITY,
+    });
     return rows.map((row) => this.toView(row));
   }
 
@@ -115,11 +122,9 @@ export class EnrollmentsService {
    * Enrollments were removed. There is no per-Enrollment audit event — the
    * deletion event records the collection effect.
    */
-  async removeAllForApplication(db: DataAccess, applicationId: string): Promise<number> {
-    const removed = await db.run('DELETE FROM enrollments WHERE application_id = ?', [
-      applicationId,
-    ]);
-    return removed.rowCount;
+  async removeAllForApplication(db: DataHandle, applicationId: string): Promise<number> {
+    const removed = await db.enrollment.deleteMany({ where: { applicationId } });
+    return removed.count;
   }
 
   /**
@@ -138,10 +143,10 @@ export class EnrollmentsService {
   }): Promise<ApplicationEnrollmentView> {
     const current = await this.viewFor(input.organizationId, input.applicationId, input.identityId);
     if (!current.suspended) {
-      await this.db.run(
-        'UPDATE enrollments SET suspended_at = ? WHERE identity_id = ? AND application_id = ?',
-        [new Date().toISOString(), input.identityId, input.applicationId],
-      );
+      await this.db.enrollment.updateMany({
+        where: { identityId: input.identityId, applicationId: input.applicationId },
+        data: { suspendedAt: new Date().toISOString() },
+      });
       await this.sessions.revokeAllForIdentity({
         identityId: input.identityId,
         organizationId: input.organizationId,
@@ -162,10 +167,10 @@ export class EnrollmentsService {
   }): Promise<ApplicationEnrollmentView> {
     const current = await this.viewFor(input.organizationId, input.applicationId, input.identityId);
     if (current.suspended) {
-      await this.db.run(
-        'UPDATE enrollments SET suspended_at = NULL WHERE identity_id = ? AND application_id = ?',
-        [input.identityId, input.applicationId],
-      );
+      await this.db.enrollment.updateMany({
+        where: { identityId: input.identityId, applicationId: input.applicationId },
+        data: { suspendedAt: null },
+      });
       await this.auditApplication(input, 'enrollment.unsuspended', current.email);
     }
     return this.viewFor(input.organizationId, input.applicationId, input.identityId);
@@ -196,39 +201,35 @@ export class EnrollmentsService {
   ): Promise<ApplicationEnrollmentView> {
     await this.requireApplication(organizationId, applicationId);
 
-    const row = await this.db.get<ApplicationEnrollmentRow>(
-      `SELECT e.identity_id, e.created_at, e.suspended_at,
-              i.email, i.email_verified, i.suspended_at AS identity_suspended_at,
-              i.anonymized_at AS identity_anonymized_at
-       FROM enrollments e JOIN identities i ON i.id = e.identity_id
-       WHERE e.identity_id = ? AND e.application_id = ? AND i.organization_id = ?`,
-      [identityId, applicationId, organizationId],
-    );
+    const row = await this.db.enrollment.findFirst({
+      where: { identityId, applicationId, identity: { organizationId } },
+      include: ENROLLMENT_WITH_IDENTITY,
+    });
     if (!row) throw new NotFoundException('no such Enrollment');
     return this.toView(row);
   }
 
   /** An unknown or foreign Application is a 404 from every path. */
   private async requireApplication(organizationId: string, applicationId: string): Promise<void> {
-    const application = await this.db.get(
-      'SELECT 1 FROM applications WHERE id = ? AND organization_id = ?',
-      [applicationId, organizationId],
-    );
+    const application = await this.db.application.findFirst({
+      where: { id: applicationId, organizationId },
+      select: { id: true },
+    });
     if (!application) throw new NotFoundException('no such Application');
   }
 
-  private toView(row: ApplicationEnrollmentRow): ApplicationEnrollmentView {
+  private toView(row: EnrollmentWithIdentity): ApplicationEnrollmentView {
     return {
-      identityId: row.identity_id,
-      email: row.email,
-      emailVerified: row.email_verified === 1,
+      identityId: row.identityId,
+      email: row.identity.email,
+      emailVerified: row.identity.emailVerified === 1,
       state: identityState({
-        emailVerified: row.email_verified === 1,
-        suspended: row.identity_suspended_at !== null,
-        anonymized: row.identity_anonymized_at !== null,
+        emailVerified: row.identity.emailVerified === 1,
+        suspended: row.identity.suspendedAt !== null,
+        anonymized: row.identity.anonymizedAt !== null,
       }),
-      enrolledAt: row.created_at,
-      suspended: row.suspended_at !== null,
+      enrolledAt: row.createdAt,
+      suspended: row.suspendedAt !== null,
     };
   }
 
@@ -241,20 +242,20 @@ export class EnrollmentsService {
    */
   async allows(identityId: string, applicationId: string): Promise<boolean> {
     const row = await this.find(identityId, applicationId);
-    return row !== undefined && row.suspended_at === null;
+    return row !== null && row.suspendedAt === null;
   }
 
   private async find(
     identityId: string,
     applicationId: string,
-  ): Promise<{ suspended_at: string | null } | undefined> {
-    return this.db.get<{ suspended_at: string | null }>(
-      'SELECT suspended_at FROM enrollments WHERE identity_id = ? AND application_id = ?',
-      [identityId, applicationId],
-    );
+  ): Promise<{ suspendedAt: string | null } | null> {
+    return this.db.enrollment.findUnique({
+      where: { identityId_applicationId: { identityId, applicationId } },
+      select: { suspendedAt: true },
+    });
   }
 
-  private gate(row: { suspended_at: string | null }): EnrollmentGate {
-    return row.suspended_at === null ? { allowed: true } : { allowed: false, reason: 'suspended' };
+  private gate(row: { suspendedAt: string | null }): EnrollmentGate {
+    return row.suspendedAt === null ? { allowed: true } : { allowed: false, reason: 'suspended' };
   }
 }

@@ -1,6 +1,7 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { ApplicationType } from '../applications/applications.service';
 import { AuditService, type AuditEventView } from '../audit/audit.service';
+import type { Prisma } from '../generated/prisma/client';
 import { SessionsService, type SessionSummary } from '../sessions/sessions.service';
 import { DATABASE, Database } from '../storage/token';
 import { anonymizedPseudonym, identityState, type IdentityState } from './identity-state';
@@ -27,22 +28,22 @@ export interface IdentityDetail extends IdentityListItem {
   recentActivity: AuditEventView[];
 }
 
-interface IdentityRow {
-  id: string;
-  email: string;
-  email_verified: number;
-  suspended_at: string | null;
-  anonymized_at: string | null;
-  created_at: string;
-}
+/** The Identity fields the directory lists: never a credential (ADR-0008). */
+const DIRECTORY_IDENTITY_SELECT = {
+  id: true,
+  email: true,
+  emailVerified: true,
+  suspendedAt: true,
+  anonymizedAt: true,
+  createdAt: true,
+} as const;
 
-interface EnrollmentRow {
-  application_id: string;
-  application_name: string;
-  application_type: ApplicationType;
-  created_at: string;
-  suspended_at: string | null;
-}
+type DirectoryIdentity = Prisma.IdentityGetPayload<{ select: typeof DIRECTORY_IDENTITY_SELECT }>;
+
+/** The Application facts an Enrollment entry carries. */
+const ENROLLMENT_WITH_APPLICATION = {
+  application: { select: { name: true, type: true } },
+} as const satisfies Prisma.EnrollmentInclude;
 
 /** How much authentication activity the detail view carries. */
 const RECENT_ACTIVITY_LIMIT = 20;
@@ -64,21 +65,19 @@ export class IdentityDirectoryService {
   ) {}
 
   async list(organizationId: string): Promise<IdentityListItem[]> {
-    const rows = await this.db.all<IdentityRow>(
-      `SELECT id, email, email_verified, suspended_at, anonymized_at, created_at
-       FROM identities WHERE organization_id = ?
-       ORDER BY created_at, id`,
-      [organizationId],
-    );
+    const rows = await this.db.identity.findMany({
+      where: { organizationId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: DIRECTORY_IDENTITY_SELECT,
+    });
     return rows.map((row) => this.toView(row));
   }
 
   async detail(organizationId: string, identityId: string): Promise<IdentityDetail> {
-    const row = await this.db.get<IdentityRow>(
-      `SELECT id, email, email_verified, suspended_at, anonymized_at, created_at
-       FROM identities WHERE id = ? AND organization_id = ?`,
-      [identityId, organizationId],
-    );
+    const row = await this.db.identity.findFirst({
+      where: { id: identityId, organizationId },
+      select: DIRECTORY_IDENTITY_SELECT,
+    });
     if (!row) throw new NotFoundException('no such Identity');
 
     return {
@@ -93,37 +92,34 @@ export class IdentityDirectoryService {
   }
 
   private async enrollments(identityId: string): Promise<IdentityEnrollmentView[]> {
-    const rows = await this.db.all<EnrollmentRow>(
-      `SELECT e.application_id, a.name AS application_name, a.type AS application_type,
-              e.created_at, e.suspended_at
-       FROM enrollments e JOIN applications a ON a.id = e.application_id
-       WHERE e.identity_id = ?
-       ORDER BY e.created_at, e.id`,
-      [identityId],
-    );
+    const rows = await this.db.enrollment.findMany({
+      where: { identityId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: ENROLLMENT_WITH_APPLICATION,
+    });
     return rows.map((row) => ({
-      applicationId: row.application_id,
-      applicationName: row.application_name,
-      applicationType: row.application_type,
-      enrolledAt: row.created_at,
-      suspended: row.suspended_at !== null,
+      applicationId: row.applicationId,
+      applicationName: row.application.name,
+      applicationType: row.application.type as ApplicationType,
+      enrolledAt: row.createdAt,
+      suspended: row.suspendedAt !== null,
     }));
   }
 
-  private toView(row: IdentityRow): IdentityListItem {
-    const anonymized = row.anonymized_at !== null;
+  private toView(row: DirectoryIdentity): IdentityListItem {
+    const anonymized = row.anonymizedAt !== null;
     return {
       id: row.id,
       // An anonymized Identity has no email left; the surviving shell is
       // displayed by its id-derived pseudonym (ADR-0007).
       email: anonymized ? anonymizedPseudonym(row.id) : row.email,
-      emailVerified: row.email_verified === 1,
+      emailVerified: row.emailVerified === 1,
       state: identityState({
-        emailVerified: row.email_verified === 1,
-        suspended: row.suspended_at !== null,
+        emailVerified: row.emailVerified === 1,
+        suspended: row.suspendedAt !== null,
         anonymized,
       }),
-      createdAt: row.created_at,
+      createdAt: row.createdAt,
     };
   }
 }
