@@ -1,14 +1,11 @@
-import type { StatementSync } from 'node:sqlite';
 import type { DataAccess } from './data-access';
 
 export const DATABASE = Symbol('DATABASE');
 
 /**
- * The Instance's data handle. During the engine swap it is the async contract
- * plus the legacy synchronous prepared-statement surface that unconverted
- * modules still use; the engine swap removes the synchronous half and
- * re-points this alias at the PostgreSQL compatibility layer.
+ * The Instance's data handle: the temporary Stage 1 facade over the ORM
+ * client's parameterized raw access (ADR-0026, ADR-0027). Services inject it
+ * exactly as they always have; Stage 2 re-points this alias at the typed
+ * client and Finalize deletes the facade behind it.
  */
-export interface Database extends DataAccess {
-  prepare(sql: string): StatementSync;
-}
+export type Database = DataAccess;

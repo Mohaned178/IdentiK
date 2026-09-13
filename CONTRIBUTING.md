@@ -9,11 +9,35 @@ ticket, and test is expected to speak it.
 
 - **Node.js 24** — pinned in [`.nvmrc`](.nvmrc). Run `nvm use` if you have it.
 - **npm** — the repository is an npm workspace (`backend` and `e2e`).
+- **PostgreSQL 18** — the Instance's system of record. The quickest local
+  server is the official image:
+
+  ```sh
+  docker run --name identik-postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:18
+  ```
 
 ```sh
 npm ci          # install every workspace from the lockfile
-npm run dev     # start the backend in watch mode
+npm run dev     # start the backend in watch mode (configure the environment first)
 ```
+
+## Environment
+
+The Instance reads configuration from `process.env`; [`.env.example`](.env.example)
+documents every variable. It is documentation, not a loader.
+
+`DATABASE_URL` (an absolute `postgres://` URL) is the only persistence setting.
+The schema is never created at boot — apply migrations as an explicit deploy
+step before starting an Instance:
+
+```sh
+cd backend
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/identik npx prisma migrate deploy
+```
+
+Starting against an unmigrated database fails fast and names that command.
+When migrating from a release artifact — which ships `prisma/` without
+`node_modules` — use the pinned CLI: `npx prisma@7.10.0 migrate deploy`.
 
 ## Repository layout
 
@@ -32,9 +56,15 @@ Run these before opening a pull request; CI runs exactly the same set.
 ```sh
 npm run typecheck        # tsc --noEmit across both workspaces
 npm run build            # nest build the backend into backend/dist
-npm run test -w e2e      # end-to-end tests (builds the backend first)
+npm run test:e2e         # end-to-end tests against PostgreSQL (builds the backend first)
 npm run verify           # all three, in order
 ```
+
+The end-to-end harness provisions a fresh, already-migrated database per
+Instance by cloning a migrated template, and drops it on stop. It connects to
+`IDENTIK_TEST_DATABASE_URL`, defaulting to
+`postgresql://postgres:postgres@127.0.0.1:5432/postgres`, and never inspects
+Instance tables — provisioning only.
 
 New behaviour is covered by an end-to-end test at the HTTP seam, not a unit test
 of an internal. The seams are documented per ticket in `.scratch/`.

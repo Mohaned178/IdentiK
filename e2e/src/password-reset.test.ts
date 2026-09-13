@@ -122,8 +122,9 @@ describe('Forgot password, reset, and pre-claimed email healing', () => {
   });
 
   it('forgot-password responds with uniform timing whether the email exists or not', async () => {
-    // Warm both paths before measuring (module init, sqlite pages). Every known
-    // address is a real Identity so the exists branch is actually exercised.
+    // Warm both paths before measuring (module init, database connection
+    // warm-up). Every known address is a real Identity so the exists branch is
+    // actually exercised.
     await signUp('timing-warmup-known@example.com', 'original password 123');
     await forgotPassword('timing-warmup-known@example.com');
     await forgotPassword('timing-warmup-unknown@example.com');

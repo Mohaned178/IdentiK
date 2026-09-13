@@ -5,7 +5,7 @@ import { LinkBaseService } from '../config/link-base.service';
 import { normalizeEmail } from '../identities/email';
 import { MailService } from '../mail/mail.service';
 import { recordAuditEvent } from '../storage/audit';
-import { isUniqueViolation } from '../storage/sqlite';
+import { isUniqueViolation } from '../storage/postgres';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import type { AdministratorRole } from './administrators.service';

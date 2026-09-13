@@ -1,9 +1,7 @@
 import { ChildProcess, spawn } from 'node:child_process';
-import { mkdirSync, rmSync } from 'node:fs';
 import { createServer as createNetServer, type AddressInfo } from 'node:net';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { databaseNameFor, databaseUrl, dropDatabase, ensureDatabase } from './provision';
 
 export interface CapturedEmail {
   to: string;
@@ -18,6 +16,11 @@ export interface CapturedEmail {
  * surface (Seam 2) — never storage, token internals, or module structure.
  * The Instance's own console output is observable to the harness (the
  * bootstrap ceremony reveals its one-time token there).
+ *
+ * Persistence is provisioned, not inspected: each Instance gets a fresh
+ * database cloned from the run's migrated template, and the harness drops it
+ * on stop. A key reused across two starts — a restart — reuses its database,
+ * which is how durability is tested.
  */
 export class Instance {
   private child?: ChildProcess;
@@ -26,27 +29,26 @@ export class Instance {
 
   private constructor(
     readonly url: string,
-    private readonly stateDir: string,
+    private readonly databaseName: string,
   ) {}
 
   static async start(backendDist: string, env: Record<string, string> = {}): Promise<Instance> {
-    const stateDir = join(
-      tmpdir(),
-      `identik-state-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-    return Instance.startAt(backendDist, stateDir, env);
+    const key = `identik-instance-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return Instance.startAt(backendDist, key, env);
   }
 
   /**
-   * Starts an Instance rooted at an existing state directory — used to test
-   * durable behavior across restarts (same storage, new process).
+   * Starts an Instance against the database named by `databaseKey`. A key
+   * already provisioned is reused — used to test durable behavior across
+   * restarts (same storage, new process).
    */
   static async startAt(
     backendDist: string,
-    stateDir: string,
+    databaseKey: string,
     env: Record<string, string> = {},
   ): Promise<Instance> {
-    mkdirSync(stateDir, { recursive: true });
+    const databaseName = databaseNameFor(databaseKey);
+    await ensureDatabase(databaseName);
 
     const port = await freePort();
     const url = `http://127.0.0.1:${port}`;
@@ -55,7 +57,7 @@ export class Instance {
       env: {
         ...process.env,
         PORT: String(port),
-        IDENTIK_STATE_DIR: stateDir,
+        DATABASE_URL: databaseUrl(databaseName),
         IDENTIK_BASE_URL: url,
         MAIL_TRANSPORT_BINDING: 'capture',
         ...env,
@@ -64,7 +66,7 @@ export class Instance {
       windowsHide: true,
     });
 
-    const instance = new Instance(url, stateDir);
+    const instance = new Instance(url, databaseName);
     instance.child = child;
     child.stdout?.on('data', (chunk) => instance.consoleOutput.push(String(chunk)));
     child.stderr?.on('data', (chunk) => instance.consoleOutput.push(String(chunk)));
@@ -160,7 +162,7 @@ export class Instance {
     child.kill();
     await onceExit(child);
     if (!options.keepState) {
-      rmSync(this.stateDir, { recursive: true, force: true });
+      await dropDatabase(this.databaseName);
     }
   }
 }
@@ -208,4 +210,4 @@ export function backendDistFromWorkspaceRoot(root: string): string {
   return join(root, 'backend', 'dist');
 }
 
-export const WORKSPACE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+export { WORKSPACE_ROOT } from './provision';

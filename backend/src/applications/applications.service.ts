@@ -324,10 +324,11 @@ export class ApplicationsService {
       // historical details is PII, so the surviving trail is re-attributed to
       // the pseudonymous shell.
       await tx.run(
-        `UPDATE audit_events SET detail = json_set(detail, '$.name', ?)
-            WHERE organization_id = ?
-              AND json_extract(detail, '$.applicationId') = ?
-              AND json_extract(detail, '$.name') IS NOT NULL`,
+        `UPDATE audit_events
+            SET detail = jsonb_set(detail::jsonb, '{name}', to_jsonb(?::text))::text
+          WHERE organization_id = ?
+            AND (detail::jsonb ->> 'applicationId') = ?
+            AND (detail::jsonb ->> 'name') IS NOT NULL`,
         [pseudonym, input.organizationId, application.id],
       );
       await recordAuditEvent(tx, {

@@ -80,7 +80,7 @@ export class AuditService {
     // Identity linkage lives in the event detail; the durable key is the
     // identityId, never the email (which anonymization destroys and reuse
     // recycles — ADR-0007).
-    add("json_extract(e.detail, '$.identityId') = ?", identityId);
+    add("(e.detail::jsonb ->> 'identityId') = ?", identityId);
     add('e.occurred_at >= ?', from);
     add('e.occurred_at <= ?', to);
     if (filters.limit !== undefined) params.push(filters.limit);
@@ -93,7 +93,7 @@ export class AuditService {
          ON m.organization_id = e.organization_id AND m.administrator_id = e.actor
        LEFT JOIN administrators a ON a.id = m.administrator_id
        WHERE ${conditions.join(' AND ')}
-       ORDER BY e.occurred_at DESC, e.rowid DESC
+       ORDER BY e.occurred_at DESC, e.seq DESC
        ${filters.limit === undefined ? '' : 'LIMIT ?'}`,
       params,
     );

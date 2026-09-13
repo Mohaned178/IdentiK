@@ -412,12 +412,12 @@ export class TokenService {
     );
     // The parent, the Enrollment, and the Application are re-checked before
     // the insert, so a revocation that landed while the tokens were being
-    // signed is caught (ADR-0013). On the synchronous SQLite engine the check
-    // and the insert were one uninterrupted section; behind the async contract
-    // they are separated by awaits, so a change landing in that gap could
-    // still leave a freshly minted token behind on a concurrent engine.
-    // Closing the gap needs an atomic write (conditional insert or row lock),
-    // which belongs to the final data-access conversion.
+    // signed is caught (ADR-0013). The original synchronous engine made the
+    // check and the insert one uninterrupted section; behind the async
+    // contract they are separated by awaits, so on a concurrent engine a
+    // change landing in that gap could still leave a freshly minted token
+    // behind. Closing the gap needs an atomic write (conditional insert or row
+    // lock), which belongs to the final data-access conversion.
     if (!(await this.sessions.resolveById(input.session.id))) return null;
     if (!(await this.enrollments.allows(input.identity.id, input.client.id))) return null;
     const application = await this.db.get<{

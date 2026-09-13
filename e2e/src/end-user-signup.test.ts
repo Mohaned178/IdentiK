@@ -222,7 +222,7 @@ describe('End-User sign-up with the email verification gate', () => {
   });
 
   it('sign-up responses are uniform in timing whether the email exists or not', async () => {
-    // Warm both paths (module init, sqlite pages) before measuring.
+    // Warm both paths (module init, database connection warm-up) before measuring.
     await signUp('timing-warmup@example.com', END_USER_PASSWORD);
     await signUp(END_USER_EMAIL, END_USER_PASSWORD);
 

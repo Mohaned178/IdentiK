@@ -3,7 +3,7 @@ import { identityState, type IdentityState } from '../identities/identity-state'
 import { SessionsService } from '../sessions/sessions.service';
 import { recordAuditEvent } from '../storage/audit';
 import type { DataAccess } from '../storage/data-access';
-import { isUniqueViolation } from '../storage/sqlite';
+import { isUniqueViolation } from '../storage/postgres';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 

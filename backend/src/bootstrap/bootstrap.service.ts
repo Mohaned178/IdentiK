@@ -68,7 +68,8 @@ export class BootstrapService implements OnModuleInit {
     const tokenHash = hashToken(token);
     const expiresAt = Date.now() + this.tokenTtlMs();
     await this.db.run(
-      "INSERT OR REPLACE INTO instance_state (key, value) VALUES ('bootstrap_armed', ?)",
+      `INSERT INTO instance_state (key, value) VALUES ('bootstrap_armed', ?)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
       [
         JSON.stringify({
           token_hash: tokenHash,
@@ -115,7 +116,8 @@ export class BootstrapService implements OnModuleInit {
     // this row first completes the ceremony; every later request loses.
     const claimed = await this.db.transaction(async (tx) => {
       const { rowCount } = await tx.run(
-        "INSERT OR IGNORE INTO instance_state (key, value) VALUES ('bootstrap', 'completed')",
+        `INSERT INTO instance_state (key, value) VALUES ('bootstrap', 'completed')
+         ON CONFLICT (key) DO NOTHING`,
       );
       if (rowCount !== 1) return false;
 

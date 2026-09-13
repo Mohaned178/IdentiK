@@ -15,7 +15,7 @@ import {
   firstPasswordProblem,
 } from '../settings/organization-settings.service';
 import { recordAuditEvent } from '../storage/audit';
-import { isUniqueViolation } from '../storage/sqlite';
+import { isUniqueViolation } from '../storage/postgres';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import { normalizeEmail } from './email';
@@ -736,11 +736,12 @@ export class IdentitiesService {
       // lifecycle kinds that carry only an email, so an Administrator
       // invitation mentioning the same address is never rewritten.
       await tx.run(
-        `UPDATE audit_events SET detail = json_set(detail, '$.email', ?)
-            WHERE organization_id = ?
-              AND json_extract(detail, '$.email') = ?
-              AND (json_extract(detail, '$.identityId') = ?
-                   OR kind LIKE 'identity.%' OR kind LIKE 'enrollment.%')`,
+        `UPDATE audit_events
+            SET detail = jsonb_set(detail::jsonb, '{email}', to_jsonb(?::text))::text
+          WHERE organization_id = ?
+            AND (detail::jsonb ->> 'email') = ?
+            AND ((detail::jsonb ->> 'identityId') = ?
+                 OR kind LIKE 'identity.%' OR kind LIKE 'enrollment.%')`,
         [pseudonym, identity.organization_id, identity.email, identity.id],
       );
       // An email-change trail names the requested (`newEmail`) and previous
@@ -748,34 +749,39 @@ export class IdentitiesService {
       // Identity's current handle; rewrite all three so no address survives
       // (ADR-0007).
       await tx.run(
-        `UPDATE audit_events SET detail = json_set(detail, '$.email', ?)
-            WHERE organization_id = ? AND json_extract(detail, '$.identityId') = ?
-              AND kind LIKE 'identity.email_change.%'`,
+        `UPDATE audit_events
+            SET detail = jsonb_set(detail::jsonb, '{email}', to_jsonb(?::text))::text
+          WHERE organization_id = ? AND (detail::jsonb ->> 'identityId') = ?
+            AND kind LIKE 'identity.email_change.%'`,
         [pseudonym, identity.organization_id, identity.id],
       );
       await tx.run(
-        `UPDATE audit_events SET detail = json_set(detail, '$.newEmail', ?)
-            WHERE organization_id = ? AND json_extract(detail, '$.newEmail') IS NOT NULL
-              AND json_extract(detail, '$.identityId') = ?`,
+        `UPDATE audit_events
+            SET detail = jsonb_set(detail::jsonb, '{newEmail}', to_jsonb(?::text))::text
+          WHERE organization_id = ? AND (detail::jsonb ->> 'newEmail') IS NOT NULL
+            AND (detail::jsonb ->> 'identityId') = ?`,
         [pseudonym, identity.organization_id, identity.id],
       );
       await tx.run(
-        `UPDATE audit_events SET detail = json_set(detail, '$.previousEmail', ?)
-            WHERE organization_id = ? AND json_extract(detail, '$.previousEmail') IS NOT NULL
-              AND json_extract(detail, '$.identityId') = ?`,
+        `UPDATE audit_events
+            SET detail = jsonb_set(detail::jsonb, '{previousEmail}', to_jsonb(?::text))::text
+          WHERE organization_id = ? AND (detail::jsonb ->> 'previousEmail') IS NOT NULL
+            AND (detail::jsonb ->> 'identityId') = ?`,
         [pseudonym, identity.organization_id, identity.id],
       );
       // The freed address may also appear as some *other* Identity's requested
       // or previous address; destroy it there too so deletion leaves no trace
       // of the person (ADR-0007).
       await tx.run(
-        `UPDATE audit_events SET detail = json_set(detail, '$.newEmail', ?)
-            WHERE organization_id = ? AND json_extract(detail, '$.newEmail') = ?`,
+        `UPDATE audit_events
+            SET detail = jsonb_set(detail::jsonb, '{newEmail}', to_jsonb(?::text))::text
+          WHERE organization_id = ? AND (detail::jsonb ->> 'newEmail') = ?`,
         [pseudonym, identity.organization_id, identity.email],
       );
       await tx.run(
-        `UPDATE audit_events SET detail = json_set(detail, '$.previousEmail', ?)
-            WHERE organization_id = ? AND json_extract(detail, '$.previousEmail') = ?`,
+        `UPDATE audit_events
+            SET detail = jsonb_set(detail::jsonb, '{previousEmail}', to_jsonb(?::text))::text
+          WHERE organization_id = ? AND (detail::jsonb ->> 'previousEmail') = ?`,
         [pseudonym, identity.organization_id, identity.email],
       );
       await recordAuditEvent(tx, {

@@ -1,7 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { rmSync } from 'node:fs';
 import { backendDistFromWorkspaceRoot, Instance, WORKSPACE_ROOT } from './instance';
 
 const BACKEND_DIST = backendDistFromWorkspaceRoot(WORKSPACE_ROOT);
@@ -217,38 +214,34 @@ describe('Bootstrap Ceremony expiry', () => {
   });
 
   it('a restart within the window keeps the armed ceremony running down — no fresh token is minted', async () => {
-    const stateDir = join(tmpdir(), `identik-restart-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const databaseKey = `identik-restart-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     // Five seconds, not 1.5: the restart cycle must complete well inside the
     // window even on a loaded CI machine, or the test measures startup time.
-    const first = await Instance.startAt(BACKEND_DIST, stateDir, {
+    const first = await Instance.startAt(BACKEND_DIST, databaseKey, {
+      IDENTIK_SETUP_TOKEN_TTL_MS: '5000',
+    });
+    const firstLog = first.consoleLog();
+    expect([...firstLog.matchAll(/setup token: ([A-Za-z0-9_-]+)/g)]).toHaveLength(1);
+
+    await first.stop({ keepState: true });
+    const second = await Instance.startAt(BACKEND_DIST, databaseKey, {
       IDENTIK_SETUP_TOKEN_TTL_MS: '5000',
     });
     try {
-      const firstLog = first.consoleLog();
-      expect([...firstLog.matchAll(/setup token: ([A-Za-z0-9_-]+)/g)]).toHaveLength(1);
+      const secondLog = second.consoleLog();
+      const tokens = [...secondLog.matchAll(/setup token: ([A-Za-z0-9_-]+)/g)];
+      expect(tokens).toHaveLength(0);
 
-      await first.stop({ keepState: true });
-      const second = await Instance.startAt(BACKEND_DIST, stateDir, {
-        IDENTIK_SETUP_TOKEN_TTL_MS: '5000',
-      });
-      try {
-        const secondLog = second.consoleLog();
-        const tokens = [...secondLog.matchAll(/setup token: ([A-Za-z0-9_-]+)/g)];
-        expect(tokens).toHaveLength(0);
+      const status = await second.request('/api/setup/status');
+      const body = (await status.json()) as { completed: boolean; available: boolean };
+      expect(body.available).toBe(true);
 
-        const status = await second.request('/api/setup/status');
-        const body = (await status.json()) as { completed: boolean; available: boolean };
-        expect(body.available).toBe(true);
-
-        await new Promise((resolve) => setTimeout(resolve, 5100));
-        const after = await second.request('/api/setup/status');
-        const afterBody = (await after.json()) as { completed: boolean; available: boolean };
-        expect(afterBody.available).toBe(false);
-      } finally {
-        await second.stop();
-      }
+      await new Promise((resolve) => setTimeout(resolve, 5100));
+      const after = await second.request('/api/setup/status');
+      const afterBody = (await after.json()) as { completed: boolean; available: boolean };
+      expect(afterBody.available).toBe(false);
     } finally {
-      rmSync(stateDir, { recursive: true, force: true });
+      await second.stop();
     }
   });
 });
@@ -306,8 +299,8 @@ describe('Bootstrap Ceremony concurrency', () => {
 describe('Bootstrap Ceremony Owner email normalization', () => {
   it('folds a non-ASCII email so the Owner signs in with any case', async () => {
     // The sign-in lookup normalizes the submitted email (Unicode-aware
-    // toLowerCase), so the ceremony must store the same normalized handle:
-    // SQLite's NOCASE collation folds ASCII only.
+    // toLowerCase), so the ceremony must store the same normalized handle;
+    // the database's email CHECK only guards that invariant.
     const instance = await Instance.start(BACKEND_DIST);
     try {
       const ceremony = await completeCeremony(instance, instance.setupToken(), {
