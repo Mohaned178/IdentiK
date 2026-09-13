@@ -350,26 +350,22 @@ export class AuthorizeService {
     const expiresAt = new Date(
       now.getTime() + parseTtlMs('IDENTIK_AUTHORIZATION_CODE_TTL_MS', 60 * 1000),
     );
-    await this.db.run(
-      `INSERT INTO authorization_codes
-         (id, code_hash, application_id, identity_id, session_id, redirect_uri, scope,
-          code_challenge, code_challenge_method, nonce, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        uuid(),
-        hashToken(code),
-        request.application.id,
+    await this.db.authorizationCode.create({
+      data: {
+        id: uuid(),
+        codeHash: hashToken(code),
+        applicationId: request.application.id,
         identityId,
         sessionId,
-        request.redirectUri,
-        request.scope.join(' '),
-        request.codeChallenge ?? null,
-        request.codeChallengeMethod ?? null,
-        request.nonce ?? null,
-        now.toISOString(),
-        expiresAt.toISOString(),
-      ],
-    );
+        redirectUri: request.redirectUri,
+        scope: request.scope.join(' '),
+        codeChallenge: request.codeChallenge ?? null,
+        codeChallengeMethod: request.codeChallengeMethod ?? null,
+        nonce: request.nonce ?? null,
+        createdAt: now.toISOString(),
+        expiresAt: expiresAt.toISOString(),
+      },
+    });
     return code;
   }
 

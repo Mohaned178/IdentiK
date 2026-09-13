@@ -4,9 +4,10 @@ import { parseTtlMs } from '../config/env';
 import { identityGate } from '../identities/identity-state';
 import { OrganizationSettingsService } from '../settings/organization-settings.service';
 import { recordAuditEvent } from '../storage/audit';
-import type { DataAccess, DataHandle } from '../storage/data-access';
+import type { DataHandle } from '../storage/data-access';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
+import type { Prisma } from '../generated/prisma/client';
 
 export interface SsoSession {
   id: string;
@@ -38,27 +39,26 @@ export type SessionRevocationReason =
   | 'password_reset'
   | 'anonymization';
 
-interface SessionRow {
-  id: string;
-  identity_id: string;
-  organization_id: string;
-  user_agent: string | null;
-  created_at: string;
-  last_seen_at: string;
-  expires_at: string;
-  revoked_at: string | null;
-  email: string;
-  email_verified: number;
-  suspended_at: string | null;
-  anonymized_at: string | null;
-  sessions_revoked_at: string | null;
-}
+/** The Identity gate fields every Session read carries. */
+const SESSION_WITH_IDENTITY = {
+  identity: {
+    select: {
+      email: true,
+      emailVerified: true,
+      suspendedAt: true,
+      anonymizedAt: true,
+      sessionsRevokedAt: true,
+    },
+  },
+} as const satisfies Prisma.SessionInclude;
 
-/** The columns a revoke-many unit needs to kill a Session and its lineage. */
+type SessionWithIdentity = Prisma.SessionGetPayload<{ include: typeof SESSION_WITH_IDENTITY }>;
+
+/** The fields a revoke-many unit needs to kill a Session and its lineage. */
 interface SessionRef {
   id: string;
-  identity_id: string;
-  organization_id: string;
+  identityId: string;
+  organizationId: string;
 }
 
 /** The inputs every revoke-many cascade carries. */
@@ -69,16 +69,12 @@ interface RevokeManyInput {
   actor: string;
 }
 
-const SESSION_ROW_COLUMNS = `s.id, s.identity_id, s.organization_id, s.user_agent, s.created_at,
-        s.last_seen_at, s.expires_at, s.revoked_at, i.email, i.email_verified, i.suspended_at,
-        i.anonymized_at, i.sessions_revoked_at`;
-
 /**
  * A Session is the durable record of one authentication of one Identity — the
  * signed-in device (ADR-0013). It parents the SSO cookie and, from ticket 10,
  * every refresh token minted through any Application's flow. The SSO token is
  * stored verifiable-only; resolution fails closed on revocation, expiry, the
- * Identity's `sessions_revoked_at` watermark (a password reset revokes every
+ * Identity's `sessionsRevokedAt` watermark (a password reset revokes every
  * Session created at or before it), an unverified Identity, and suspension.
  */
 @Injectable()
@@ -109,27 +105,24 @@ export class SessionsService {
     const expiresAt = new Date(
       now.getTime() + (await this.settings.idleTimeoutMs(input.organizationId)),
     ).toISOString();
-    await this.db.run(
-      `INSERT INTO sessions
-         (id, identity_id, organization_id, sso_token_hash, user_agent, created_at, last_seen_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
+    await this.db.session.create({
+      data: {
         id,
-        input.identityId,
-        input.organizationId,
-        hashToken(token),
-        input.userAgent,
-        now.toISOString(),
-        now.toISOString(),
+        identityId: input.identityId,
+        organizationId: input.organizationId,
+        ssoTokenHash: hashToken(token),
+        userAgent: input.userAgent,
+        createdAt: now.toISOString(),
+        lastSeenAt: now.toISOString(),
         expiresAt,
-      ],
-    );
+      },
+    });
     return { token, sessionId: id };
   }
 
   /** Resolve a live SSO token, or null when the device is no longer signed in. */
   async resolve(token: string): Promise<SsoSession | null> {
-    const row = await this.findRow('s.sso_token_hash = ?', hashToken(token));
+    const row = await this.findWithIdentity({ ssoTokenHash: hashToken(token) });
     if (!row) return null;
     const session = this.toSession(row);
     // Only live Sessions record activity: a dead cookie must not refresh the
@@ -151,12 +144,12 @@ export class SessionsService {
    * otherwise idle Session alive.
    */
   async resolveById(sessionId: string, options: { touch?: boolean } = {}): Promise<LiveSession | null> {
-    const row = await this.findRow('s.id = ?', sessionId);
+    const row = await this.findWithIdentity({ id: sessionId });
     if (!row) return null;
     const session = this.toSession(row);
     if (!session) return null;
-    const expiresAt = options.touch === true ? await this.touch(row) : row.expires_at;
-    return { ...session, createdAt: row.created_at, expiresAt };
+    const expiresAt = options.touch === true ? await this.touch(row) : row.expiresAt;
+    return { ...session, createdAt: row.createdAt, expiresAt };
   }
 
   /**
@@ -166,13 +159,11 @@ export class SessionsService {
    * last-seen time).
    */
   async listForIdentity(identityId: string): Promise<SessionSummary[]> {
-    const rows = await this.db.all<SessionRow>(
-      `SELECT ${SESSION_ROW_COLUMNS}
-         FROM sessions s JOIN identities i ON i.id = s.identity_id
-         WHERE s.identity_id = ?
-         ORDER BY s.last_seen_at DESC, s.created_at DESC`,
-      [identityId],
-    );
+    const rows = await this.db.session.findMany({
+      where: { identityId },
+      orderBy: [{ lastSeenAt: 'desc' }, { createdAt: 'desc' }],
+      include: SESSION_WITH_IDENTITY,
+    });
     return rows.filter((row) => this.isLive(row)).map((row) => this.toSummary(row));
   }
 
@@ -200,14 +191,12 @@ export class SessionsService {
     identityId: string;
     reason: SessionRevocationReason;
   }): Promise<boolean> {
-    const row = await this.db.get<SessionRow>(
-      `SELECT ${SESSION_ROW_COLUMNS}
-         FROM sessions s JOIN identities i ON i.id = s.identity_id
-         WHERE s.id = ? AND s.identity_id = ?`,
-      [input.sessionId, input.identityId],
-    );
+    const row = await this.db.session.findFirst({
+      where: { id: input.sessionId, identityId: input.identityId },
+      include: SESSION_WITH_IDENTITY,
+    });
     if (!row) return false;
-    if (row.revoked_at !== null) return true;
+    if (row.revokedAt !== null) return true;
 
     await this.db.transaction(async (tx) => {
       await this.revokeRow(tx, row, input.reason, 'end-user');
@@ -225,11 +214,10 @@ export class SessionsService {
    * Identity at platform scope kills it wherever it was created.
    */
   async revokeAllForIdentity(input: RevokeManyInput): Promise<number> {
-    const rows = await this.db.all<SessionRef>(
-      `SELECT id, identity_id, organization_id FROM sessions
-         WHERE identity_id = ? AND organization_id = ? AND revoked_at IS NULL`,
-      [input.identityId, input.organizationId],
-    );
+    const rows = await this.db.session.findMany({
+      where: { identityId: input.identityId, organizationId: input.organizationId, revokedAt: null },
+      select: { id: true, identityId: true, organizationId: true },
+    });
     return this.revokeRows(rows, input);
   }
 
@@ -241,11 +229,15 @@ export class SessionsService {
    * Identity's own rows, so a foreign id kept nothing extra alive.
    */
   async revokeOthersForIdentity(input: RevokeManyInput & { keepSessionId: string }): Promise<number> {
-    const rows = await this.db.all<SessionRef>(
-      `SELECT id, identity_id, organization_id FROM sessions
-         WHERE identity_id = ? AND organization_id = ? AND revoked_at IS NULL AND id != ?`,
-      [input.identityId, input.organizationId, input.keepSessionId],
-    );
+    const rows = await this.db.session.findMany({
+      where: {
+        identityId: input.identityId,
+        organizationId: input.organizationId,
+        revokedAt: null,
+        id: { not: input.keepSessionId },
+      },
+      select: { id: true, identityId: true, organizationId: true },
+    });
     return this.revokeRows(rows, input);
   }
 
@@ -254,14 +246,14 @@ export class SessionsService {
    * (ADR-0007), leaving every Session — and every other Application's tokens —
    * alive. Used by the Application Disabled pause and by irreversible
    * Application deletion. Takes the caller's client so it can compose into
-   * their transaction; idempotent by the `revoked_at IS NULL` guard.
+   * their transaction; idempotent by the `revokedAt: null` guard.
    */
-  async revokeRefreshTokensForApplication(db: DataAccess, applicationId: string): Promise<number> {
-    const changed = await db.run(
-      'UPDATE refresh_tokens SET revoked_at = ? WHERE application_id = ? AND revoked_at IS NULL',
-      [new Date().toISOString(), applicationId],
-    );
-    return changed.rowCount;
+  async revokeRefreshTokensForApplication(db: DataHandle, applicationId: string): Promise<number> {
+    const changed = await db.refreshToken.updateMany({
+      where: { applicationId, revokedAt: null },
+      data: { revokedAt: new Date().toISOString() },
+    });
+    return changed.count;
   }
 
   /** One revoke-many unit: every row dies, one collection audit event lives. */
@@ -292,38 +284,36 @@ export class SessionsService {
     actor: string,
   ): Promise<void> {
     const now = new Date().toISOString();
-    await db.run('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', [
-      now,
-      row.id,
-    ]);
-    await db.run(
-      'UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL',
-      [now, row.id],
-    );
+    await db.session.updateMany({
+      where: { id: row.id, revokedAt: null },
+      data: { revokedAt: now },
+    });
+    await db.refreshToken.updateMany({
+      where: { sessionId: row.id, revokedAt: null },
+      data: { revokedAt: now },
+    });
     await recordAuditEvent(db, {
-      organizationId: row.organization_id,
+      organizationId: row.organizationId,
       actor,
       kind: 'session.revoked',
-      detail: { identityId: row.identity_id, sessionId: row.id, reason },
+      detail: { identityId: row.identityId, sessionId: row.id, reason },
     });
   }
 
-  private toSummary(row: SessionRow): SessionSummary {
+  private toSummary(row: SessionWithIdentity): SessionSummary {
     return {
       id: row.id,
-      device: row.user_agent,
-      createdAt: row.created_at,
-      lastSeenAt: row.last_seen_at,
+      device: row.userAgent,
+      createdAt: row.createdAt,
+      lastSeenAt: row.lastSeenAt,
     };
   }
 
-  private async findRow(where: string, value: string): Promise<SessionRow | undefined> {
-    return this.db.get<SessionRow>(
-      `SELECT ${SESSION_ROW_COLUMNS}
-         FROM sessions s JOIN identities i ON i.id = s.identity_id
-         WHERE ${where}`,
-      [value],
-    );
+  private async findWithIdentity(where: Prisma.SessionWhereUniqueInput): Promise<SessionWithIdentity | null> {
+    return this.db.session.findUnique({
+      where,
+      include: SESSION_WITH_IDENTITY,
+    });
   }
 
   /**
@@ -332,50 +322,42 @@ export class SessionsService {
    * refreshes the window" rule — no scheduler exists, so idleness is judged
    * lazily at the next resolution.
    */
-  private async touch(row: { id: string; organization_id: string }): Promise<string> {
+  private async touch(row: { id: string; organizationId: string }): Promise<string> {
     const now = new Date();
     const expiresAt = new Date(
-      now.getTime() + (await this.settings.idleTimeoutMs(row.organization_id)),
+      now.getTime() + (await this.settings.idleTimeoutMs(row.organizationId)),
     ).toISOString();
-    await this.db.run('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?', [
-      now.toISOString(),
-      expiresAt,
-      row.id,
-    ]);
+    await this.db.session.update({
+      where: { id: row.id },
+      data: { lastSeenAt: now.toISOString(), expiresAt },
+    });
     return expiresAt;
   }
 
   /** The gate every Session resolution passes: dead means dead. */
-  private toSession(row: SessionRow): SsoSession | null {
+  private toSession(row: SessionWithIdentity): SsoSession | null {
     if (!this.isLive(row)) return null;
     return {
       id: row.id,
-      identityId: row.identity_id,
-      organizationId: row.organization_id,
-      email: row.email,
+      identityId: row.identityId,
+      organizationId: row.organizationId,
+      email: row.identity.email,
     };
   }
 
-  private isLive(row: SessionRow): boolean {
+  private isLive(row: SessionWithIdentity): boolean {
     const now = new Date().toISOString();
-    if (row.revoked_at !== null) return false;
-    // `expires_at` is the idle deadline the Organization's window sets and
+    if (row.revokedAt !== null) return false;
+    // `expiresAt` is the idle deadline the Organization's window sets and
     // every activity refreshes (ADR-0022), so an untouched Session lapses.
-    if (row.expires_at <= now) return false;
+    if (row.expiresAt <= now) return false;
     // The Identity's own gate is shared with the credential and token paths,
     // so suspension, anonymization, and an unverified handle cannot be
-    // half-enforced here (ADR-0006/0007/0011). The row is still raw; ticket 13
-    // converts it and this mapping disappears.
-    if (
-      identityGate({
-        emailVerified: row.email_verified,
-        suspendedAt: row.suspended_at,
-        anonymizedAt: row.anonymized_at,
-      }) !== 'live'
-    ) {
+    // half-enforced here (ADR-0006/0007/0011).
+    if (identityGate(row.identity) !== 'live') return false;
+    if (row.identity.sessionsRevokedAt !== null && row.createdAt <= row.identity.sessionsRevokedAt) {
       return false;
     }
-    if (row.sessions_revoked_at !== null && row.created_at <= row.sessions_revoked_at) return false;
     return true;
   }
 }

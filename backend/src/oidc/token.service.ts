@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { hashToken, randomToken } from '../crypto/password';
 import { parseTtlMs } from '../config/env';
 import { canonicalRedirectUri } from '../applications/redirect-uri';
+import type { Prisma } from '../generated/prisma/client';
 import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
@@ -64,38 +65,47 @@ export type UserInfoResult =
   | { status: 200; body: Record<string, unknown> }
   | { status: 401; description: string };
 
-interface CodeRow {
-  id: string;
-  application_id: string;
-  identity_id: string;
-  session_id: string;
-  redirect_uri: string;
-  scope: string;
-  code_challenge: string | null;
-  nonce: string | null;
-  expires_at: string;
-}
+/**
+ * The authorization-code fields the exchange needs. The stored hash is
+ * deliberately absent: the exchange looks the code up by hash and never
+ * carries the credential forward.
+ */
+const CODE_SELECT = {
+  id: true,
+  applicationId: true,
+  identityId: true,
+  sessionId: true,
+  redirectUri: true,
+  scope: true,
+  codeChallenge: true,
+  nonce: true,
+  expiresAt: true,
+} as const;
 
-interface RefreshRow {
-  id: string;
-  session_id: string;
-  organization_id: string;
-  application_id: string;
-  identity_id: string;
-  scope: string;
-  created_at: string;
-  expires_at: string;
-  rotated_at: string | null;
-  revoked_at: string | null;
-}
+type CodeExchange = Prisma.AuthorizationCodeGetPayload<{ select: typeof CODE_SELECT }>;
 
-interface IdentityRow {
-  id: string;
-  email: string;
-  email_verified: number;
-  suspended_at: string | null;
-  anonymized_at: string | null;
-}
+/** A refresh token plus the Organization its parent Session belongs to. */
+const REFRESH_WITH_SESSION = {
+  session: { select: { organizationId: true } },
+} as const satisfies Prisma.RefreshTokenInclude;
+
+type RefreshTokenWithSession = Prisma.RefreshTokenGetPayload<{
+  include: typeof REFRESH_WITH_SESSION;
+}>;
+
+/**
+ * The Identity as the token surface sees it: the liveness gate fields plus
+ * the claims it may emit — never a credential (ADR-0008).
+ */
+const TOKEN_IDENTITY_SELECT = {
+  id: true,
+  email: true,
+  emailVerified: true,
+  suspendedAt: true,
+  anonymizedAt: true,
+} as const;
+
+type TokenIdentity = Prisma.IdentityGetPayload<{ select: typeof TOKEN_IDENTITY_SELECT }>;
 
 /**
  * The token machinery completing the OIDC core (ADR-0013, ADR-0015): the
@@ -130,19 +140,19 @@ export class TokenService {
   async identityForGrant(request: TokenRequest): Promise<string | null> {
     const code = optionalText(request.code);
     if (code) {
-      const row = await this.db.get<{ identity_id: string }>(
-        'SELECT identity_id FROM authorization_codes WHERE code_hash = ?',
-        [hashToken(code)],
-      );
-      return row?.identity_id ?? null;
+      const row = await this.db.authorizationCode.findUnique({
+        where: { codeHash: hashToken(code) },
+        select: { identityId: true },
+      });
+      return row?.identityId ?? null;
     }
     const refreshToken = optionalText(request.refresh_token);
     if (refreshToken) {
-      const row = await this.db.get<{ identity_id: string }>(
-        'SELECT identity_id FROM refresh_tokens WHERE token_hash = ?',
-        [hashToken(refreshToken)],
-      );
-      return row?.identity_id ?? null;
+      const row = await this.db.refreshToken.findUnique({
+        where: { tokenHash: hashToken(refreshToken) },
+        select: { identityId: true },
+      });
+      return row?.identityId ?? null;
     }
     return null;
   }
@@ -176,45 +186,43 @@ export class TokenService {
     const code = optionalText(request.code);
     if (!code) return invalidRequest('code is required');
 
-    const row = await this.db.get<CodeRow>(
-      `SELECT id, application_id, identity_id, session_id, redirect_uri, scope,
-              code_challenge, nonce, expires_at
-       FROM authorization_codes WHERE code_hash = ?`,
-      [hashToken(code)],
-    );
+    const row = await this.db.authorizationCode.findUnique({
+      where: { codeHash: hashToken(code) },
+      select: CODE_SELECT,
+    });
     if (!row) return invalidGrant('the authorization code is invalid');
 
     // Single-use, race-free, and deliberately first: a spent code stays spent
     // even when the rest of the exchange fails.
     const now = new Date().toISOString();
-    const consumed = await this.db.run(
-      'UPDATE authorization_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL',
-      [now, row.id],
-    );
-    if (consumed.rowCount !== 1) {
+    const consumed = await this.db.authorizationCode.updateMany({
+      where: { id: row.id, consumedAt: null },
+      data: { consumedAt: now },
+    });
+    if (consumed.count !== 1) {
       return invalidGrant('the authorization code has already been used');
     }
-    if (row.expires_at <= now) return invalidGrant('the authorization code has expired');
-    if (row.application_id !== client.id) {
+    if (row.expiresAt <= now) return invalidGrant('the authorization code has expired');
+    if (row.applicationId !== client.id) {
       return invalidGrant('the authorization code was not issued to this client');
     }
 
     const redirectUri = optionalText(request.redirect_uri);
     if (!redirectUri) return invalidRequest('redirect_uri is required');
-    if (canonicalRedirectUri(redirectUri) !== row.redirect_uri) {
+    if (canonicalRedirectUri(redirectUri) !== row.redirectUri) {
       return invalidGrant('redirect_uri does not match the authorization request');
     }
 
     const pkce = this.pkceProblem(client, row, optionalText(request.code_verifier));
     if (pkce) return pkce;
 
-    const session = await this.sessions.resolveById(row.session_id, { touch: true });
+    const session = await this.sessions.resolveById(row.sessionId, { touch: true });
     if (!session) return invalidGrant('the Session that authorized this code is no longer valid');
-    const identity = await this.findIdentity(row.identity_id);
+    const identity = await this.findIdentity(row.identityId);
     if (!identity || !this.isLive(identity)) {
       return invalidGrant('the Identity is no longer permitted to authenticate');
     }
-    if (!(await this.enrollments.allows(row.identity_id, row.application_id))) {
+    if (!(await this.enrollments.allows(row.identityId, row.applicationId))) {
       return invalidGrant('the Identity is not permitted to use this Application');
     }
 
@@ -244,13 +252,13 @@ export class TokenService {
    */
   private pkceProblem(
     client: AuthenticatedClient,
-    row: CodeRow,
+    row: CodeExchange,
     verifier: string | undefined,
   ): TokenResult | null {
-    if (row.code_challenge !== null) {
+    if (row.codeChallenge !== null) {
       if (!verifier) return invalidRequest('code_verifier is required');
       const computed = createHash('sha256').update(verifier).digest('base64url');
-      if (computed !== row.code_challenge) {
+      if (computed !== row.codeChallenge) {
         return invalidGrant('the PKCE code_verifier does not match the code_challenge');
       }
       return null;
@@ -273,27 +281,27 @@ export class TokenService {
 
     const row = await this.findRefreshToken(raw);
     if (!row) return invalidGrant('the refresh token is invalid');
-    if (row.application_id !== client.id) {
+    if (row.applicationId !== client.id) {
       return invalidGrant('the refresh token was not issued to this client');
     }
-    if (row.revoked_at !== null) return invalidGrant('the refresh token is no longer valid');
-    if (row.rotated_at !== null) {
+    if (row.revokedAt !== null) return invalidGrant('the refresh token is no longer valid');
+    if (row.rotatedAt !== null) {
       await this.revokeLineage(row);
       return invalidGrant('the refresh token has already been used');
     }
 
     const now = new Date().toISOString();
-    if (row.expires_at <= now) return invalidGrant('the refresh token has expired');
+    if (row.expiresAt <= now) return invalidGrant('the refresh token has expired');
 
-    const session = await this.sessions.resolveById(row.session_id, { touch: true });
+    const session = await this.sessions.resolveById(row.sessionId, { touch: true });
     if (!session) {
       return invalidGrant('the Session that issued this refresh token is no longer valid');
     }
-    const identity = await this.findIdentity(row.identity_id);
+    const identity = await this.findIdentity(row.identityId);
     if (!identity || !this.isLive(identity)) {
       return invalidGrant('the Identity is no longer permitted to authenticate');
     }
-    if (!(await this.enrollments.allows(row.identity_id, row.application_id))) {
+    if (!(await this.enrollments.allows(row.identityId, row.applicationId))) {
       return invalidGrant('the Identity is not permitted to use this Application');
     }
 
@@ -319,12 +327,11 @@ export class TokenService {
       };
     }
 
-    const rotated = await this.db.run(
-      `UPDATE refresh_tokens SET rotated_at = ?
-         WHERE id = ? AND rotated_at IS NULL AND revoked_at IS NULL`,
-      [now, row.id],
-    );
-    if (rotated.rowCount !== 1) {
+    const rotated = await this.db.refreshToken.updateMany({
+      where: { id: row.id, rotatedAt: null, revokedAt: null },
+      data: { rotatedAt: now },
+    });
+    if (rotated.count !== 1) {
       await this.revokeLineage(row);
       return invalidGrant('the refresh token has already been used');
     }
@@ -340,27 +347,27 @@ export class TokenService {
    * minted it, across Applications — is revoked so the attacker's copy and the
    * victim's copy are both dead, and the event is audited.
    */
-  private async revokeLineage(row: RefreshRow): Promise<void> {
-    const revoked = await this.db.run(
-      'UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL',
-      [new Date().toISOString(), row.session_id],
-    );
-    if (revoked.rowCount === 0) return;
+  private async revokeLineage(row: RefreshTokenWithSession): Promise<void> {
+    const revoked = await this.db.refreshToken.updateMany({
+      where: { sessionId: row.sessionId, revokedAt: null },
+      data: { revokedAt: new Date().toISOString() },
+    });
+    if (revoked.count === 0) return;
     await recordAuditEvent(this.db, {
-      organizationId: row.organization_id,
+      organizationId: row.session.organizationId,
       actor: 'end-user',
       kind: 'refresh_token.reuse.detected',
       detail: {
-        identityId: row.identity_id,
-        applicationId: row.application_id,
-        sessionId: row.session_id,
+        identityId: row.identityId,
+        applicationId: row.applicationId,
+        sessionId: row.sessionId,
       },
     });
   }
 
   private async mint(input: {
     client: AuthenticatedClient;
-    identity: IdentityRow;
+    identity: TokenIdentity;
     session: LiveSession;
     scopes: string[];
     nonce?: string;
@@ -398,7 +405,7 @@ export class TokenService {
     if (input.nonce !== undefined) idClaims.nonce = input.nonce;
     if (input.scopes.includes('email')) {
       idClaims.email = input.identity.email;
-      idClaims.email_verified = input.identity.email_verified === 1;
+      idClaims.email_verified = input.identity.emailVerified === 1;
     }
     if (input.scopes.includes('profile')) {
       idClaims.preferred_username = input.identity.email;
@@ -414,34 +421,32 @@ export class TokenService {
     // the insert, so a revocation that landed while the tokens were being
     // signed is caught (ADR-0013). The original synchronous engine made the
     // check and the insert one uninterrupted section; behind the async
-    // contract they are separated by awaits, so on a concurrent engine a
-    // change landing in that gap could still leave a freshly minted token
-    // behind. Closing the gap needs an atomic write (conditional insert or row
-    // lock), which belongs to the final data-access conversion.
+    // contract they are separated by awaits, so a change landing in that gap
+    // can still leave a freshly minted token behind. Closing the gap needs an
+    // atomic write (conditional insert or row lock); this migration is
+    // behavior-preserving, so the window stays as it was and closing it is a
+    // separate change.
     if (!(await this.sessions.resolveById(input.session.id))) return null;
     if (!(await this.enrollments.allows(input.identity.id, input.client.id))) return null;
-    const application = await this.db.get<{
-      disabled_at: string | null;
-      deleted_at: string | null;
-    }>('SELECT disabled_at, deleted_at FROM applications WHERE id = ?', [input.client.id]);
-    if (!application || application.disabled_at !== null || application.deleted_at !== null) {
+    const application = await this.db.application.findUnique({
+      where: { id: input.client.id },
+      select: { disabledAt: true, deletedAt: true },
+    });
+    if (!application || application.disabledAt !== null || application.deletedAt !== null) {
       return null;
     }
-    await this.db.run(
-      `INSERT INTO refresh_tokens
-         (id, token_hash, session_id, application_id, identity_id, scope, created_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        uuid(),
-        hashToken(refreshToken),
-        input.session.id,
-        input.client.id,
-        input.identity.id,
+    await this.db.refreshToken.create({
+      data: {
+        id: uuid(),
+        tokenHash: hashToken(refreshToken),
+        sessionId: input.session.id,
+        applicationId: input.client.id,
+        identityId: input.identity.id,
         scope,
-        new Date(nowMs).toISOString(),
-        new Date(refreshExpiresMs).toISOString(),
-      ],
-    );
+        createdAt: new Date(nowMs).toISOString(),
+        expiresAt: new Date(refreshExpiresMs).toISOString(),
+      },
+    });
 
     return {
       access_token: accessToken,
@@ -473,7 +478,7 @@ export class TokenService {
     const body: Record<string, unknown> = { sub: identity.id };
     if (scopes.includes('email')) {
       body.email = identity.email;
-      body.email_verified = identity.email_verified === 1;
+      body.email_verified = identity.emailVerified === 1;
     }
     if (scopes.includes('profile')) {
       body.preferred_username = identity.email;
@@ -514,18 +519,18 @@ export class TokenService {
     }
 
     const row = await this.findRefreshToken(token);
-    if (row && row.application_id === client.id) {
+    if (row && row.applicationId === client.id) {
       const now = new Date().toISOString();
-      if (row.revoked_at === null && row.rotated_at === null && row.expires_at > now) {
-        const session = await this.sessions.resolveById(row.session_id);
-        if (session && (await this.enrollments.allows(row.identity_id, row.application_id))) {
+      if (row.revokedAt === null && row.rotatedAt === null && row.expiresAt > now) {
+        const session = await this.sessions.resolveById(row.sessionId);
+        if (session && (await this.enrollments.allows(row.identityId, row.applicationId))) {
           return {
             active: true,
             scope: row.scope,
             client_id: client.clientId,
-            sub: row.identity_id,
-            exp: epochSeconds(row.expires_at),
-            iat: epochSeconds(row.created_at),
+            sub: row.identityId,
+            exp: epochSeconds(row.expiresAt),
+            iat: epochSeconds(row.createdAt),
             iss: this.issuer.issuer(),
             aud: this.issuer.audience(),
             token_type: 'refresh_token',
@@ -545,41 +550,31 @@ export class TokenService {
   async revoke(client: AuthenticatedClient, token: string | undefined): Promise<void> {
     if (!token) return;
     const row = await this.findRefreshToken(token);
-    if (!row || row.application_id !== client.id || row.revoked_at !== null) return;
-    await this.db.run('UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', [
-      new Date().toISOString(),
-      row.id,
-    ]);
+    if (!row || row.applicationId !== client.id || row.revokedAt !== null) return;
+    await this.db.refreshToken.updateMany({
+      where: { id: row.id, revokedAt: null },
+      data: { revokedAt: new Date().toISOString() },
+    });
   }
 
-  private async findIdentity(identityId: string): Promise<IdentityRow | undefined> {
-    return this.db.get<IdentityRow>(
-      'SELECT id, email, email_verified, suspended_at, anonymized_at FROM identities WHERE id = ?',
-      [identityId],
-    );
+  private async findIdentity(identityId: string): Promise<TokenIdentity | null> {
+    return this.db.identity.findUnique({
+      where: { id: identityId },
+      select: TOKEN_IDENTITY_SELECT,
+    });
   }
 
-  private async findRefreshToken(token: string): Promise<RefreshRow | undefined> {
-    return this.db.get<RefreshRow>(
-      `SELECT rt.id, rt.session_id, rt.application_id, rt.identity_id, rt.scope,
-              rt.created_at, rt.expires_at, rt.rotated_at, rt.revoked_at,
-              s.organization_id
-       FROM refresh_tokens rt JOIN sessions s ON s.id = rt.session_id
-       WHERE rt.token_hash = ?`,
-      [hashToken(token)],
-    );
+  private async findRefreshToken(token: string): Promise<RefreshTokenWithSession | null> {
+    return this.db.refreshToken.findUnique({
+      where: { tokenHash: hashToken(token) },
+      include: REFRESH_WITH_SESSION,
+    });
   }
 
   /** An Identity is usable only while verified, not suspended, not anonymized
-   * (ADR-0006/0011/0007). The row is still raw; ticket 13 converts it. */
-  private isLive(identity: IdentityRow): boolean {
-    return (
-      identityGate({
-        emailVerified: identity.email_verified,
-        suspendedAt: identity.suspended_at,
-        anonymizedAt: identity.anonymized_at,
-      }) === 'live'
-    );
+   * (ADR-0006/0011/0007). */
+  private isLive(identity: TokenIdentity): boolean {
+    return identityGate(identity) === 'live';
   }
 
   private accessTtlMs(): number {
