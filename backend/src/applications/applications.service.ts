@@ -9,8 +9,9 @@ import { timingSafeEqual } from 'node:crypto';
 import { hashToken, randomToken } from '../crypto/password';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
 import { SessionsService } from '../sessions/sessions.service';
+import type { Application, RedirectUri } from '../generated/prisma/client';
 import { recordAuditEvent } from '../storage/audit';
-import type { DataAccess, DataHandle } from '../storage/data-access';
+import type { DataHandle } from '../storage/data-access';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import {
@@ -76,31 +77,6 @@ export interface ClientRecord {
   allowedScopes: string[];
 }
 
-interface ApplicationRow {
-  id: string;
-  name: string;
-  type: ApplicationType;
-  client_id: string;
-  disabled_at: string | null;
-  deleted_at: string | null;
-  created_at: string;
-  allowed_scopes: string;
-}
-
-interface SecretRow {
-  id: string;
-  label: string;
-  created_at: string;
-  revoked_at: string | null;
-}
-
-interface RedirectUriRow {
-  id: string;
-  uri: string;
-  created_at: string;
-  updated_at: string | null;
-}
-
 /**
  * The Application and Client credential lifecycle (ADR-0009, ADR-0010). A Web
  * Application is a confidential client; its Client Secret is generated here,
@@ -139,20 +115,18 @@ export class ApplicationsService {
     // a Web Application must never exist without the credential that makes it
     // useful, and a failed issuance must not leave a half-registered row.
     const clientSecret = await this.db.transaction(async (tx) => {
-      await tx.run(
-        `INSERT INTO applications (id, organization_id, name, type, client_id, created_by, created_at, allowed_scopes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
+      await tx.application.create({
+        data: {
           id,
-          input.organizationId,
+          organizationId: input.organizationId,
           name,
-          input.type,
+          type: input.type,
           clientId,
-          input.actor,
-          now,
-          allowedScopes.join(' '),
-        ],
-      );
+          createdBy: input.actor,
+          createdAt: now,
+          allowedScopes: allowedScopes.join(' '),
+        },
+      });
 
       await recordAuditEvent(tx, {
         organizationId: input.organizationId,
@@ -180,11 +154,10 @@ export class ApplicationsService {
   }
 
   async list(organizationId: string): Promise<ApplicationView[]> {
-    const rows = await this.db.all<ApplicationRow>(
-      `SELECT id, name, type, client_id, disabled_at, deleted_at, created_at, allowed_scopes FROM applications
-         WHERE organization_id = ? ORDER BY created_at`,
-      [organizationId],
-    );
+    const rows = await this.db.application.findMany({
+      where: { organizationId },
+      orderBy: { createdAt: 'asc' },
+    });
     return Promise.all(rows.map((row) => this.toView(this.db, row)));
   }
 
@@ -208,7 +181,7 @@ export class ApplicationsService {
       input.organizationId,
       input.applicationId,
     );
-    if (application.deleted_at !== null) {
+    if (application.deletedAt !== null) {
       return this.view(this.db, input.organizationId, application.id);
     }
 
@@ -217,11 +190,11 @@ export class ApplicationsService {
     // whose app-minted tokens outlive the pause is the lie disable exists to
     // prevent.
     await this.db.transaction(async (tx) => {
-      const changed = await tx.run(
-        'UPDATE applications SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL AND deleted_at IS NULL',
-        [now, application.id],
-      );
-      if (changed.rowCount !== 1) return;
+      const changed = await tx.application.updateMany({
+        where: { id: application.id, disabledAt: null, deletedAt: null },
+        data: { disabledAt: now },
+      });
+      if (changed.count !== 1) return;
 
       const refreshTokensRevoked = await this.sessions.revokeRefreshTokensForApplication(
         tx,
@@ -252,15 +225,15 @@ export class ApplicationsService {
       input.organizationId,
       input.applicationId,
     );
-    if (application.deleted_at !== null) {
+    if (application.deletedAt !== null) {
       return this.view(this.db, input.organizationId, application.id);
     }
 
-    const changed = await this.db.run(
-      'UPDATE applications SET disabled_at = NULL WHERE id = ? AND disabled_at IS NOT NULL AND deleted_at IS NULL',
-      [application.id],
-    );
-    if (changed.rowCount === 1) {
+    const changed = await this.db.application.updateMany({
+      where: { id: application.id, disabledAt: { not: null }, deletedAt: null },
+      data: { disabledAt: null },
+    });
+    if (changed.count === 1) {
       await recordAuditEvent(this.db, {
         organizationId: input.organizationId,
         actor: input.actor,
@@ -291,7 +264,7 @@ export class ApplicationsService {
       input.organizationId,
       input.applicationId,
     );
-    if (application.deleted_at !== null) {
+    if (application.deletedAt !== null) {
       return this.view(this.db, input.organizationId, application.id);
     }
 
@@ -301,17 +274,23 @@ export class ApplicationsService {
     await this.db.transaction(async (tx) => {
       // The terminal marker is the race-free arbiter: a concurrent second
       // delete commits without duplicating the event or re-pseudonymizing.
-      const marked = await tx.run(
-        'UPDATE applications SET name = ?, disabled_at = COALESCE(disabled_at, ?), deleted_at = ? WHERE id = ? AND deleted_at IS NULL',
-        [pseudonym, now, now, application.id],
-      );
-      if (marked.rowCount !== 1) return;
+      // Prisma cannot express COALESCE in an update, so an Application that
+      // was already disabled keeps the timestamp read above; only deleting a
+      // still-active Application needs the delete instant.
+      const marked = await tx.application.updateMany({
+        where: { id: application.id, deletedAt: null },
+        data: {
+          name: pseudonym,
+          disabledAt: application.disabledAt ?? now,
+          deletedAt: now,
+        },
+      });
+      if (marked.count !== 1) return;
 
-      const secrets = await tx.run(
-        `UPDATE client_secrets SET revoked_at = ?, revoked_by = ?
-            WHERE application_id = ? AND revoked_at IS NULL`,
-        [now, input.actor, application.id],
-      );
+      const secrets = await tx.clientSecret.updateMany({
+        where: { applicationId: application.id, revokedAt: null },
+        data: { revokedAt: now, revokedBy: input.actor },
+      });
       const refreshTokensRevoked = await this.sessions.revokeRefreshTokensForApplication(
         tx,
         application.id,
@@ -320,9 +299,12 @@ export class ApplicationsService {
         tx,
         application.id,
       );
-      // The durable key is the applicationId; the human-facing name in
-      // historical details is PII, so the surviving trail is re-attributed to
-      // the pseudonymous shell.
+      // Deliberate raw-SQL exception (ADR-0027): the surviving trail's detail
+      // is a JSON text column, and rewriting one field in place — only where
+      // that field exists — is jsonb_set's job; no typed update expresses it.
+      // Parameterized, never interpolated. The durable key is the
+      // applicationId; the human-facing name in historical details is PII, so
+      // the trail is re-attributed to the pseudonymous shell.
       await tx.run(
         `UPDATE audit_events
             SET detail = jsonb_set(detail::jsonb, '{name}', to_jsonb(?::text))::text
@@ -339,7 +321,7 @@ export class ApplicationsService {
           applicationId: application.id,
           pseudonym,
           enrollmentsRemoved,
-          secretsRevoked: secrets.rowCount,
+          secretsRevoked: secrets.count,
           refreshTokensRevoked,
         },
       });
@@ -354,64 +336,53 @@ export class ApplicationsService {
    * part was wrong.
    */
   async findForAuthorization(clientId: string): Promise<AuthorizeClient | undefined> {
-    const row = await this.db.get<{
-      id: string;
-      client_id: string;
-      organization_id: string;
-      organization_name: string;
-      name: string;
-      type: ApplicationType;
-      disabled_at: string | null;
-      deleted_at: string | null;
-      allowed_scopes: string;
-    }>(
-      `SELECT a.id, a.client_id, a.organization_id, a.name, a.type, a.disabled_at, a.deleted_at,
-                a.allowed_scopes, o.name AS organization_name
-         FROM applications a JOIN organizations o ON o.id = a.organization_id
-         WHERE a.client_id = ?`,
-      [clientId],
-    );
+    const row = await this.db.application.findUnique({
+      where: { clientId },
+      include: {
+        organization: { select: { name: true } },
+        redirectUris: {
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          select: { uri: true },
+        },
+      },
+    });
     if (!row) return undefined;
 
-    const redirectUris = await this.db.all<{ uri: string }>(
-      'SELECT uri FROM redirect_uris WHERE application_id = ? ORDER BY created_at, id',
-      [row.id],
-    );
     return {
       id: row.id,
-      clientId: row.client_id,
-      organizationId: row.organization_id,
-      organizationName: row.organization_name,
+      clientId: row.clientId,
+      organizationId: row.organizationId,
+      organizationName: row.organization.name,
       name: row.name,
-      type: row.type,
+      type: row.type as ApplicationType,
       enabled: this.isUsable(row),
-      redirectUris: redirectUris.map((entry) => entry.uri),
-      allowedScopes: splitScope(row.allowed_scopes),
+      redirectUris: row.redirectUris.map((entry) => entry.uri),
+      allowedScopes: splitScope(row.allowedScopes),
     };
   }
 
   /** Resolve a Client ID at the token boundary; no redirect URIs needed there. */
   async findClient(clientId: string): Promise<ClientRecord | undefined> {
-    const row = await this.db.get<{
-      id: string;
-      client_id: string;
-      organization_id: string;
-      type: ApplicationType;
-      disabled_at: string | null;
-      deleted_at: string | null;
-      allowed_scopes: string;
-    }>(
-      'SELECT id, client_id, organization_id, type, disabled_at, deleted_at, allowed_scopes FROM applications WHERE client_id = ?',
-      [clientId],
-    );
+    const row = await this.db.application.findUnique({
+      where: { clientId },
+      select: {
+        id: true,
+        clientId: true,
+        organizationId: true,
+        type: true,
+        disabledAt: true,
+        deletedAt: true,
+        allowedScopes: true,
+      },
+    });
     if (!row) return undefined;
     return {
       id: row.id,
-      clientId: row.client_id,
-      organizationId: row.organization_id,
-      type: row.type,
+      clientId: row.clientId,
+      organizationId: row.organizationId,
+      type: row.type as ApplicationType,
       enabled: this.isUsable(row),
-      allowedScopes: splitScope(row.allowed_scopes),
+      allowedScopes: splitScope(row.allowedScopes),
     };
   }
 
@@ -423,12 +394,12 @@ export class ApplicationsService {
    */
   async verifyClientSecret(applicationId: string, secret: string): Promise<boolean> {
     const presented = Buffer.from(hashToken(secret));
-    const hashes = await this.db.all<{ secret_hash: string }>(
-      'SELECT secret_hash FROM client_secrets WHERE application_id = ? AND revoked_at IS NULL',
-      [applicationId],
-    );
+    const hashes = await this.db.clientSecret.findMany({
+      where: { applicationId, revokedAt: null },
+      select: { secretHash: true },
+    });
     for (const row of hashes) {
-      const stored = Buffer.from(row.secret_hash);
+      const stored = Buffer.from(row.secretHash);
       if (stored.length === presented.length && timingSafeEqual(stored, presented)) return true;
     }
     return false;
@@ -476,11 +447,16 @@ export class ApplicationsService {
     const label = input.label.trim();
     if (label.length === 0) throw new BadRequestException('a Client Secret label is required');
     const now = new Date().toISOString();
-    await db.run(
-      `INSERT INTO client_secrets (id, application_id, label, secret_hash, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      [secretId, input.applicationId, label, hashToken(clientSecret), input.actor, now],
-    );
+    await db.clientSecret.create({
+      data: {
+        id: secretId,
+        applicationId: input.applicationId,
+        label,
+        secretHash: hashToken(clientSecret),
+        createdBy: input.actor,
+        createdAt: now,
+      },
+    });
 
     await recordAuditEvent(db, {
       organizationId: input.organizationId,
@@ -511,19 +487,17 @@ export class ApplicationsService {
       input.organizationId,
       input.applicationId,
     );
-    const row = await this.db.get<SecretRow>(
-      'SELECT id, label, created_at, revoked_at FROM client_secrets WHERE id = ? AND application_id = ?',
-      [input.secretId, application.id],
-    );
+    const row = await this.db.clientSecret.findFirst({
+      where: { id: input.secretId, applicationId: application.id },
+    });
     if (!row) throw new NotFoundException('no such Client Secret');
 
-    if (row.revoked_at === null) {
+    if (row.revokedAt === null) {
       const now = new Date().toISOString();
-      await this.db.run(
-        `UPDATE client_secrets SET revoked_at = ?, revoked_by = ?
-           WHERE id = ? AND revoked_at IS NULL`,
-        [now, input.actor, input.secretId],
-      );
+      await this.db.clientSecret.updateMany({
+        where: { id: input.secretId, revokedAt: null },
+        data: { revokedAt: now, revokedBy: input.actor },
+      });
       await recordAuditEvent(this.db, {
         organizationId: input.organizationId,
         actor: input.actor,
@@ -534,10 +508,10 @@ export class ApplicationsService {
           label: row.label,
         },
       });
-      row.revoked_at = now;
+      row.revokedAt = now;
     }
 
-    return { id: row.id, label: row.label, createdAt: row.created_at, revokedAt: row.revoked_at };
+    return { id: row.id, label: row.label, createdAt: row.createdAt, revokedAt: row.revokedAt };
   }
 
   /**
@@ -566,11 +540,15 @@ export class ApplicationsService {
     // with no event beside it is the silent code-interception primitive
     // ADR-0010 exists to prevent.
     await this.db.transaction(async (tx) => {
-      await tx.run(
-        `INSERT INTO redirect_uris (id, application_id, uri, created_by, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
-        [id, application.id, uri, input.actor, now],
-      );
+      await tx.redirectUri.create({
+        data: {
+          id,
+          applicationId: application.id,
+          uri,
+          createdBy: input.actor,
+          createdAt: now,
+        },
+      });
       await recordAuditEvent(tx, {
         organizationId: input.organizationId,
         actor: input.actor,
@@ -609,12 +587,12 @@ export class ApplicationsService {
     await this.refuseDuplicateRedirectUri(this.db, application.id, uri, row.id);
     const now = new Date().toISOString();
     await this.db.transaction(async (tx) => {
-      await tx.run('UPDATE redirect_uris SET uri = ?, updated_by = ?, updated_at = ? WHERE id = ?', [
-        uri,
-        input.actor,
-        now,
-        row.id,
-      ]);
+      // updateMany, not update: a concurrently removed row must keep the old
+      // statement's silent no-op instead of failing the transaction.
+      await tx.redirectUri.updateMany({
+        where: { id: row.id },
+        data: { uri, updatedBy: input.actor, updatedAt: now },
+      });
       await recordAuditEvent(tx, {
         organizationId: input.organizationId,
         actor: input.actor,
@@ -627,7 +605,7 @@ export class ApplicationsService {
         },
       });
     });
-    return { id: row.id, uri, createdAt: row.created_at, updatedAt: now };
+    return { id: row.id, uri, createdAt: row.createdAt, updatedAt: now };
   }
 
   /** Remove a redirect URI. There is no prefix or wildcard echo to clean up. */
@@ -644,10 +622,9 @@ export class ApplicationsService {
     );
     const row = await this.requireRedirectUri(this.db, application.id, input.uriId);
     await this.db.transaction(async (tx) => {
-      await tx.run('DELETE FROM redirect_uris WHERE id = ? AND application_id = ?', [
-        row.id,
-        application.id,
-      ]);
+      await tx.redirectUri.deleteMany({
+        where: { id: row.id, applicationId: application.id },
+      });
       await recordAuditEvent(tx, {
         organizationId: input.organizationId,
         actor: input.actor,
@@ -687,14 +664,14 @@ export class ApplicationsService {
         'scopes must be a non-empty list of openid, email, and profile, including openid',
       );
     }
-    const previous = splitScope(application.allowed_scopes);
+    const previous = splitScope(application.allowedScopes);
     if (previous.join(' ') === scopes.join(' ')) return this.toView(this.db, application);
 
     await this.db.transaction(async (tx) => {
-      await tx.run('UPDATE applications SET allowed_scopes = ? WHERE id = ?', [
-        scopes.join(' '),
-        application.id,
-      ]);
+      await tx.application.update({
+        where: { id: application.id },
+        data: { allowedScopes: scopes.join(' ') },
+      });
       await recordAuditEvent(tx, {
         organizationId: input.organizationId,
         actor: input.actor,
@@ -710,59 +687,54 @@ export class ApplicationsService {
   }
 
   private async requireRedirectUri(
-    db: DataAccess,
+    db: DataHandle,
     applicationId: string,
     uriId: string,
-  ): Promise<RedirectUriRow> {
-    const row = await db.get<RedirectUriRow>(
-      'SELECT id, uri, created_at, updated_at FROM redirect_uris WHERE id = ? AND application_id = ?',
-      [uriId, applicationId],
-    );
+  ): Promise<RedirectUri> {
+    const row = await db.redirectUri.findFirst({
+      where: { id: uriId, applicationId },
+    });
     if (!row) throw new NotFoundException('no such redirect URI');
     return row;
   }
 
   private async refuseDuplicateRedirectUri(
-    db: DataAccess,
+    db: DataHandle,
     applicationId: string,
     uri: string,
     exceptId?: string,
   ): Promise<void> {
-    const duplicate = exceptId
-      ? await db.get(
-          'SELECT id FROM redirect_uris WHERE application_id = ? AND uri = ? AND id <> ?',
-          [applicationId, uri, exceptId],
-        )
-      : await db.get('SELECT id FROM redirect_uris WHERE application_id = ? AND uri = ?', [
-          applicationId,
-          uri,
-        ]);
+    const duplicate = await db.redirectUri.findFirst({
+      where: exceptId
+        ? { applicationId, uri, id: { not: exceptId } }
+        : { applicationId, uri },
+      select: { id: true },
+    });
     if (duplicate) throw new ConflictException('this redirect URI is already registered');
   }
 
-  private redirectUriView(row: RedirectUriRow): RedirectUriView {
+  private redirectUriView(row: RedirectUri): RedirectUriView {
     return {
       id: row.id,
       uri: row.uri,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
     };
   }
 
   /** Whether the Application may mint new authentication and tokens at all. */
-  private isUsable(row: { disabled_at: string | null; deleted_at: string | null }): boolean {
-    return row.disabled_at === null && row.deleted_at === null;
+  private isUsable(row: Pick<Application, 'disabledAt' | 'deletedAt'>): boolean {
+    return row.disabledAt === null && row.deletedAt === null;
   }
 
   private async requireApplication(
-    db: DataAccess,
+    db: DataHandle,
     organizationId: string,
     id: string,
-  ): Promise<ApplicationRow> {
-    const row = await db.get<ApplicationRow>(
-      'SELECT id, name, type, client_id, disabled_at, deleted_at, created_at, allowed_scopes FROM applications WHERE id = ? AND organization_id = ?',
-      [id, organizationId],
-    );
+  ): Promise<Application> {
+    const row = await db.application.findFirst({
+      where: { id, organizationId },
+    });
     if (!row) throw new NotFoundException('no such Application');
     return row;
   }
@@ -774,46 +746,46 @@ export class ApplicationsService {
    * cannot be undone by minting a replacement after deletion (ADR-0007).
    */
   private async requireMutableApplication(
-    db: DataAccess,
+    db: DataHandle,
     organizationId: string,
     id: string,
-  ): Promise<ApplicationRow> {
+  ): Promise<Application> {
     const application = await this.requireApplication(db, organizationId, id);
-    if (application.deleted_at !== null) {
+    if (application.deletedAt !== null) {
       throw new ConflictException('the Application has been deleted and cannot be changed');
     }
     return application;
   }
 
-  private async view(db: DataAccess, organizationId: string, id: string): Promise<ApplicationView> {
+  private async view(db: DataHandle, organizationId: string, id: string): Promise<ApplicationView> {
     return this.toView(db, await this.requireApplication(db, organizationId, id));
   }
 
-  private async toView(db: DataAccess, row: ApplicationRow): Promise<ApplicationView> {
-    const secrets = await db.all<SecretRow>(
-      'SELECT id, label, created_at, revoked_at FROM client_secrets WHERE application_id = ? ORDER BY created_at, id',
-      [row.id],
-    );
-    const redirectUris = await db.all<RedirectUriRow>(
-      'SELECT id, uri, created_at, updated_at FROM redirect_uris WHERE application_id = ? ORDER BY created_at, id',
-      [row.id],
-    );
+  private async toView(db: DataHandle, row: Application): Promise<ApplicationView> {
+    const secrets = await db.clientSecret.findMany({
+      where: { applicationId: row.id },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    const redirectUris = await db.redirectUri.findMany({
+      where: { applicationId: row.id },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
     return {
       id: row.id,
       name: row.name,
-      type: row.type,
-      clientId: row.client_id,
+      type: row.type as ApplicationType,
+      clientId: row.clientId,
       state: applicationState({
-        disabled: row.disabled_at !== null,
-        deleted: row.deleted_at !== null,
+        disabled: row.disabledAt !== null,
+        deleted: row.deletedAt !== null,
       }),
-      createdAt: row.created_at,
-      allowedScopes: splitScope(row.allowed_scopes),
+      createdAt: row.createdAt,
+      allowedScopes: splitScope(row.allowedScopes),
       secrets: secrets.map((secret) => ({
         id: secret.id,
         label: secret.label,
-        createdAt: secret.created_at,
-        revokedAt: secret.revoked_at,
+        createdAt: secret.createdAt,
+        revokedAt: secret.revokedAt,
       })),
       redirectUris: redirectUris.map((entry) => this.redirectUriView(entry)),
     };
