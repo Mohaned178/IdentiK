@@ -3,3 +3,4 @@ dist/
 *.tsbuildinfo
 coverage/
 .env
+.agents/skills/impeccable/scripts/bin/
