@@ -1,0 +1,133 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit review configuration.
+# Install the GitHub App first: https://github.com/apps/coderabbitai/installations/new
+# Full reference: https://docs.coderabbit.ai/reference/configuration
+
+language: 'en-US'
+early_access: false
+tone_instructions: >-
+  Be direct and technical. This is a security-sensitive identity provider:
+  call out anything that weakens an authentication, session, token, secret,
+  or tenancy boundary, and cite the relevant CONTEXT.md term or ADR.
+
+reviews:
+  profile: 'assertive'
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  auto_apply_labels: false
+  suggested_reviewers: false
+  in_progress_fortune: false
+  enable_prompt_for_ai_agents: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+
+  path_filters:
+    - '!**/node_modules/**'
+    - '!**/dist/**'
+    - '!package-lock.json'
+    - '!.agents/skills/**'
+
+  path_instructions:
+    - path: 'backend/src/**/*.ts'
+      instructions: |
+        This is an OIDC identity provider. Review against the invariants in
+        CONTEXT.md and docs/adr/:
+
+        - Administrators and End Users are separate populations with separate
+          credentials and sign-in paths; never let one reach the other.
+        - Every read and write of an Organization-scoped record must carry the
+          Organization scope (ADR-0025 covers transitive children).
+        - Administrators manage state, never credentials: no path may read,
+          set, or reset a password or secret on a user's behalf.
+        - Access tokens are for platform endpoints only; the boundary is
+          "we authenticate, you authorize".
+        - Redirect URIs match exactly on scheme, host, port, and path.
+
+        Flag any new endpoint that is not covered by an end-to-end test at the
+        HTTP seam.
+    - path: 'backend/src/storage/**/*.ts'
+      instructions: |
+        Storage is SQLite. Migrations must be additive and must never destroy
+        data. Every child record inherits the Organization scope of its parent
+        (ADR-0025).
+    - path: 'e2e/src/**/*.ts'
+      instructions: |
+        These are black-box end-to-end tests: they drive a live Instance over
+        HTTP and the captured-email surface only. Reject any test that reaches
+        into storage, imports backend internals, or asserts on module
+        structure.
+    - path: '.github/workflows/**'
+      instructions: |
+        Pin actions to a major version, grant only the permissions each job
+        needs, never echo secrets, and keep the concurrency settings so
+        redundant runs cancel.
+    - path: '.scratch/**/*.md'
+      instructions: |
+        Specs and tickets must use the vocabulary defined in CONTEXT.md. Flag a
+        term the glossary explicitly avoids, and flag any decision that
+        contradicts an ADR in docs/adr/.
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    simplify:
+      enabled: false
+
+  pre_merge_checks:
+    title:
+      mode: 'warning'
+      requirements: >-
+        Conventional Commits: type(scope): subject, 100 characters or fewer.
+    description:
+      mode: 'warning'
+
+  tools:
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    semgrep:
+      enabled: true
+    opengrep:
+      enabled: true
+    shellcheck:
+      enabled: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - 'CONTEXT.md'
+      - 'CONTRIBUTING.md'
+      - 'docs/adr/**/*.md'
+
+issue_enrichment:
+  auto_enrich:
+    enabled: false
