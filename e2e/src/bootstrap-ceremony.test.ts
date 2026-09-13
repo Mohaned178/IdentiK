@@ -220,14 +220,15 @@ describe('Bootstrap Ceremony expiry', () => {
     const first = await Instance.startAt(BACKEND_DIST, databaseKey, {
       IDENTIK_SETUP_TOKEN_TTL_MS: '5000',
     });
-    const firstLog = first.consoleLog();
-    expect([...firstLog.matchAll(/setup token: ([A-Za-z0-9_-]+)/g)]).toHaveLength(1);
-
-    await first.stop({ keepState: true });
-    const second = await Instance.startAt(BACKEND_DIST, databaseKey, {
-      IDENTIK_SETUP_TOKEN_TTL_MS: '5000',
-    });
+    let second: Instance | undefined;
     try {
+      const firstLog = first.consoleLog();
+      expect([...firstLog.matchAll(/setup token: ([A-Za-z0-9_-]+)/g)]).toHaveLength(1);
+
+      await first.stop({ keepState: true });
+      second = await Instance.startAt(BACKEND_DIST, databaseKey, {
+        IDENTIK_SETUP_TOKEN_TTL_MS: '5000',
+      });
       const secondLog = second.consoleLog();
       const tokens = [...secondLog.matchAll(/setup token: ([A-Za-z0-9_-]+)/g)];
       expect(tokens).toHaveLength(0);
@@ -241,7 +242,8 @@ describe('Bootstrap Ceremony expiry', () => {
       const afterBody = (await after.json()) as { completed: boolean; available: boolean };
       expect(afterBody.available).toBe(false);
     } finally {
-      await second.stop();
+      await second?.stop();
+      await first.stop();
     }
   });
 });

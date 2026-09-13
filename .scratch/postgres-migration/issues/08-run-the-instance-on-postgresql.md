@@ -45,3 +45,15 @@
   timeout) because SQLite's single connection had no transaction deadline;
   without them Prisma's 5s default would be a new failure mode for large
   revoke-all cascades. Stage 2 revisits transaction policy.
+- Re-verified against PostgreSQL 18 after the fact: `npm run verify` is green
+  (23 files, 221 tests), `prisma migrate deploy` applies the baseline on an
+  empty database and is a no-op on a second run, starting against an
+  unmigrated database exits naming the migrate command, and a full run leaves
+  no `identik_*` databases behind.
+- Review round applied: the restart scenario's first Instance now stops in a
+  `finally`, so a failed assertion still kills the process and drops its
+  database; the template database carries a per-run id minted by global setup,
+  so concurrent runs against one server cannot drop or clone each other's
+  template; and the startup message names `npx prisma migrate deploy`, the
+  command CONTRIBUTING and `.env.example` document, under the glossary's
+  "Instance Operator".

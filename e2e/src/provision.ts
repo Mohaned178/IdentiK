@@ -20,8 +20,15 @@ export const ADMIN_URL =
   process.env.IDENTIK_TEST_DATABASE_URL ??
   'postgresql://postgres:postgres@127.0.0.1:5432/postgres';
 
-/** The already-migrated database every Instance database is cloned from. */
-export const TEMPLATE_DATABASE = 'identik_e2e_template';
+/**
+ * The already-migrated database every Instance database is cloned from. The
+ * name carries the run id minted by global setup so concurrent runs against
+ * one server never share a template; outside the suite the id is absent and
+ * the name is a stable default.
+ */
+export function templateDatabase(): string {
+  return `identik_e2e_template_${process.env.IDENTIK_E2E_RUN_ID ?? 'default'}`;
+}
 
 function quoteIdentifier(name: string): string {
   if (!/^[a-z_][a-z0-9_]*$/.test(name)) {
@@ -81,14 +88,15 @@ function dropIfExists(client: Client, database: string): Promise<unknown> {
  * without paying a migration, exactly as a fresh state directory used to.
  */
 export async function provisionTemplateDatabase(): Promise<void> {
+  const template = templateDatabase();
   await withAdminClient(async (client) => {
-    await dropIfExists(client, TEMPLATE_DATABASE);
-    await client.query(`CREATE DATABASE ${quoteIdentifier(TEMPLATE_DATABASE)}`);
+    await dropIfExists(client, template);
+    await client.query(`CREATE DATABASE ${quoteIdentifier(template)}`);
   });
   try {
     execFileSync(process.execPath, [PRISMA_CLI, 'migrate', 'deploy'], {
       cwd: BACKEND_DIR,
-      env: { ...process.env, DATABASE_URL: databaseUrl(TEMPLATE_DATABASE) },
+      env: { ...process.env, DATABASE_URL: databaseUrl(template) },
       stdio: 'pipe',
     });
   } catch (error) {
@@ -102,7 +110,7 @@ export async function provisionTemplateDatabase(): Promise<void> {
 }
 
 export async function dropTemplateDatabase(): Promise<void> {
-  await withAdminClient((client) => dropIfExists(client, TEMPLATE_DATABASE));
+  await withAdminClient((client) => dropIfExists(client, templateDatabase()));
 }
 
 /**
@@ -115,7 +123,7 @@ export async function ensureDatabase(database: string): Promise<void> {
     const existing = await client.query('SELECT 1 FROM pg_database WHERE datname = $1', [database]);
     if (existing.rowCount) return;
     await client.query(
-      `CREATE DATABASE ${quoteIdentifier(database)} TEMPLATE ${quoteIdentifier(TEMPLATE_DATABASE)}`,
+      `CREATE DATABASE ${quoteIdentifier(database)} TEMPLATE ${quoteIdentifier(templateDatabase())}`,
     );
   });
 }

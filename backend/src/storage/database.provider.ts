@@ -4,8 +4,8 @@ import { PrismaClient } from '../generated/prisma/client';
 import { PrismaDatabase } from './postgres';
 import { DATABASE, type Database } from './token';
 
-/** The one documented way an Operator brings the schema up to date. */
-const MIGRATE_COMMAND = 'prisma migrate deploy';
+/** The one documented way an Instance Operator brings the schema up to date. */
+const MIGRATE_COMMAND = 'npx prisma migrate deploy';
 
 /**
  * Read and validate the Instance's persistence configuration. The database
