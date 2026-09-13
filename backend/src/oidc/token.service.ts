@@ -127,19 +127,21 @@ export class TokenService {
    * or revoked, so repeated attempts against it are slowed. An unresolvable
    * grant yields null and only the source dimension applies.
    */
-  identityForGrant(request: TokenRequest): string | null {
+  async identityForGrant(request: TokenRequest): Promise<string | null> {
     const code = optionalText(request.code);
     if (code) {
-      const row = this.db
-        .prepare('SELECT identity_id FROM authorization_codes WHERE code_hash = ?')
-        .get(hashToken(code)) as { identity_id: string } | undefined;
+      const row = await this.db.get<{ identity_id: string }>(
+        'SELECT identity_id FROM authorization_codes WHERE code_hash = ?',
+        [hashToken(code)],
+      );
       return row?.identity_id ?? null;
     }
     const refreshToken = optionalText(request.refresh_token);
     if (refreshToken) {
-      const row = this.db
-        .prepare('SELECT identity_id FROM refresh_tokens WHERE token_hash = ?')
-        .get(hashToken(refreshToken)) as { identity_id: string } | undefined;
+      const row = await this.db.get<{ identity_id: string }>(
+        'SELECT identity_id FROM refresh_tokens WHERE token_hash = ?',
+        [hashToken(refreshToken)],
+      );
       return row?.identity_id ?? null;
     }
     return null;
@@ -174,24 +176,22 @@ export class TokenService {
     const code = optionalText(request.code);
     if (!code) return invalidRequest('code is required');
 
-    const row = this.db
-      .prepare(
-        `SELECT id, application_id, identity_id, session_id, redirect_uri, scope,
-                code_challenge, nonce, expires_at
-         FROM authorization_codes WHERE code_hash = ?`,
-      )
-      .get(hashToken(code)) as CodeRow | undefined;
+    const row = await this.db.get<CodeRow>(
+      `SELECT id, application_id, identity_id, session_id, redirect_uri, scope,
+              code_challenge, nonce, expires_at
+       FROM authorization_codes WHERE code_hash = ?`,
+      [hashToken(code)],
+    );
     if (!row) return invalidGrant('the authorization code is invalid');
 
     // Single-use, race-free, and deliberately first: a spent code stays spent
     // even when the rest of the exchange fails.
     const now = new Date().toISOString();
-    const consumed = this.db
-      .prepare(
-        'UPDATE authorization_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL',
-      )
-      .run(now, row.id);
-    if (consumed.changes !== 1) {
+    const consumed = await this.db.run(
+      'UPDATE authorization_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL',
+      [now, row.id],
+    );
+    if (consumed.rowCount !== 1) {
       return invalidGrant('the authorization code has already been used');
     }
     if (row.expires_at <= now) return invalidGrant('the authorization code has expired');
@@ -208,9 +208,9 @@ export class TokenService {
     const pkce = this.pkceProblem(client, row, optionalText(request.code_verifier));
     if (pkce) return pkce;
 
-    const session = this.sessions.resolveById(row.session_id, { touch: true });
+    const session = await this.sessions.resolveById(row.session_id, { touch: true });
     if (!session) return invalidGrant('the Session that authorized this code is no longer valid');
-    const identity = this.findIdentity(row.identity_id);
+    const identity = await this.findIdentity(row.identity_id);
     if (!identity || !this.isLive(identity)) {
       return invalidGrant('the Identity is no longer permitted to authenticate');
     }
@@ -271,25 +271,25 @@ export class TokenService {
     const raw = optionalText(request.refresh_token);
     if (!raw) return invalidRequest('refresh_token is required');
 
-    const row = this.findRefreshToken(raw);
+    const row = await this.findRefreshToken(raw);
     if (!row) return invalidGrant('the refresh token is invalid');
     if (row.application_id !== client.id) {
       return invalidGrant('the refresh token was not issued to this client');
     }
     if (row.revoked_at !== null) return invalidGrant('the refresh token is no longer valid');
     if (row.rotated_at !== null) {
-      this.revokeLineage(row);
+      await this.revokeLineage(row);
       return invalidGrant('the refresh token has already been used');
     }
 
     const now = new Date().toISOString();
     if (row.expires_at <= now) return invalidGrant('the refresh token has expired');
 
-    const session = this.sessions.resolveById(row.session_id, { touch: true });
+    const session = await this.sessions.resolveById(row.session_id, { touch: true });
     if (!session) {
       return invalidGrant('the Session that issued this refresh token is no longer valid');
     }
-    const identity = this.findIdentity(row.identity_id);
+    const identity = await this.findIdentity(row.identity_id);
     if (!identity || !this.isLive(identity)) {
       return invalidGrant('the Identity is no longer permitted to authenticate');
     }
@@ -319,14 +319,13 @@ export class TokenService {
       };
     }
 
-    const rotated = this.db
-      .prepare(
-        `UPDATE refresh_tokens SET rotated_at = ?
+    const rotated = await this.db.run(
+      `UPDATE refresh_tokens SET rotated_at = ?
          WHERE id = ? AND rotated_at IS NULL AND revoked_at IS NULL`,
-      )
-      .run(now, row.id);
-    if (rotated.changes !== 1) {
-      this.revokeLineage(row);
+      [now, row.id],
+    );
+    if (rotated.rowCount !== 1) {
+      await this.revokeLineage(row);
       return invalidGrant('the refresh token has already been used');
     }
 
@@ -341,14 +340,13 @@ export class TokenService {
    * minted it, across Applications — is revoked so the attacker's copy and the
    * victim's copy are both dead, and the event is audited.
    */
-  private revokeLineage(row: RefreshRow): void {
-    const revoked = this.db
-      .prepare(
-        'UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL',
-      )
-      .run(new Date().toISOString(), row.session_id);
-    if (revoked.changes === 0) return;
-    recordAuditEvent(this.db, {
+  private async revokeLineage(row: RefreshRow): Promise<void> {
+    const revoked = await this.db.run(
+      'UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL',
+      [new Date().toISOString(), row.session_id],
+    );
+    if (revoked.rowCount === 0) return;
+    await recordAuditEvent(this.db, {
       organizationId: row.organization_id,
       actor: 'end-user',
       kind: 'refresh_token.reuse.detected',
@@ -412,28 +410,28 @@ export class TokenService {
       nowMs + this.refreshTtlMs(),
       new Date(input.session.expiresAt).getTime(),
     );
-    // The parent is re-checked with no await between check and insert, so a
-    // revocation that landed while the tokens were being signed cannot leave a
-    // live refresh token under a dead Session (ADR-0013). The same no-await
-    // window applies to the Application's pause/deletion and the Enrollment's
-    // suspension: none may leave a freshly minted token behind.
-    if (!this.sessions.resolveById(input.session.id)) return null;
+    // The parent, the Enrollment, and the Application are re-checked before
+    // the insert, so a revocation that landed while the tokens were being
+    // signed is caught (ADR-0013). On the synchronous SQLite engine the check
+    // and the insert were one uninterrupted section; behind the async contract
+    // they are separated by awaits, so a change landing in that gap could
+    // still leave a freshly minted token behind on a concurrent engine.
+    // Closing the gap needs an atomic write (conditional insert or row lock),
+    // which belongs to the final data-access conversion.
+    if (!(await this.sessions.resolveById(input.session.id))) return null;
     if (!this.enrollments.allows(input.identity.id, input.client.id)) return null;
-    const application = this.db
-      .prepare('SELECT disabled_at, deleted_at FROM applications WHERE id = ?')
-      .get(input.client.id) as
-      | { disabled_at: string | null; deleted_at: string | null }
-      | undefined;
+    const application = await this.db.get<{
+      disabled_at: string | null;
+      deleted_at: string | null;
+    }>('SELECT disabled_at, deleted_at FROM applications WHERE id = ?', [input.client.id]);
     if (!application || application.disabled_at !== null || application.deleted_at !== null) {
       return null;
     }
-    this.db
-      .prepare(
-        `INSERT INTO refresh_tokens
-           (id, token_hash, session_id, application_id, identity_id, scope, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
+    await this.db.run(
+      `INSERT INTO refresh_tokens
+         (id, token_hash, session_id, application_id, identity_id, scope, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
         uuid(),
         hashToken(refreshToken),
         input.session.id,
@@ -442,7 +440,8 @@ export class TokenService {
         scope,
         new Date(nowMs).toISOString(),
         new Date(refreshExpiresMs).toISOString(),
-      );
+      ],
+    );
 
     return {
       access_token: accessToken,
@@ -465,7 +464,7 @@ export class TokenService {
     const claims = await this.signing.verifyAccessToken(accessToken);
     if (!claims) return { status: 401, description: 'the access token is invalid or expired' };
 
-    const identity = this.findIdentity(claims.sub);
+    const identity = await this.findIdentity(claims.sub);
     if (!identity || !this.isLive(identity)) {
       return { status: 401, description: 'the access token is no longer valid' };
     }
@@ -497,7 +496,7 @@ export class TokenService {
 
     const claims = await this.signing.verifyAccessToken(token);
     if (claims && claims.client_id === client.clientId) {
-      const identity = this.findIdentity(claims.sub);
+      const identity = await this.findIdentity(claims.sub);
       if (identity && this.isLive(identity)) {
         return {
           active: true,
@@ -514,11 +513,11 @@ export class TokenService {
       }
     }
 
-    const row = this.findRefreshToken(token);
+    const row = await this.findRefreshToken(token);
     if (row && row.application_id === client.id) {
       const now = new Date().toISOString();
       if (row.revoked_at === null && row.rotated_at === null && row.expires_at > now) {
-        const session = this.sessions.resolveById(row.session_id);
+        const session = await this.sessions.resolveById(row.session_id);
         if (session && this.enrollments.allows(row.identity_id, row.application_id)) {
           return {
             active: true,
@@ -543,33 +542,32 @@ export class TokenService {
    * by design and cannot be revoked — the response is deliberately uniform,
    * because an invalid or unknown token must not reveal anything.
    */
-  revoke(client: AuthenticatedClient, token: string | undefined): void {
+  async revoke(client: AuthenticatedClient, token: string | undefined): Promise<void> {
     if (!token) return;
-    const row = this.findRefreshToken(token);
+    const row = await this.findRefreshToken(token);
     if (!row || row.application_id !== client.id || row.revoked_at !== null) return;
-    this.db
-      .prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
-      .run(new Date().toISOString(), row.id);
+    await this.db.run('UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', [
+      new Date().toISOString(),
+      row.id,
+    ]);
   }
 
-  private findIdentity(identityId: string): IdentityRow | undefined {
-    return this.db
-      .prepare(
-        'SELECT id, email, email_verified, suspended_at, anonymized_at FROM identities WHERE id = ?',
-      )
-      .get(identityId) as IdentityRow | undefined;
+  private async findIdentity(identityId: string): Promise<IdentityRow | undefined> {
+    return this.db.get<IdentityRow>(
+      'SELECT id, email, email_verified, suspended_at, anonymized_at FROM identities WHERE id = ?',
+      [identityId],
+    );
   }
 
-  private findRefreshToken(token: string): RefreshRow | undefined {
-    return this.db
-      .prepare(
-        `SELECT rt.id, rt.session_id, rt.application_id, rt.identity_id, rt.scope,
-                rt.created_at, rt.expires_at, rt.rotated_at, rt.revoked_at,
-                s.organization_id
-         FROM refresh_tokens rt JOIN sessions s ON s.id = rt.session_id
-         WHERE rt.token_hash = ?`,
-      )
-      .get(hashToken(token)) as RefreshRow | undefined;
+  private async findRefreshToken(token: string): Promise<RefreshRow | undefined> {
+    return this.db.get<RefreshRow>(
+      `SELECT rt.id, rt.session_id, rt.application_id, rt.identity_id, rt.scope,
+              rt.created_at, rt.expires_at, rt.rotated_at, rt.revoked_at,
+              s.organization_id
+       FROM refresh_tokens rt JOIN sessions s ON s.id = rt.session_id
+       WHERE rt.token_hash = ?`,
+      [hashToken(token)],
+    );
   }
 
   /** An Identity is usable only while verified, not suspended, not anonymized

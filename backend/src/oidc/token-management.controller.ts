@@ -38,7 +38,7 @@ export class TokenManagementController {
   ): Promise<void> {
     const result = await this.authenticate(req, body, res);
     if (!result) return;
-    this.tokens.revoke(result.client, result.token);
+    await this.tokens.revoke(result.client, result.token);
     res.status(200).send();
   }
 

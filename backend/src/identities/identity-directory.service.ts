@@ -74,7 +74,7 @@ export class IdentityDirectoryService {
     return rows.map((row) => this.toView(row));
   }
 
-  detail(organizationId: string, identityId: string): IdentityDetail {
+  async detail(organizationId: string, identityId: string): Promise<IdentityDetail> {
     const row = this.db
       .prepare(
         `SELECT id, email, email_verified, suspended_at, anonymized_at, created_at
@@ -86,7 +86,7 @@ export class IdentityDirectoryService {
     return {
       ...this.toView(row),
       enrollments: this.enrollments(row.id),
-      sessions: this.sessions.listForIdentity(row.id),
+      sessions: await this.sessions.listForIdentity(row.id),
       recentActivity: this.audit.list(organizationId, {
         identityId: row.id,
         limit: RECENT_ACTIVITY_LIMIT,

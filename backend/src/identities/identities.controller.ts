@@ -43,12 +43,12 @@ export class IdentitiesController {
   }
 
   @Get(':id')
-  detail(
+  async detail(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
-  ): { identity: IdentityDetail } {
+  ): Promise<{ identity: IdentityDetail }> {
     const session = requireAdministratorSession(req);
-    return { identity: this.directory.detail(session.organizationId, id) };
+    return { identity: await this.directory.detail(session.organizationId, id) };
   }
 
   /** Suspend Identity: block Organization-wide and kill every Session now. */
@@ -64,7 +64,7 @@ export class IdentitiesController {
       identityId: id,
       actor: session.administratorId,
     });
-    return { identity: this.directory.detail(session.organizationId, id) };
+    return { identity: await this.directory.detail(session.organizationId, id) };
   }
 
   /** Unsuspend Identity: authentication returns; the killed Sessions do not. */
@@ -80,7 +80,7 @@ export class IdentitiesController {
       identityId: id,
       actor: session.administratorId,
     });
-    return { identity: this.directory.detail(session.organizationId, id) };
+    return { identity: await this.directory.detail(session.organizationId, id) };
   }
 
   /** Revoke-all-Sessions: evict every device in one action. */
@@ -148,6 +148,6 @@ export class IdentitiesController {
       identityId: id,
       actor: session.administratorId,
     });
-    return { identity: this.directory.detail(session.organizationId, id) };
+    return { identity: await this.directory.detail(session.organizationId, id) };
   }
 }

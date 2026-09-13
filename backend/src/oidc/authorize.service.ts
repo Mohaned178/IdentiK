@@ -111,7 +111,7 @@ export class AuthorizeService {
     const validated = await this.validate(request);
     if (validated.kind === 'invalid') return validated.outcome;
 
-    const session = this.reusableSession(validated.request, ssoToken);
+    const session = await this.reusableSession(validated.request, ssoToken);
     if (!session) return { kind: 'page', page: this.page(validated.request) };
     return this.complete(validated.request, deviceOf(session));
   }
@@ -130,7 +130,7 @@ export class AuthorizeService {
     const validated = await this.validate(request);
     if (validated.kind === 'invalid') return validated.outcome;
 
-    const existing = this.reusableSession(validated.request, ssoToken);
+    const existing = await this.reusableSession(validated.request, ssoToken);
     if (existing) {
       return this.complete(validated.request, deviceOf(existing));
     }
@@ -142,18 +142,18 @@ export class AuthorizeService {
       credentials.password,
     );
     if (!authentication.ok) {
-      this.auditFailure(validated.request.application, email, authentication, context);
+      await this.auditFailure(validated.request.application, email, authentication, context);
       return { kind: 'invalid-credentials' };
     }
 
-    const denied = this.enrollmentDenial(
+    const denied = await this.enrollmentDenial(
       validated.request,
       authentication.identity.id,
       authentication.identity.email,
     );
     if (denied) return denied;
 
-    const session = this.sessions.create({
+    const session = await this.sessions.create({
       identityId: authentication.identity.id,
       organizationId: authentication.identity.organizationId,
       userAgent: context.userAgent,
@@ -162,7 +162,7 @@ export class AuthorizeService {
       kind: 'redirect-with-session',
       location: this.successRedirect(
         validated.request,
-        this.issueCode(validated.request, authentication.identity.id, session.sessionId),
+        await this.issueCode(validated.request, authentication.identity.id, session.sessionId),
       ),
       sessionToken: session.token,
     };
@@ -173,26 +173,26 @@ export class AuthorizeService {
    * (ADR-0001). Single Organization per Instance today, but the scope is
    * enforced from day one.
    */
-  private reusableSession(
+  private async reusableSession(
     request: ValidatedRequest,
     ssoToken: string | null,
-  ): SsoSession | null {
+  ): Promise<SsoSession | null> {
     if (!ssoToken) return null;
-    const session = this.sessions.resolve(ssoToken);
+    const session = await this.sessions.resolve(ssoToken);
     if (!session) return null;
     if (session.organizationId !== request.application.organizationId) return null;
     return session;
   }
 
   /** Enrollment gate plus code issuance for an already-authenticated Identity. */
-  private complete(request: ValidatedRequest, device: ActingDevice): AuthorizeOutcome {
-    const denied = this.enrollmentDenial(request, device.identityId, device.email);
+  private async complete(request: ValidatedRequest, device: ActingDevice): Promise<AuthorizeOutcome> {
+    const denied = await this.enrollmentDenial(request, device.identityId, device.email);
     if (denied) return denied;
     return {
       kind: 'redirect',
       location: this.successRedirect(
         request,
-        this.issueCode(request, device.identityId, device.sessionId),
+        await this.issueCode(request, device.identityId, device.sessionId),
       ),
     };
   }
@@ -203,11 +203,11 @@ export class AuthorizeService {
    * Enrollment refuses this Application only, and the refusal is audited so
    * attempts against a suspended Enrollment stay visible.
    */
-  private enrollmentDenial(
+  private async enrollmentDenial(
     request: ValidatedRequest,
     identityId: string,
     email: string,
-  ): AuthorizeOutcome | null {
+  ): Promise<AuthorizeOutcome | null> {
     const enrollment = this.enrollments.authorize({
       organizationId: request.application.organizationId,
       identityId,
@@ -216,7 +216,7 @@ export class AuthorizeService {
     });
     if (enrollment.allowed) return null;
 
-    recordAuditEvent(this.db, {
+    await recordAuditEvent(this.db, {
       organizationId: request.application.organizationId,
       actor: 'end-user',
       kind: 'identity.authorization.refused',
@@ -340,20 +340,22 @@ export class AuthorizeService {
     return null;
   }
 
-  private issueCode(request: ValidatedRequest, identityId: string, sessionId: string): string {
+  private async issueCode(
+    request: ValidatedRequest,
+    identityId: string,
+    sessionId: string,
+  ): Promise<string> {
     const code = randomToken(32);
     const now = new Date();
     const expiresAt = new Date(
       now.getTime() + parseTtlMs('IDENTIK_AUTHORIZATION_CODE_TTL_MS', 60 * 1000),
     );
-    this.db
-      .prepare(
-        `INSERT INTO authorization_codes
-           (id, code_hash, application_id, identity_id, session_id, redirect_uri, scope,
-            code_challenge, code_challenge_method, nonce, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
+    await this.db.run(
+      `INSERT INTO authorization_codes
+         (id, code_hash, application_id, identity_id, session_id, redirect_uri, scope,
+          code_challenge, code_challenge_method, nonce, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
         uuid(),
         hashToken(code),
         request.application.id,
@@ -366,17 +368,18 @@ export class AuthorizeService {
         request.nonce ?? null,
         now.toISOString(),
         expiresAt.toISOString(),
-      );
+      ],
+    );
     return code;
   }
 
-  private auditFailure(
+  private async auditFailure(
     application: AuthorizeClient,
     email: string,
     authentication: Extract<IdentityAuthentication, { ok: false }>,
     context: SignInContext,
-  ): void {
-    recordAuditEvent(this.db, {
+  ): Promise<void> {
+    await recordAuditEvent(this.db, {
       organizationId: application.organizationId,
       actor: 'end-user',
       kind: 'identity.sign_in.failed',

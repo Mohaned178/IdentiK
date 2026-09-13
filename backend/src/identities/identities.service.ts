@@ -354,7 +354,7 @@ export class IdentitiesService {
     // set (ADR-0022), the self-service change included.
     this.assertPasswordPolicy(identity.organization_id, input.newPassword);
     const passwordHash = await hashPassword(input.newPassword);
-    const otherSessionsRevoked = this.sessions.revokeOthersForIdentity({
+    const otherSessionsRevoked = await this.sessions.revokeOthersForIdentity({
       identityId: identity.id,
       organizationId: identity.organization_id,
       keepSessionId: input.currentSessionId,
@@ -595,7 +595,7 @@ export class IdentitiesService {
       detail: { identityId: identity.id, email: identity.email },
     });
     await this.sendPasswordResetEmail(identity.email, identity.organization_name, token);
-    this.sessions.revokeAllForIdentity({
+    await this.sessions.revokeAllForIdentity({
       identityId: identity.id,
       organizationId: identity.organization_id,
       reason: 'password_reset',
@@ -625,7 +625,7 @@ export class IdentitiesService {
     );
     if (changed.rowCount !== 1) return;
 
-    this.sessions.revokeAllForIdentity({
+    await this.sessions.revokeAllForIdentity({
       identityId: identity.id,
       organizationId: identity.organization_id,
       reason: 'suspension',
@@ -789,7 +789,7 @@ export class IdentitiesService {
     // The shell is already dead at every credential gate (`email_verified = 0`,
     // `anonymized_at` set); the cascade records the device deaths and revokes
     // the descendant refresh tokens explicitly.
-    this.sessions.revokeAllForIdentity({
+    await this.sessions.revokeAllForIdentity({
       identityId: identity.id,
       organizationId: identity.organization_id,
       reason: 'anonymization',

@@ -21,11 +21,11 @@ export interface EndUserRequest extends Request {
 export class EndUserSessionGuard implements CanActivate {
   constructor(private readonly sessions: SessionsService) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<EndUserRequest>();
     const token = ssoTokenFrom(request);
     if (!token) throw new UnauthorizedException();
-    const session = this.sessions.resolve(token);
+    const session = await this.sessions.resolve(token);
     if (!session) throw new UnauthorizedException();
     request.endUserSession = session;
     return true;

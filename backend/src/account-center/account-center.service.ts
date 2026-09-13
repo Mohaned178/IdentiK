@@ -67,9 +67,10 @@ export class AccountCenterService {
       identity: { email: session.email },
       pendingEmail: await this.identities.pendingEmailChange(session.identityId),
       currentSessionId: session.id,
-      sessions: this.sessions
-        .listForIdentity(session.identityId)
-        .map((entry) => ({ ...entry, current: entry.id === session.id })),
+      sessions: (await this.sessions.listForIdentity(session.identityId)).map((entry) => ({
+        ...entry,
+        current: entry.id === session.id,
+      })),
       connectedApplications: this.connectedApplications(session.identityId),
     };
   }

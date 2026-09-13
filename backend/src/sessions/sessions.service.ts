@@ -98,21 +98,19 @@ export class SessionsService {
     return parseTtlMs('IDENTIK_SESSION_TTL_MS', 30 * 24 * 60 * 60 * 1000);
   }
 
-  create(input: {
+  async create(input: {
     identityId: string;
     organizationId: string;
     userAgent: string | null;
-  }): { token: string; sessionId: string } {
+  }): Promise<{ token: string; sessionId: string }> {
     const token = randomToken(32);
     const id = uuid();
     const now = new Date();
-    this.db
-      .prepare(
-        `INSERT INTO sessions
-           (id, identity_id, organization_id, sso_token_hash, user_agent, created_at, last_seen_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
+    await this.db.run(
+      `INSERT INTO sessions
+         (id, identity_id, organization_id, sso_token_hash, user_agent, created_at, last_seen_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
         id,
         input.identityId,
         input.organizationId,
@@ -121,19 +119,20 @@ export class SessionsService {
         now.toISOString(),
         now.toISOString(),
         new Date(now.getTime() + this.settings.idleTimeoutMs(input.organizationId)).toISOString(),
-      );
+      ],
+    );
     return { token, sessionId: id };
   }
 
   /** Resolve a live SSO token, or null when the device is no longer signed in. */
-  resolve(token: string): SsoSession | null {
-    const row = this.findRow('s.sso_token_hash = ?', hashToken(token));
+  async resolve(token: string): Promise<SsoSession | null> {
+    const row = await this.findRow('s.sso_token_hash = ?', hashToken(token));
     if (!row) return null;
     const session = this.toSession(row);
     // Only live Sessions record activity: a dead cookie must not refresh the
     // last-seen time of a device the End User already revoked.
     if (!session) return null;
-    this.touch(row);
+    await this.touch(row);
     return session;
   }
 
@@ -148,12 +147,12 @@ export class SessionsService {
    * as introspection must not, or a server-to-server poll would keep an
    * otherwise idle Session alive.
    */
-  resolveById(sessionId: string, options: { touch?: boolean } = {}): LiveSession | null {
-    const row = this.findRow('s.id = ?', sessionId);
+  async resolveById(sessionId: string, options: { touch?: boolean } = {}): Promise<LiveSession | null> {
+    const row = await this.findRow('s.id = ?', sessionId);
     if (!row) return null;
     const session = this.toSession(row);
     if (!session) return null;
-    const expiresAt = options.touch === true ? this.touch(row) : row.expires_at;
+    const expiresAt = options.touch === true ? await this.touch(row) : row.expires_at;
     return { ...session, createdAt: row.created_at, expiresAt };
   }
 
@@ -163,15 +162,14 @@ export class SessionsService {
    * the device metadata a non-expert can recognize (user agent, sign-in time,
    * last-seen time).
    */
-  listForIdentity(identityId: string): SessionSummary[] {
-    const rows = this.db
-      .prepare(
-        `SELECT ${SESSION_ROW_COLUMNS}
+  async listForIdentity(identityId: string): Promise<SessionSummary[]> {
+    const rows = await this.db.all<SessionRow>(
+      `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions s JOIN identities i ON i.id = s.identity_id
          WHERE s.identity_id = ?
          ORDER BY s.last_seen_at DESC, s.created_at DESC`,
-      )
-      .all(identityId) as unknown as SessionRow[];
+      [identityId],
+    );
     return rows.filter((row) => this.isLive(row)).map((row) => this.toSummary(row));
   }
 
@@ -179,10 +177,10 @@ export class SessionsService {
    * Sign-out is revocation of the current Session (ADR-0013). Uniform and
    * idempotent: an absent, stale, or dead cookie revokes nothing.
    */
-  signOut(token: string): void {
-    const session = this.resolve(token);
+  async signOut(token: string): Promise<void> {
+    const session = await this.resolve(token);
     if (!session) return;
-    this.revoke({ sessionId: session.id, identityId: session.identityId, reason: 'sign_out' });
+    await this.revoke({ sessionId: session.id, identityId: session.identityId, reason: 'sign_out' });
   }
 
   /**
@@ -194,29 +192,23 @@ export class SessionsService {
    * revocable anchor exists to prevent. Idempotent: revoking a dead Session
    * changes nothing and is not an error.
    */
-  revoke(input: {
+  async revoke(input: {
     sessionId: string;
     identityId: string;
     reason: SessionRevocationReason;
-  }): boolean {
-    const row = this.db
-      .prepare(
-        `SELECT ${SESSION_ROW_COLUMNS}
+  }): Promise<boolean> {
+    const row = await this.db.get<SessionRow>(
+      `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions s JOIN identities i ON i.id = s.identity_id
          WHERE s.id = ? AND s.identity_id = ?`,
-      )
-      .get(input.sessionId, input.identityId) as SessionRow | undefined;
+      [input.sessionId, input.identityId],
+    );
     if (!row) return false;
     if (row.revoked_at !== null) return true;
 
-    this.db.exec('BEGIN');
-    try {
-      this.revokeRow(row, input.reason, 'end-user');
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+    await this.db.transaction(async (tx) => {
+      await this.revokeRow(tx, row, input.reason, 'end-user');
+    });
     return true;
   }
 
@@ -229,13 +221,12 @@ export class SessionsService {
    * platform Session is Organization-scoped, so any suspension that loses an
    * Identity at platform scope kills it wherever it was created.
    */
-  revokeAllForIdentity(input: RevokeManyInput): number {
-    const rows = this.db
-      .prepare(
-        `SELECT id, identity_id, organization_id FROM sessions
+  async revokeAllForIdentity(input: RevokeManyInput): Promise<number> {
+    const rows = await this.db.all<SessionRef>(
+      `SELECT id, identity_id, organization_id FROM sessions
          WHERE identity_id = ? AND organization_id = ? AND revoked_at IS NULL`,
-      )
-      .all(input.identityId, input.organizationId) as unknown as SessionRef[];
+      [input.identityId, input.organizationId],
+    );
     return this.revokeRows(rows, input);
   }
 
@@ -246,13 +237,12 @@ export class SessionsService {
    * with its lineage in the same unit. The kept id is looked up inside the
    * Identity's own rows, so a foreign id kept nothing extra alive.
    */
-  revokeOthersForIdentity(input: RevokeManyInput & { keepSessionId: string }): number {
-    const rows = this.db
-      .prepare(
-        `SELECT id, identity_id, organization_id FROM sessions
+  async revokeOthersForIdentity(input: RevokeManyInput & { keepSessionId: string }): Promise<number> {
+    const rows = await this.db.all<SessionRef>(
+      `SELECT id, identity_id, organization_id FROM sessions
          WHERE identity_id = ? AND organization_id = ? AND revoked_at IS NULL AND id != ?`,
-      )
-      .all(input.identityId, input.organizationId, input.keepSessionId) as unknown as SessionRef[];
+      [input.identityId, input.organizationId, input.keepSessionId],
+    );
     return this.revokeRows(rows, input);
   }
 
@@ -272,23 +262,18 @@ export class SessionsService {
   }
 
   /** One revoke-many unit: every row dies, one collection audit event lives. */
-  private revokeRows(rows: SessionRef[], input: RevokeManyInput): number {
-    this.db.exec('BEGIN');
-    try {
+  private async revokeRows(rows: SessionRef[], input: RevokeManyInput): Promise<number> {
+    await this.db.transaction(async (tx) => {
       for (const row of rows) {
-        this.revokeRow(row, input.reason, input.actor);
+        await this.revokeRow(tx, row, input.reason, input.actor);
       }
-      recordAuditEvent(this.db, {
+      await recordAuditEvent(tx, {
         organizationId: input.organizationId,
         actor: input.actor,
         kind: 'identity.sessions.revoked',
         detail: { identityId: input.identityId, count: rows.length, reason: input.reason },
       });
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+    });
     return rows.length;
   }
 
@@ -297,19 +282,22 @@ export class SessionsService {
    * refresh tokens, and its audit event — never a revoked Session whose
    * tokens outlive it. Callers own the transaction.
    */
-  private revokeRow(
+  private async revokeRow(
+    db: DataAccess,
     row: SessionRef,
     reason: SessionRevocationReason,
     actor: string,
-  ): void {
+  ): Promise<void> {
     const now = new Date().toISOString();
-    this.db
-      .prepare('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
-      .run(now, row.id);
-    this.db
-      .prepare('UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL')
-      .run(now, row.id);
-    recordAuditEvent(this.db, {
+    await db.run('UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', [
+      now,
+      row.id,
+    ]);
+    await db.run(
+      'UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL',
+      [now, row.id],
+    );
+    await recordAuditEvent(db, {
       organizationId: row.organization_id,
       actor,
       kind: 'session.revoked',
@@ -326,14 +314,13 @@ export class SessionsService {
     };
   }
 
-  private findRow(where: string, value: string): SessionRow | undefined {
-    return this.db
-      .prepare(
-        `SELECT ${SESSION_ROW_COLUMNS}
+  private async findRow(where: string, value: string): Promise<SessionRow | undefined> {
+    return this.db.get<SessionRow>(
+      `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions s JOIN identities i ON i.id = s.identity_id
          WHERE ${where}`,
-      )
-      .get(value) as SessionRow | undefined;
+      [value],
+    );
   }
 
   /**
@@ -342,14 +329,16 @@ export class SessionsService {
    * refreshes the window" rule — no scheduler exists, so idleness is judged
    * lazily at the next resolution.
    */
-  private touch(row: { id: string; organization_id: string }): string {
+  private async touch(row: { id: string; organization_id: string }): Promise<string> {
     const now = new Date();
     const expiresAt = new Date(
       now.getTime() + this.settings.idleTimeoutMs(row.organization_id),
     ).toISOString();
-    this.db
-      .prepare('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?')
-      .run(now.toISOString(), expiresAt, row.id);
+    await this.db.run('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?', [
+      now.toISOString(),
+      expiresAt,
+      row.id,
+    ]);
     return expiresAt;
   }
 

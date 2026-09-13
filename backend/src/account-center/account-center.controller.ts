@@ -132,14 +132,14 @@ export class AccountCenterController {
   @Post('sessions/:id/revoke')
   @HttpCode(200)
   @UseGuards(EndUserSessionGuard)
-  revoke(
+  async revoke(
     @Req() req: EndUserRequest,
     @Param('id') id: string,
     @Res({ passthrough: true }) res: Response,
-  ): { status: 'revoked' } {
+  ): Promise<{ status: 'revoked' }> {
     const session = req.endUserSession;
     if (!session) throw new UnauthorizedException();
-    const found = this.sessions.revoke({
+    const found = await this.sessions.revoke({
       sessionId: id,
       identityId: session.identityId,
       reason: 'account_center',
@@ -156,9 +156,9 @@ export class AccountCenterController {
    */
   @Post('sign-out')
   @HttpCode(204)
-  signOut(@Req() req: Request, @Res({ passthrough: true }) res: Response): void {
+  async signOut(@Req() req: Request, @Res({ passthrough: true }) res: Response): Promise<void> {
     const token = ssoTokenFrom(req);
-    if (token) this.sessions.signOut(token);
+    if (token) await this.sessions.signOut(token);
     this.clearCookie(res);
   }
 

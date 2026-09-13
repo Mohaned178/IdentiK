@@ -34,7 +34,7 @@ export class TokenController {
     // unresolvable grant yields no Identity and only the source applies.
     const subject: ThrottleSubject = {
       source: req.ip ?? null,
-      identity: this.tokens.identityForGrant(body),
+      identity: await this.tokens.identityForGrant(body),
     };
     await this.throttle.wait('token', subject);
 

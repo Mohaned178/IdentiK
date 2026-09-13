@@ -132,12 +132,12 @@ export class EnrollmentsService {
    * prevent. The Identity's other Enrollments are untouched: this loses one
    * Application, not the Organization. Reversible via `unsuspendForApplication`.
    */
-  suspendForApplication(input: {
+  async suspendForApplication(input: {
     organizationId: string;
     applicationId: string;
     identityId: string;
     actor: string;
-  }): ApplicationEnrollmentView {
+  }): Promise<ApplicationEnrollmentView> {
     const current = this.viewFor(input.organizationId, input.applicationId, input.identityId);
     if (!current.suspended) {
       this.db
@@ -145,7 +145,7 @@ export class EnrollmentsService {
           'UPDATE enrollments SET suspended_at = ? WHERE identity_id = ? AND application_id = ?',
         )
         .run(new Date().toISOString(), input.identityId, input.applicationId);
-      this.sessions.revokeAllForIdentity({
+      await this.sessions.revokeAllForIdentity({
         identityId: input.identityId,
         organizationId: input.organizationId,
         reason: 'suspension',
