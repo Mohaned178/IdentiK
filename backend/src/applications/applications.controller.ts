@@ -181,13 +181,13 @@ export class ApplicationsController {
    * Enrollments, and only its own.
    */
   @Get(':id/enrollments')
-  enrollmentList(
+  async enrollmentList(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
-  ): { enrollments: ApplicationEnrollmentView[] } {
+  ): Promise<{ enrollments: ApplicationEnrollmentView[] }> {
     const session = requireAdministratorSession(req);
     return {
-      enrollments: this.enrollments.listForApplication(session.organizationId, id),
+      enrollments: await this.enrollments.listForApplication(session.organizationId, id),
     };
   }
 
@@ -212,14 +212,14 @@ export class ApplicationsController {
 
   @Post(':id/enrollments/:identityId/unsuspend')
   @HttpCode(200)
-  unsuspendEnrollment(
+  async unsuspendEnrollment(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
     @Param('identityId') identityId: string,
-  ): { enrollment: ApplicationEnrollmentView } {
+  ): Promise<{ enrollment: ApplicationEnrollmentView }> {
     const session = requireAdministratorSession(req);
     return {
-      enrollment: this.enrollments.unsuspendForApplication({
+      enrollment: await this.enrollments.unsuspendForApplication({
         organizationId: session.organizationId,
         applicationId: id,
         identityId,

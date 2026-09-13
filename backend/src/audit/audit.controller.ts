@@ -41,12 +41,12 @@ export class AuditController {
   constructor(private readonly audit: AuditService) {}
 
   @Get()
-  events(
+  async events(
     @Req() req: AdministratorRequest,
     @Query() query: AuditQuery,
-  ): { events: AuditEventView[] } {
+  ): Promise<{ events: AuditEventView[] }> {
     const session = req.administratorSession;
     if (!session) throw new UnauthorizedException();
-    return { events: this.audit.list(session.organizationId, query) };
+    return { events: await this.audit.list(session.organizationId, query) };
   }
 }

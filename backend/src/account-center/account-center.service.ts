@@ -62,8 +62,8 @@ export class AccountCenterService {
 
   async view(session: SsoSession): Promise<AccountCenterView> {
     return {
-      organizationName: this.organizationName(session.organizationId),
-      branding: this.settings.branding(session.organizationId),
+      organizationName: await this.organizationName(session.organizationId),
+      branding: await this.settings.branding(session.organizationId),
       identity: { email: session.email },
       pendingEmail: await this.identities.pendingEmailChange(session.identityId),
       currentSessionId: session.id,
@@ -71,26 +71,26 @@ export class AccountCenterService {
         ...entry,
         current: entry.id === session.id,
       })),
-      connectedApplications: this.connectedApplications(session.identityId),
+      connectedApplications: await this.connectedApplications(session.identityId),
     };
   }
 
-  private organizationName(organizationId: string): string {
-    const row = this.db
-      .prepare('SELECT name FROM organizations WHERE id = ?')
-      .get(organizationId) as { name: string } | undefined;
+  private async organizationName(organizationId: string): Promise<string> {
+    const row = await this.db.get<{ name: string }>(
+      'SELECT name FROM organizations WHERE id = ?',
+      [organizationId],
+    );
     return row?.name ?? '';
   }
 
-  private connectedApplications(identityId: string): ConnectedApplicationView[] {
-    const rows = this.db
-      .prepare(
-        `SELECT e.application_id, a.name, a.type, e.created_at, e.suspended_at
-         FROM enrollments e JOIN applications a ON a.id = e.application_id
-         WHERE e.identity_id = ?
-         ORDER BY e.created_at, e.id`,
-      )
-      .all(identityId) as unknown as ConnectedApplicationRow[];
+  private async connectedApplications(identityId: string): Promise<ConnectedApplicationView[]> {
+    const rows = await this.db.all<ConnectedApplicationRow>(
+      `SELECT e.application_id, a.name, a.type, e.created_at, e.suspended_at
+       FROM enrollments e JOIN applications a ON a.id = e.application_id
+       WHERE e.identity_id = ?
+       ORDER BY e.created_at, e.id`,
+      [identityId],
+    );
     return rows.map((row) => ({
       applicationId: row.application_id,
       name: row.name,

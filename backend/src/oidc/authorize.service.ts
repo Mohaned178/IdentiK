@@ -112,7 +112,7 @@ export class AuthorizeService {
     if (validated.kind === 'invalid') return validated.outcome;
 
     const session = await this.reusableSession(validated.request, ssoToken);
-    if (!session) return { kind: 'page', page: this.page(validated.request) };
+    if (!session) return { kind: 'page', page: await this.page(validated.request) };
     return this.complete(validated.request, deviceOf(session));
   }
 
@@ -208,7 +208,7 @@ export class AuthorizeService {
     identityId: string,
     email: string,
   ): Promise<AuthorizeOutcome | null> {
-    const enrollment = this.enrollments.authorize({
+    const enrollment = await this.enrollments.authorize({
       organizationId: request.application.organizationId,
       identityId,
       applicationId: request.application.id,
@@ -393,11 +393,11 @@ export class AuthorizeService {
     });
   }
 
-  private page(request: ValidatedRequest): SignInPage {
+  private async page(request: ValidatedRequest): Promise<SignInPage> {
     return {
       organizationName: request.application.organizationName,
       applicationName: request.application.name,
-      branding: this.settings.branding(request.application.organizationId),
+      branding: await this.settings.branding(request.application.organizationId),
       request: {
         clientId: request.application.clientId,
         redirectUri: request.redirectUri,

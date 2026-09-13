@@ -152,7 +152,7 @@ export class IdentitiesService {
     // The Organization's password policy is a credential gate (ADR-0022):
     // refuse a weak password before any reservation is made. This is the
     // visitor's own input, so a 400 reveals nothing about email existence.
-    this.assertPasswordPolicy(organization.id, input.password);
+    await this.assertPasswordPolicy(organization.id, input.password);
     const email = normalizeEmail(input.email);
     // Uniform work: every path hashes a password and sends exactly one email.
     const passwordHash = await hashPassword(input.password);
@@ -269,7 +269,7 @@ export class IdentitiesService {
     // the End User can try again with a stronger one.
     const passwordHash = await hashPassword(password);
     const preview = await this.previewToken('password_reset', token);
-    if (preview) this.assertPasswordPolicy(preview.organizationId, password);
+    if (preview) await this.assertPasswordPolicy(preview.organizationId, password);
 
     const identityId = await this.consumeToken('password_reset', token);
     if (!identityId) return false;
@@ -352,7 +352,7 @@ export class IdentitiesService {
 
     // The Organization's policy applies to every credential its Identities
     // set (ADR-0022), the self-service change included.
-    this.assertPasswordPolicy(identity.organization_id, input.newPassword);
+    await this.assertPasswordPolicy(identity.organization_id, input.newPassword);
     const passwordHash = await hashPassword(input.newPassword);
     const otherSessionsRevoked = await this.sessions.revokeOthersForIdentity({
       identityId: identity.id,
@@ -923,8 +923,11 @@ export class IdentitiesService {
   }
 
   /** Refuse a password the Organization's policy floors reject (ADR-0022). */
-  private assertPasswordPolicy(organizationId: string, password: string): void {
-    const problem = firstPasswordProblem(this.settings.passwordPolicy(organizationId), password);
+  private async assertPasswordPolicy(organizationId: string, password: string): Promise<void> {
+    const problem = firstPasswordProblem(
+      await this.settings.passwordPolicy(organizationId),
+      password,
+    );
     if (!problem) return;
     throw new BadRequestException({
       error: 'password_too_weak',

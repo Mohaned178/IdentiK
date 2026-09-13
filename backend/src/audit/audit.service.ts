@@ -53,7 +53,7 @@ const ZONED = /(Z|[+-]\d{2}:\d{2})$/i;
 export class AuditService {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
-  list(organizationId: string, filters: AuditFilters): AuditEventView[] {
+  async list(organizationId: string, filters: AuditFilters): Promise<AuditEventView[]> {
     const actor = optionalText(filters.actor);
     const kind = optionalText(filters.kind);
     const identityId = optionalText(filters.identityId);
@@ -64,7 +64,7 @@ export class AuditService {
     }
 
     const conditions = ['e.organization_id = ?'];
-    const params: string[] = [organizationId];
+    const params: (string | number)[] = [organizationId];
     const add = (clause: string, value: string | undefined): void => {
       if (value === undefined) return;
       conditions.push(clause);
@@ -83,20 +83,20 @@ export class AuditService {
     add("json_extract(e.detail, '$.identityId') = ?", identityId);
     add('e.occurred_at >= ?', from);
     add('e.occurred_at <= ?', to);
+    if (filters.limit !== undefined) params.push(filters.limit);
 
-    const rows = this.db
-      .prepare(
-        `SELECT e.id, e.kind, e.actor, e.detail, e.occurred_at,
-                a.name AS actor_name, a.email AS actor_email
-         FROM audit_events e
-         LEFT JOIN memberships m
-           ON m.organization_id = e.organization_id AND m.administrator_id = e.actor
-         LEFT JOIN administrators a ON a.id = m.administrator_id
-         WHERE ${conditions.join(' AND ')}
-         ORDER BY e.occurred_at DESC, e.rowid DESC
-         ${filters.limit === undefined ? '' : 'LIMIT ?'}`,
-      )
-      .all(...params, ...(filters.limit === undefined ? [] : [filters.limit])) as unknown as AuditEventRow[];
+    const rows = await this.db.all<AuditEventRow>(
+      `SELECT e.id, e.kind, e.actor, e.detail, e.occurred_at,
+              a.name AS actor_name, a.email AS actor_email
+       FROM audit_events e
+       LEFT JOIN memberships m
+         ON m.organization_id = e.organization_id AND m.administrator_id = e.actor
+       LEFT JOIN administrators a ON a.id = m.administrator_id
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY e.occurred_at DESC, e.rowid DESC
+       ${filters.limit === undefined ? '' : 'LIMIT ?'}`,
+      params,
+    );
 
     return rows.map((row) => ({
       id: row.id,

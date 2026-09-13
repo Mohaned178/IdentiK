@@ -23,14 +23,17 @@ export class OrganizationSettingsController {
   constructor(private readonly settings: OrganizationSettingsService) {}
 
   @Get('settings')
-  view(@Req() req: AdministratorRequest): OrganizationSettingsView {
+  async view(@Req() req: AdministratorRequest): Promise<OrganizationSettingsView> {
     const session = requireAdministratorSession(req);
     return this.settings.view(session.organizationId);
   }
 
   @Put('settings')
   @UseGuards(OwnerGuard)
-  update(@Req() req: AdministratorRequest, @Body() body: unknown): OrganizationSettingsView {
+  async update(
+    @Req() req: AdministratorRequest,
+    @Body() body: unknown,
+  ): Promise<OrganizationSettingsView> {
     const session = requireAdministratorSession(req);
     return this.settings.update(session.organizationId, session.administratorId, body);
   }

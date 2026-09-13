@@ -236,7 +236,7 @@ export class EndUsersController {
     const organization = await this.identities.hostedOrganization();
     return {
       organizationName: organization.name,
-      branding: this.settings.branding(organization.id),
+      branding: await this.settings.branding(organization.id),
     };
   }
 }

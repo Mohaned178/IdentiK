@@ -104,34 +104,34 @@ export class OrganizationSettingsService {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
   /** The effective settings: stored values merged over the deployed defaults. */
-  view(organizationId: string): OrganizationSettingsView {
+  async view(organizationId: string): Promise<OrganizationSettingsView> {
     return {
-      branding: this.branding(organizationId),
-      passwordPolicy: this.passwordPolicy(organizationId),
-      sessionPolicy: this.sessionPolicy(organizationId),
+      branding: await this.branding(organizationId),
+      passwordPolicy: await this.passwordPolicy(organizationId),
+      sessionPolicy: await this.sessionPolicy(organizationId),
     };
   }
 
-  branding(organizationId: string): Branding {
+  async branding(organizationId: string): Promise<Branding> {
     return {
-      name: this.organizationName(organizationId),
+      name: await this.organizationName(organizationId),
       logoUrl: null,
       ...DEFAULT_BRANDING_COLORS,
-      ...(this.stored<Branding>(organizationId, 'branding') ?? {}),
+      ...((await this.stored<Branding>(organizationId, 'branding')) ?? {}),
     };
   }
 
-  passwordPolicy(organizationId: string): PasswordPolicy {
+  async passwordPolicy(organizationId: string): Promise<PasswordPolicy> {
     return {
       ...DEFAULT_PASSWORD_POLICY,
-      ...(this.stored<PasswordPolicy>(organizationId, 'password_policy') ?? {}),
+      ...((await this.stored<PasswordPolicy>(organizationId, 'password_policy')) ?? {}),
     };
   }
 
-  sessionPolicy(organizationId: string): SessionPolicy {
+  async sessionPolicy(organizationId: string): Promise<SessionPolicy> {
     return {
       idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
-      ...(this.stored<SessionPolicy>(organizationId, 'session_policy') ?? {}),
+      ...((await this.stored<SessionPolicy>(organizationId, 'session_policy')) ?? {}),
     };
   }
 
@@ -140,8 +140,8 @@ export class OrganizationSettingsService {
    * only the session policy row: this is on the hot path of every Session
    * resolution.
    */
-  idleTimeoutMs(organizationId: string): number {
-    const row = this.stored<SessionPolicy>(organizationId, 'session_policy');
+  async idleTimeoutMs(organizationId: string): Promise<number> {
+    const row = await this.stored<SessionPolicy>(organizationId, 'session_policy');
     return row?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   }
 
@@ -152,9 +152,13 @@ export class OrganizationSettingsService {
    * fabric. All provided sections are validated as one unit, then persisted
    * and audited as one transaction.
    */
-  update(organizationId: string, actor: string, body: unknown): OrganizationSettingsView {
+  async update(
+    organizationId: string,
+    actor: string,
+    body: unknown,
+  ): Promise<OrganizationSettingsView> {
     const input = this.parseUpdate(body);
-    const current = this.view(organizationId);
+    const current = await this.view(organizationId);
 
     const updates: SectionUpdate[] = [];
     if (input.branding !== undefined) {
@@ -193,44 +197,43 @@ export class OrganizationSettingsService {
     if (updates.length === 0) return current;
 
     const now = new Date().toISOString();
-    this.db.exec('BEGIN');
-    try {
+    await this.db.transaction(async (tx) => {
       for (const update of updates) {
-        this.db
-          .prepare(
-            `INSERT INTO organization_settings (organization_id, key, value, updated_by, updated_at)
+        await tx.run(
+          `INSERT INTO organization_settings (organization_id, key, value, updated_by, updated_at)
              VALUES (?, ?, ?, ?, ?)
              ON CONFLICT (organization_id, key)
              DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by,
                            updated_at = excluded.updated_at`,
-          )
-          .run(organizationId, update.key, JSON.stringify(update.value), actor, now);
-        recordAuditEvent(this.db, {
+          [organizationId, update.key, JSON.stringify(update.value), actor, now],
+        );
+        await recordAuditEvent(tx, {
           organizationId,
           actor,
           kind: update.auditKind,
           detail: update.detail,
         });
       }
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+    });
     return this.view(organizationId);
   }
 
-  private organizationName(organizationId: string): string {
-    const organization = this.db
-      .prepare('SELECT name FROM organizations WHERE id = ?')
-      .get(organizationId) as { name: string } | undefined;
+  private async organizationName(organizationId: string): Promise<string> {
+    const organization = await this.db.get<{ name: string }>(
+      'SELECT name FROM organizations WHERE id = ?',
+      [organizationId],
+    );
     return organization?.name ?? '';
   }
 
-  private stored<T>(organizationId: string, key: SectionKey): Partial<T> | undefined {
-    const row = this.db
-      .prepare('SELECT value FROM organization_settings WHERE organization_id = ? AND key = ?')
-      .get(organizationId, key) as StoredRow | undefined;
+  private async stored<T>(
+    organizationId: string,
+    key: SectionKey,
+  ): Promise<Partial<T> | undefined> {
+    const row = await this.db.get<StoredRow>(
+      'SELECT value FROM organization_settings WHERE organization_id = ? AND key = ?',
+      [organizationId, key],
+    );
     if (!row) return undefined;
     try {
       return JSON.parse(row.value) as Partial<T>;

@@ -37,9 +37,9 @@ export class IdentitiesController {
   ) {}
 
   @Get()
-  list(@Req() req: AdministratorRequest): { identities: IdentityListItem[] } {
+  async list(@Req() req: AdministratorRequest): Promise<{ identities: IdentityListItem[] }> {
     const session = requireAdministratorSession(req);
-    return { identities: this.directory.list(session.organizationId) };
+    return { identities: await this.directory.list(session.organizationId) };
   }
 
   @Get(':id')

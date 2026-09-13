@@ -214,7 +214,7 @@ export class TokenService {
     if (!identity || !this.isLive(identity)) {
       return invalidGrant('the Identity is no longer permitted to authenticate');
     }
-    if (!this.enrollments.allows(row.identity_id, row.application_id)) {
+    if (!(await this.enrollments.allows(row.identity_id, row.application_id))) {
       return invalidGrant('the Identity is not permitted to use this Application');
     }
 
@@ -293,7 +293,7 @@ export class TokenService {
     if (!identity || !this.isLive(identity)) {
       return invalidGrant('the Identity is no longer permitted to authenticate');
     }
-    if (!this.enrollments.allows(row.identity_id, row.application_id)) {
+    if (!(await this.enrollments.allows(row.identity_id, row.application_id))) {
       return invalidGrant('the Identity is not permitted to use this Application');
     }
 
@@ -419,7 +419,7 @@ export class TokenService {
     // Closing the gap needs an atomic write (conditional insert or row lock),
     // which belongs to the final data-access conversion.
     if (!(await this.sessions.resolveById(input.session.id))) return null;
-    if (!this.enrollments.allows(input.identity.id, input.client.id)) return null;
+    if (!(await this.enrollments.allows(input.identity.id, input.client.id))) return null;
     const application = await this.db.get<{
       disabled_at: string | null;
       deleted_at: string | null;
@@ -518,7 +518,7 @@ export class TokenService {
       const now = new Date().toISOString();
       if (row.revoked_at === null && row.rotated_at === null && row.expires_at > now) {
         const session = await this.sessions.resolveById(row.session_id);
-        if (session && this.enrollments.allows(row.identity_id, row.application_id)) {
+        if (session && (await this.enrollments.allows(row.identity_id, row.application_id))) {
           return {
             active: true,
             scope: row.scope,

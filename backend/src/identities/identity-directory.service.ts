@@ -63,47 +63,44 @@ export class IdentityDirectoryService {
     private readonly audit: AuditService,
   ) {}
 
-  list(organizationId: string): IdentityListItem[] {
-    const rows = this.db
-      .prepare(
-        `SELECT id, email, email_verified, suspended_at, anonymized_at, created_at
-         FROM identities WHERE organization_id = ?
-         ORDER BY created_at, id`,
-      )
-      .all(organizationId) as unknown as IdentityRow[];
+  async list(organizationId: string): Promise<IdentityListItem[]> {
+    const rows = await this.db.all<IdentityRow>(
+      `SELECT id, email, email_verified, suspended_at, anonymized_at, created_at
+       FROM identities WHERE organization_id = ?
+       ORDER BY created_at, id`,
+      [organizationId],
+    );
     return rows.map((row) => this.toView(row));
   }
 
   async detail(organizationId: string, identityId: string): Promise<IdentityDetail> {
-    const row = this.db
-      .prepare(
-        `SELECT id, email, email_verified, suspended_at, anonymized_at, created_at
-         FROM identities WHERE id = ? AND organization_id = ?`,
-      )
-      .get(identityId, organizationId) as IdentityRow | undefined;
+    const row = await this.db.get<IdentityRow>(
+      `SELECT id, email, email_verified, suspended_at, anonymized_at, created_at
+       FROM identities WHERE id = ? AND organization_id = ?`,
+      [identityId, organizationId],
+    );
     if (!row) throw new NotFoundException('no such Identity');
 
     return {
       ...this.toView(row),
-      enrollments: this.enrollments(row.id),
+      enrollments: await this.enrollments(row.id),
       sessions: await this.sessions.listForIdentity(row.id),
-      recentActivity: this.audit.list(organizationId, {
+      recentActivity: await this.audit.list(organizationId, {
         identityId: row.id,
         limit: RECENT_ACTIVITY_LIMIT,
       }),
     };
   }
 
-  private enrollments(identityId: string): IdentityEnrollmentView[] {
-    const rows = this.db
-      .prepare(
-        `SELECT e.application_id, a.name AS application_name, a.type AS application_type,
-                e.created_at, e.suspended_at
-         FROM enrollments e JOIN applications a ON a.id = e.application_id
-         WHERE e.identity_id = ?
-         ORDER BY e.created_at, e.id`,
-      )
-      .all(identityId) as unknown as EnrollmentRow[];
+  private async enrollments(identityId: string): Promise<IdentityEnrollmentView[]> {
+    const rows = await this.db.all<EnrollmentRow>(
+      `SELECT e.application_id, a.name AS application_name, a.type AS application_type,
+              e.created_at, e.suspended_at
+       FROM enrollments e JOIN applications a ON a.id = e.application_id
+       WHERE e.identity_id = ?
+       ORDER BY e.created_at, e.id`,
+      [identityId],
+    );
     return rows.map((row) => ({
       applicationId: row.application_id,
       applicationName: row.application_name,

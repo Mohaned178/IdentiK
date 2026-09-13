@@ -106,6 +106,9 @@ export class SessionsService {
     const token = randomToken(32);
     const id = uuid();
     const now = new Date();
+    const expiresAt = new Date(
+      now.getTime() + (await this.settings.idleTimeoutMs(input.organizationId)),
+    ).toISOString();
     await this.db.run(
       `INSERT INTO sessions
          (id, identity_id, organization_id, sso_token_hash, user_agent, created_at, last_seen_at, expires_at)
@@ -118,7 +121,7 @@ export class SessionsService {
         input.userAgent,
         now.toISOString(),
         now.toISOString(),
-        new Date(now.getTime() + this.settings.idleTimeoutMs(input.organizationId)).toISOString(),
+        expiresAt,
       ],
     );
     return { token, sessionId: id };
@@ -332,7 +335,7 @@ export class SessionsService {
   private async touch(row: { id: string; organization_id: string }): Promise<string> {
     const now = new Date();
     const expiresAt = new Date(
-      now.getTime() + this.settings.idleTimeoutMs(row.organization_id),
+      now.getTime() + (await this.settings.idleTimeoutMs(row.organization_id)),
     ).toISOString();
     await this.db.run('UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?', [
       now.toISOString(),

@@ -10,12 +10,14 @@ export class OrganizationController {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
   @Get()
-  organization(@Req() req: AdministratorRequest): { id: string; name: string } {
+  async organization(@Req() req: AdministratorRequest): Promise<{ id: string; name: string }> {
     const session = req.administratorSession;
     if (!session) throw new UnauthorizedException();
-    const row = this.db
-      .prepare('SELECT id, name FROM organizations WHERE id = ?')
-      .get(session.organizationId) as { id: string; name: string };
-    return row;
+    const row = await this.db.get<{ id: string; name: string }>(
+      'SELECT id, name FROM organizations WHERE id = ?',
+      [session.organizationId],
+    );
+    // The session's Membership references this Organization, so the row exists.
+    return row!;
   }
 }
