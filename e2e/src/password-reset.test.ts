@@ -83,11 +83,9 @@ describe('Forgot password, reset, and pre-claimed email healing', () => {
   beforeAll(async () => {
     instance = await Instance.start(BACKEND_DIST);
 
-    const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
     const ceremony = await instance.request('/api/setup', {
       method: 'POST',
-      query: { token: match[1] },
+      query: { token: instance.setupToken() },
       body: { organizationName: ORGANIZATION_NAME, ...OWNER },
     });
     expect(ceremony.status).toBe(201);
@@ -107,7 +105,7 @@ describe('Forgot password, reset, and pre-claimed email healing', () => {
   it('the forgot-password data endpoint carries the Organization name', async () => {
     const info = await instance.request('/api/end-users/forgot-password');
     expect(info.status).toBe(200);
-    expect(await info.json()).toEqual({ organizationName: ORGANIZATION_NAME });
+    expect(await info.json()).toMatchObject({ organizationName: ORGANIZATION_NAME });
   });
 
   it('forgot-password responds with identical shape whether the email exists or not', async () => {
@@ -167,13 +165,13 @@ describe('Forgot password, reset, and pre-claimed email healing', () => {
 
     const valid = await instance.request('/api/end-users/reset-password', { query: { token } });
     expect(valid.status).toBe(200);
-    expect(await valid.json()).toEqual({ organizationName: ORGANIZATION_NAME, valid: true });
+    expect(await valid.json()).toMatchObject({ organizationName: ORGANIZATION_NAME, valid: true });
 
     const garbage = await instance.request('/api/end-users/reset-password', {
       query: { token: 'not-a-real-token' },
     });
     expect(garbage.status).toBe(200);
-    expect(await garbage.json()).toEqual({ organizationName: ORGANIZATION_NAME, valid: false });
+    expect(await garbage.json()).toMatchObject({ organizationName: ORGANIZATION_NAME, valid: false });
   });
 
   it('completing a reset sets the new password and audits initiation and completion', async () => {
@@ -222,7 +220,7 @@ describe('Forgot password, reset, and pre-claimed email healing', () => {
     expect(second.status).toBe(400);
 
     const page = await instance.request('/api/end-users/reset-password', { query: { token } });
-    expect(await page.json()).toEqual({ organizationName: ORGANIZATION_NAME, valid: false });
+    expect(await page.json()).toMatchObject({ organizationName: ORGANIZATION_NAME, valid: false });
   });
 
   it('the pre-claimed-email healing arc hands the Identity to the mailbox owner', async () => {
@@ -307,11 +305,9 @@ describe('reset token expiry', () => {
       IDENTIK_RESET_TOKEN_TTL_MS: '500',
     });
     try {
-      const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-      if (!match) throw new Error('no setup token in console output');
       const ceremony = await instance.request('/api/setup', {
         method: 'POST',
-        query: { token: match[1] },
+        query: { token: instance.setupToken() },
         body: { organizationName: ORGANIZATION_NAME, ...OWNER },
       });
       expect(ceremony.status).toBe(201);
@@ -333,7 +329,7 @@ describe('reset token expiry', () => {
       await new Promise((resolve) => setTimeout(resolve, 700));
 
       const page = await instance.request('/api/end-users/reset-password', { query: { token } });
-      expect(await page.json()).toEqual({ organizationName: ORGANIZATION_NAME, valid: false });
+      expect(await page.json()).toMatchObject({ organizationName: ORGANIZATION_NAME, valid: false });
 
       const res = await instance.request('/api/end-users/reset-password', {
         method: 'POST',

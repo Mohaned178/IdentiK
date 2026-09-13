@@ -21,6 +21,8 @@ import { OwnerGuard } from './owner.guard';
 import { InvitationsService } from './invitations.service';
 import { LinkBaseService } from '../config/link-base.service';
 import { cookieToken, sessionCookieOptions } from '../config/cookies';
+import { normalizeEmail } from '../identities/email';
+import { ThrottleService, type ThrottleSubject } from '../throttle/throttle.service';
 
 class SignInBody {
   @IsEmail()
@@ -64,21 +66,51 @@ export function sessionTokenFrom(req: Request): string | null {
   return cookieToken(req, SESSION_COOKIE);
 }
 
+/**
+ * The Administrator session the guard has established, or 401 if it is
+ * somehow absent. Shared so every guarded controller narrows the same way.
+ */
+export function requireAdministratorSession(
+  req: AdministratorRequest,
+): AdministratorSessionInfo {
+  const session = req.administratorSession;
+  if (!session) throw new UnauthorizedException();
+  return session;
+}
+
 @Controller('api/administrators')
 export class AdministratorsController {
   constructor(
     private readonly administrators: AdministratorsService,
     private readonly invitations: InvitationsService,
     private readonly links: LinkBaseService,
+    private readonly throttle: ThrottleService,
   ) {}
 
   @Post('sign-in')
   @HttpCode(200)
-  async signIn(@Body() body: SignInBody, @Res({ passthrough: true }) res: Response) {
-    const result = await this.administrators.signIn(body.email, body.password);
+  async signIn(
+    @Req() req: Request,
+    @Body() body: SignInBody,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // The dedicated Administrator population has its own sign-in (ADR-0002),
+    // so it carries its own escalating delay (ADR-0020) — keyed on the
+    // submitted email whether or not an Administrator owns it.
+    const subject: ThrottleSubject = {
+      source: req.ip ?? null,
+      identity: normalizeEmail(body.email),
+    };
+    await this.throttle.wait('administrator-sign-in', subject);
+
+    const result = await this.administrators.signIn(body.email, body.password, {
+      source: req.ip ?? null,
+    });
     if (!result.ok || !result.session) {
+      this.throttle.record('administrator-sign-in', subject);
       throw new UnauthorizedException();
     }
+    this.throttle.recordSuccess('administrator-sign-in', subject);
     res.cookie(SESSION_COOKIE, result.session.token, {
       ...sessionCookieOptions(this.links.resolve()),
       maxAge: ADMIN_SESSION_TTL_MS,
@@ -103,8 +135,7 @@ export class AdministratorsController {
   @Get('session')
   @UseGuards(AdministratorGuard)
   session(@Req() req: AdministratorRequest): AdministratorSessionInfo {
-    if (!req.administratorSession) throw new UnauthorizedException();
-    return req.administratorSession;
+    return requireAdministratorSession(req);
   }
 
   /**
@@ -118,8 +149,7 @@ export class AdministratorsController {
     @Req() req: AdministratorRequest,
     @Body() body: InviteAdministratorBody,
   ): Promise<{ invitationId: string; email: string; role: AdministratorRole }> {
-    const session = req.administratorSession;
-    if (!session) throw new UnauthorizedException();
+    const session = requireAdministratorSession(req);
     return this.invitations.invite({
       organizationId: session.organizationId,
       invitedBy: session.administratorId,

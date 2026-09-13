@@ -10,11 +10,17 @@ import {
   ApplicationType,
 } from '../applications/applications.service';
 import { canonicalRedirectUri } from '../applications/redirect-uri';
+import { normalizeEmail } from '../identities/email';
 import { IdentitiesService, IdentityAuthentication } from '../identities/identities.service';
 import { SessionsService, SsoSession } from '../sessions/sessions.service';
+import {
+  OrganizationSettingsService,
+  type Branding,
+} from '../settings/organization-settings.service';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
+import { parseSupportedScope, scopeWithin } from './scopes';
+import { optionalText } from '../common/text';
 
-const SUPPORTED_SCOPES = new Set(['openid', 'email', 'profile']);
 const S256_CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
 
 export interface AuthorizationRequest {
@@ -31,6 +37,7 @@ export interface AuthorizationRequest {
 export interface SignInPage {
   organizationName: string;
   applicationName: string;
+  branding: Branding;
   request: {
     clientId: string;
     redirectUri: string;
@@ -95,6 +102,7 @@ export class AuthorizeService {
     private readonly identities: IdentitiesService,
     private readonly sessions: SessionsService,
     private readonly enrollments: EnrollmentsService,
+    private readonly settings: OrganizationSettingsService,
     @Inject(DATABASE) private readonly db: Database,
   ) {}
 
@@ -127,7 +135,7 @@ export class AuthorizeService {
       return this.complete(validated.request, deviceOf(existing));
     }
 
-    const email = credentials.email.trim().toLowerCase();
+    const email = normalizeEmail(credentials.email);
     const authentication = await this.identities.authenticate(
       validated.request.application.organizationId,
       email,
@@ -227,12 +235,12 @@ export class AuthorizeService {
   }
 
   private validate(request: AuthorizationRequest): Validation {
-    const clientId = this.text(request.clientId);
+    const clientId = optionalText(request.clientId);
     if (!clientId) return this.errorPage('invalid_client', 'client_id is required');
     const application = this.applications.findForAuthorization(clientId);
     if (!application) return this.errorPage('invalid_client', 'unknown client_id');
 
-    const rawRedirectUri = this.text(request.redirectUri);
+    const rawRedirectUri = optionalText(request.redirectUri);
     const redirectUri = rawRedirectUri ? canonicalRedirectUri(rawRedirectUri) : null;
     if (!redirectUri || !application.redirectUris.includes(redirectUri)) {
       return this.errorPage(
@@ -243,11 +251,21 @@ export class AuthorizeService {
 
     const state = this.verbatim(request.state);
     const nonce = this.verbatim(request.nonce);
-    const codeChallenge = this.text(request.codeChallenge);
-    const codeChallengeMethod = this.text(request.codeChallengeMethod);
+    const codeChallenge = optionalText(request.codeChallenge);
+    const codeChallengeMethod = optionalText(request.codeChallengeMethod);
     const base: ValidatedRequest = { application, redirectUri, scope: [], state };
 
-    const responseType = this.text(request.responseType);
+    // A Disabled or Deleted Application refuses new authentication (ADR-0007).
+    // The redirect URI is already validated, so the refusal can travel back to
+    // the Application as a protocol error rather than an error page.
+    if (!application.enabled) {
+      return {
+        kind: 'invalid',
+        outcome: this.errorRedirect(base, 'access_denied', 'this Application is not available'),
+      };
+    }
+
+    const responseType = optionalText(request.responseType);
     if (!responseType) {
       return {
         kind: 'invalid',
@@ -265,7 +283,7 @@ export class AuthorizeService {
       };
     }
 
-    const scope = this.parseScope(request.scope);
+    const scope = parseSupportedScope(request.scope);
     if (!scope) {
       return {
         kind: 'invalid',
@@ -273,6 +291,18 @@ export class AuthorizeService {
           base,
           'invalid_scope',
           'scope must include openid and only the supported scopes',
+        ),
+      };
+    }
+    // Scopes are this Application's integration configuration (ADR-0016):
+    // anything it was not configured for is refused, not silently dropped.
+    if (!scopeWithin(application.allowedScopes, scope)) {
+      return {
+        kind: 'invalid',
+        outcome: this.errorRedirect(
+          base,
+          'invalid_scope',
+          'scope exceeds the scopes configured for this Application',
         ),
       };
     }
@@ -289,15 +319,6 @@ export class AuthorizeService {
       kind: 'ok',
       request: { ...base, scope, nonce, codeChallenge, codeChallengeMethod },
     };
-  }
-
-  private parseScope(value: string | undefined): string[] | null {
-    const raw = this.text(value);
-    if (!raw) return null;
-    const scopes = [...new Set(raw.split(/\s+/).filter((entry) => entry.length > 0))];
-    if (!scopes.includes('openid')) return null;
-    if (scopes.some((scope) => !SUPPORTED_SCOPES.has(scope))) return null;
-    return scopes;
   }
 
   /**
@@ -373,6 +394,7 @@ export class AuthorizeService {
     return {
       organizationName: request.application.organizationName,
       applicationName: request.application.name,
+      branding: this.settings.branding(request.application.organizationId),
       request: {
         clientId: request.application.clientId,
         redirectUri: request.redirectUri,
@@ -415,12 +437,6 @@ export class AuthorizeService {
       kind: 'invalid',
       outcome: { kind: 'error-page', status: 400, error, errorDescription: description },
     };
-  }
-
-  private text(value: string | undefined): string | undefined {
-    if (typeof value !== 'string') return undefined;
-    const trimmed = value.trim();
-    return trimmed.length === 0 ? undefined : trimmed;
   }
 
   /** State and nonce are echoed exactly as the client sent them. */

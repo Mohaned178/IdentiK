@@ -8,6 +8,8 @@ import { AdministratorsModule } from './administrators/administrators.module';
 import { IdentitiesModule } from './identities/identities.module';
 import { ApplicationsModule } from './applications/applications.module';
 import { OidcModule } from './oidc/oidc.module';
+import { AccountCenterModule } from './account-center/account-center.module';
+import { SettingsModule } from './settings/settings.module';
 
 @Module({
   imports: [
@@ -20,6 +22,8 @@ import { OidcModule } from './oidc/oidc.module';
     IdentitiesModule,
     ApplicationsModule,
     OidcModule,
+    AccountCenterModule,
+    SettingsModule,
   ],
 })
 export class AppModule {}

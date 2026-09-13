@@ -1,21 +1,28 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
-  ForbiddenException,
   Get,
   HttpCode,
   Param,
   Patch,
   Post,
+  Put,
   Req,
-  UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
-import { IsIn, IsString, MinLength } from 'class-validator';
+import { IsArray, IsIn, IsString, MinLength } from 'class-validator';
 import { AdministratorGuard } from '../administrators/administrator.guard';
-import { OwnerGuard } from '../administrators/owner.guard';
-import type { AdministratorRequest } from '../administrators/administrators.controller';
+import { assertOwner, OwnerGuard } from '../administrators/owner.guard';
+import {
+  requireAdministratorSession,
+  type AdministratorRequest,
+} from '../administrators/administrators.controller';
+import {
+  EnrollmentsService,
+  type ApplicationEnrollmentView,
+} from '../enrollments/enrollments.service';
 import {
   ApplicationsService,
   type ApplicationType,
@@ -45,6 +52,12 @@ class RedirectUriBody {
   uri!: string;
 }
 
+class ConfigureScopesBody {
+  @IsArray()
+  @IsString({ each: true })
+  scopes!: string[];
+}
+
 /**
  * The Management API surface for Applications and their Client credentials
  * (ADR-0019). The dashboard is a client of exactly these routes. Registration
@@ -56,16 +69,20 @@ class RedirectUriBody {
 @Controller('api/applications')
 @UseGuards(AdministratorGuard)
 export class ApplicationsController {
-  constructor(private readonly applications: ApplicationsService) {}
+  constructor(
+    private readonly applications: ApplicationsService,
+    private readonly enrollments: EnrollmentsService,
+  ) {}
 
   @Post()
   register(
     @Req() req: AdministratorRequest,
     @Body() body: RegisterApplicationBody,
   ): { application: ApplicationView; clientSecret: string | null } {
-    const session = this.requireSession(req);
-    if (body.type === 'web' && session.role !== 'owner') {
-      throw new ForbiddenException(
+    const session = requireAdministratorSession(req);
+    if (body.type === 'web') {
+      assertOwner(
+        session,
         'registering a Web Application issues a Client Secret and is reserved to Owners',
       );
     }
@@ -79,7 +96,7 @@ export class ApplicationsController {
 
   @Get()
   list(@Req() req: AdministratorRequest): { applications: ApplicationView[] } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return { applications: this.applications.list(session.organizationId) };
   }
 
@@ -88,8 +105,127 @@ export class ApplicationsController {
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
   ): { application: ApplicationView } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return { application: this.applications.find(session.organizationId, id) };
+  }
+
+  /**
+   * Disable: the reversible pause (ADR-0007). New authentication through the
+   * Application is refused and its refresh tokens are revoked immediately;
+   * Sessions survive. A routine state lever, available to Members (ADR-0008).
+   */
+  @Post(':id/disable')
+  @HttpCode(200)
+  disable(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+  ): { application: ApplicationView } {
+    const session = requireAdministratorSession(req);
+    return {
+      application: this.applications.disable({
+        organizationId: session.organizationId,
+        applicationId: id,
+        actor: session.administratorId,
+      }),
+    };
+  }
+
+  @Post(':id/enable')
+  @HttpCode(200)
+  enable(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+  ): { application: ApplicationView } {
+    const session = requireAdministratorSession(req);
+    return {
+      application: this.applications.enable({
+        organizationId: session.organizationId,
+        applicationId: id,
+        actor: session.administratorId,
+      }),
+    };
+  }
+
+  /**
+   * Delete: Owner-only and irreversible (ADR-0007, ADR-0016). Enrollments are
+   * removed and credentials revoked; Identities survive. There is no undo, so
+   * the caller must send `{ confirm: true }`; without it the API states the
+   * irreversibility plainly and refuses. The returned view is the
+   * pseudonymous shell the audit trail remains attributed to.
+   */
+  @Delete(':id')
+  @UseGuards(OwnerGuard)
+  delete(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Body() body: { confirm?: unknown },
+  ): { application: ApplicationView } {
+    const session = requireAdministratorSession(req);
+    if (body?.confirm !== true) {
+      throw new BadRequestException(
+        'Deleting an Application is irreversible: it removes its Enrollments and revokes ' +
+          'its credentials, and no path restores it. Resend with { "confirm": true } to proceed.',
+      );
+    }
+    return {
+      application: this.applications.remove({
+        organizationId: session.organizationId,
+        applicationId: id,
+        actor: session.administratorId,
+      }),
+    };
+  }
+
+  /**
+   * The per-Application view (ADR-0008, ADR-0014): this Application's
+   * Enrollments, and only its own.
+   */
+  @Get(':id/enrollments')
+  enrollmentList(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+  ): { enrollments: ApplicationEnrollmentView[] } {
+    const session = requireAdministratorSession(req);
+    return {
+      enrollments: this.enrollments.listForApplication(session.organizationId, id),
+    };
+  }
+
+  /** Suspend from Application: lose one Application, not the Organization. */
+  @Post(':id/enrollments/:identityId/suspend')
+  @HttpCode(200)
+  suspendEnrollment(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Param('identityId') identityId: string,
+  ): { enrollment: ApplicationEnrollmentView } {
+    const session = requireAdministratorSession(req);
+    return {
+      enrollment: this.enrollments.suspendForApplication({
+        organizationId: session.organizationId,
+        applicationId: id,
+        identityId,
+        actor: session.administratorId,
+      }),
+    };
+  }
+
+  @Post(':id/enrollments/:identityId/unsuspend')
+  @HttpCode(200)
+  unsuspendEnrollment(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Param('identityId') identityId: string,
+  ): { enrollment: ApplicationEnrollmentView } {
+    const session = requireAdministratorSession(req);
+    return {
+      enrollment: this.enrollments.unsuspendForApplication({
+        organizationId: session.organizationId,
+        applicationId: id,
+        identityId,
+        actor: session.administratorId,
+      }),
+    };
   }
 
   @Post(':id/secrets')
@@ -99,7 +235,7 @@ export class ApplicationsController {
     @Param('id') id: string,
     @Body() body: GenerateSecretBody,
   ): { secret: SecretView; clientSecret: string } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return this.applications.issueSecret({
       organizationId: session.organizationId,
       applicationId: id,
@@ -116,7 +252,7 @@ export class ApplicationsController {
     @Param('id') id: string,
     @Param('secretId') secretId: string,
   ): { secret: SecretView } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return {
       secret: this.applications.revokeSecret({
         organizationId: session.organizationId,
@@ -134,7 +270,7 @@ export class ApplicationsController {
     @Param('id') id: string,
     @Body() body: RedirectUriBody,
   ): { redirectUri: RedirectUriView } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return {
       redirectUri: this.applications.addRedirectUri({
         organizationId: session.organizationId,
@@ -153,7 +289,7 @@ export class ApplicationsController {
     @Param('uriId') uriId: string,
     @Body() body: RedirectUriBody,
   ): { redirectUri: RedirectUriView } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return {
       redirectUri: this.applications.updateRedirectUri({
         organizationId: session.organizationId,
@@ -172,7 +308,7 @@ export class ApplicationsController {
     @Param('id') id: string,
     @Param('uriId') uriId: string,
   ): { redirectUri: RedirectUriView } {
-    const session = this.requireSession(req);
+    const session = requireAdministratorSession(req);
     return {
       redirectUri: this.applications.removeRedirectUri({
         organizationId: session.organizationId,
@@ -183,9 +319,27 @@ export class ApplicationsController {
     };
   }
 
-  private requireSession(req: AdministratorRequest) {
-    const session = req.administratorSession;
-    if (!session) throw new UnauthorizedException();
-    return session;
+  /**
+   * Configure the scopes this Application may request (ADR-0016). Scope sets
+   * govern token contents, not user-granted permissions; `openid` is always
+   * required and the change is audit-logged. Members pull this lever with the
+   * rest of integration state — it is neither destructive nor credential-
+   * issuing.
+   */
+  @Put(':id/scopes')
+  configureScopes(
+    @Req() req: AdministratorRequest,
+    @Param('id') id: string,
+    @Body() body: ConfigureScopesBody,
+  ): { application: ApplicationView } {
+    const session = requireAdministratorSession(req);
+    return {
+      application: this.applications.setScopes({
+        organizationId: session.organizationId,
+        applicationId: id,
+        actor: session.administratorId,
+        scopes: body.scopes,
+      }),
+    };
   }
 }

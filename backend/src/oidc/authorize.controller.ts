@@ -5,6 +5,8 @@ import { LinkBaseService } from '../config/link-base.service';
 import { sessionCookieOptions } from '../config/cookies';
 import { SSO_COOKIE, ssoTokenFrom } from '../sessions/sso-cookie';
 import { SessionsService } from '../sessions/sessions.service';
+import { normalizeEmail } from '../identities/email';
+import { ThrottleService, type ThrottleSubject } from '../throttle/throttle.service';
 import {
   AuthorizationRequest,
   AuthorizeOutcome,
@@ -33,6 +35,7 @@ export class AuthorizeController {
     private readonly authorize: AuthorizeService,
     private readonly sessions: SessionsService,
     private readonly links: LinkBaseService,
+    private readonly throttle: ThrottleService,
   ) {}
 
   @Get('authorize')
@@ -47,6 +50,15 @@ export class AuthorizeController {
     @Body() body: SignInBody,
     @Res() res: Response,
   ): Promise<void> {
+    // Escalating delay for the credential attempt (ADR-0020). The key uses the
+    // submitted email whether or not an Identity owns it, so the delay never
+    // distinguishes email-exists from email-not-exists.
+    const subject: ThrottleSubject = {
+      source: req.ip ?? null,
+      identity: normalizeEmail(body.email),
+    };
+    await this.throttle.wait('sign-in', subject);
+
     const outcome = await this.authorize.signIn(
       readAuthorizationRequest(req),
       body,
@@ -58,10 +70,17 @@ export class AuthorizeController {
     );
 
     if (outcome.kind === 'invalid-credentials') {
+      // A refusal is the credential campaign signal: it feeds the next
+      // attempt's delay and is already audited by the authorization service.
+      this.throttle.record('sign-in', subject);
       res.status(401).json({ error: 'invalid_credentials' });
       return;
     }
     if (outcome.kind === 'redirect-with-session') {
+      // The credential was proven: forget this Identity's failures so an
+      // Identity is never punished for having mistyped. The source history
+      // stays, so scanning remains slow.
+      this.throttle.recordSuccess('sign-in', subject);
       res.cookie(SSO_COOKIE, outcome.sessionToken, {
         ...sessionCookieOptions(this.links.resolve()),
         maxAge: this.sessions.ttlMs(),
@@ -91,16 +110,16 @@ export class AuthorizeController {
 /** The authorization request travels in the query, exactly like OIDC expects. */
 function readAuthorizationRequest(req: Request): AuthorizationRequest {
   const query = req.query as Record<string, unknown>;
-  const text = (value: unknown): string | undefined =>
+  const queryText = (value: unknown): string | undefined =>
     typeof value === 'string' ? value : undefined;
   return {
-    clientId: text(query.client_id),
-    redirectUri: text(query.redirect_uri),
-    responseType: text(query.response_type),
-    scope: text(query.scope),
-    state: text(query.state),
-    nonce: text(query.nonce),
-    codeChallenge: text(query.code_challenge),
-    codeChallengeMethod: text(query.code_challenge_method),
+    clientId: queryText(query.client_id),
+    redirectUri: queryText(query.redirect_uri),
+    responseType: queryText(query.response_type),
+    scope: queryText(query.scope),
+    state: queryText(query.state),
+    nonce: queryText(query.nonce),
+    codeChallenge: queryText(query.code_challenge),
+    codeChallengeMethod: queryText(query.code_challenge_method),
   };
 }

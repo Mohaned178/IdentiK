@@ -82,7 +82,7 @@ A self-hostable Identity Provider — "Keycloak without the pain." The Instance 
 ## Implementation Decisions
 
 - **Artifact shape**: One codebase, two operational modes — self-hosted single-tenant is the primary release; the Organization-scoped data model keeps a future hosted multi-tenant mode compatible without rewrite. Every domain concept carries its Organization scope from day one.
-- **Stack (fixed constraint)**: NestJS + TypeScript backend; React + TypeScript frontend (dashboard, hosted authentication pages, Account Center). Database, protocol library, and email transport implementation are the first implementation decisions; they must not leak above the tested seams.
+- **Stack (fixed constraint)**: NestJS + TypeScript. Database, protocol library, and email transport implementation are the first implementation decisions; they must not leak above the tested seams.
 - **Two populations**: Administrators and End Users are distinct entity types with separate credential stores, separate sign-in flows, and separate session types. No shared login path, ever.
 - **Tenancy**: Organization is mandatory and first-class. An Application belongs to exactly one Organization forever. An Identity belongs to exactly one Organization. Membership is the scoped record Administrator + Organization + role (Owner or Member).
 - **Bootstrap**: First boot creates the default Organization and an expiring one-time setup flow that establishes the first Owner. No self-serve path to administration; invitation by email is the only entry point for additional Administrators, and invitees set their own passwords.

@@ -4,12 +4,29 @@
 
 **Blocked by:** 04 (recovery endpoints exist to throttle), 08 (audit surface exists to make the campaign visible), 09 (sign-in to attack and audit).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Public authentication endpoints apply escalating per-source and per-Identity rate limiting
-- [ ] Throttling behavior is observable at the HTTP surface (delayed responses), not via internal counters
-- [ ] No lockout code path exists: no number of failures renders an Identity locked — verified by sustained-attack test
-- [ ] Failed authentication attempts are recorded as audit events with source and targeted Identity
-- [ ] A scripted credential campaign is visible as a sequence of audit events in the unified surface
-- [ ] Throttling does not distinguish email-exists from email-not-exists (uniformity from tickets 03/04 preserved)
-- [ ] Black-box tests drive a sustained attack over HTTP and assert delay + audit visibility + absence of lockout
+- [x] Public authentication endpoints apply escalating per-source and per-Identity rate limiting
+- [x] Throttling behavior is observable at the HTTP surface (delayed responses), not via internal counters
+- [x] No lockout code path exists: no number of failures renders an Identity locked — verified by sustained-attack test
+- [x] Failed authentication attempts are recorded as audit events with source and targeted Identity
+- [x] A scripted credential campaign is visible as a sequence of audit events in the unified surface
+- [x] Throttling does not distinguish email-exists from email-not-exists (uniformity from tickets 03/04 preserved)
+- [x] Black-box tests drive a sustained attack over HTTP and assert delay + audit visibility + absence of lockout
+
+## Comments
+
+Implementation notes:
+
+- New `ThrottleService` (`backend/src/throttle/`) holds recent attempt timestamps per key in memory and answers an escalating delay: the first `IDENTIK_THROTTLE_AFTER_ATTEMPTS` attempts in the `IDENTIK_THROTTLE_WINDOW_MS` window are free, then the delay doubles from `IDENTIK_THROTTLE_BASE_DELAY_MS` per attempt up to `IDENTIK_THROTTLE_MAX_DELAY_MS`. It only ever *delays* a response — no state flag, no "locked" column, nothing that can deny a correct credential forever (ADR-0020). Defaults: 15-minute window, 50 free attempts, 200ms base, 5s cap; all four are deployment configuration (the spec leaves thresholds open).
+- Two dimensions per request: `source` (`req.ip`) and `identity`. The larger of the two delays wins, so an attack spread over many sources is still slowed per Identity and an attack over many Identities is still slowed per source. Keys are scoped per endpoint (`sign-in`, `sign-up`, `forgot-password`, `token`), so throttling an Administrator's sign-in never throttles an End User's.
+- Wiring: `POST /api/oidc/authorize` (the hosted sign-in) and `POST /api/oidc/token` await the delay in their controllers; `POST /api/end-users/sign-up` and `POST /api/end-users/forgot-password` go through a shared `guardAttempt` helper; `POST /api/administrators/sign-in` carries its own scope because Administrators are a separate population with a separate sign-in (ADR-0002). Scopes are a `ThrottleScope` union, so a typo cannot silently create an unthrottled endpoint. Sign-up/forgot-password answer uniformly by design (ADR-0005), so every request counts as one attempt; sign-in, Administrator sign-in, and token exchange count only refusals, and a proven credential clears the Identity's history via `recordSuccess` so an End User who mistyped is never punished (the source history stays, so scanning remains slow).
+- Token surface: the request carries no email, so the Identity dimension is the Identity the grant targets — `TokenService.identityForGrant` resolves it from the presented authorization code or refresh token, expired or spent included. An unresolvable grant contributes no Identity key and only the source applies. Authorization-code and refresh grants are therefore slowed per Identity as well as per source, exactly as ADR-0020 asks.
+- Uniformity (ADR-0020): the identity key is the *submitted* email, normalized through the shared `normalizeEmail` helper (the same one the Identity lookup uses), whether or not an Identity owns it. The delay therefore cannot distinguish email-exists from email-not-exists; the existing ticket 03/04 shape-and-timing uniformity tests still pass untouched.
+- Audit: the existing `identity.sign_in.failed` events (ticket 09) already carry `email`, `identityId` when known, `reason`, `applicationId`, and `source`; ticket 17 makes the campaign observable as an ordered sequence with the same surface. No new audit kinds were needed for the throttling itself — throttling is a delay, not an event.
+- Tests: `e2e/src/throttling.test.ts` (8 tests) drives an aggressive configuration (2 free attempts, 150ms base, 1.5s cap) black-box over HTTP: an 8-attempt campaign is measurably delayed, the correct credential still signs in after 6 failures (the no-lockout proof), the campaign reads as eight newest-first audit events each carrying source and Identity, and sign-up, forgot-password, token exchange, and Administrator sign-in each escalate. Uniformity gets its own experiment: the *same submitted email* is attacked against two fresh Instances — one where it owns a verified Identity, one where it owns nothing — and the two escalation curves must match, so the proof cannot be masked by a saturated source key. HTTP only; no DB inspection. Full suite: 178 tests across 18 files.
+- Review round applied: Administrator sign-in is now throttled (the ticket says "all public authentication endpoints"); the token surface keys on the grant's Identity rather than conflating the Client with an Identity; the email normalizer is shared instead of copied; `ThrottleScope` replaced bare scope strings; and `ThrottleService.delayFor`/`wait` lost their unused return value.
+- Review round applied: failed Administrator sign-in attempts are now audited as `administrator.sign_in.failed` with source and targeted email, uniformly for unknown email and wrong password, landing in the targeted Administrator's Organization (the hosted one for an unknown email, since this release has exactly one). `e2e/src/audit-surface.test.ts` (10 tests) asserts both cases and that a successful sign-in is not a failure event.
+- Deferred: persistent/shared throttle state (the Instance is a single process over SQLite, so in-memory is consistent today; a clustered deployment would want shared counters), and auditing throttling itself as an event (explicitly not required — the failures are the events).
+
+Review round applied: `ThrottleService` now sweeps fully-expired keys once per window, so a spray of unique emails or sources cannot grow the in-memory map for the process lifetime.

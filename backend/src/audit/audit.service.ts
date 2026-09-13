@@ -1,5 +1,6 @@
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { isISO8601 } from 'class-validator';
+import { optionalText } from '../common/text';
 import { DATABASE, Database } from '../storage/token';
 
 export interface AuditEventView {
@@ -15,8 +16,15 @@ export interface AuditEventView {
 export interface AuditFilters {
   actor?: string;
   kind?: string;
+  /** The Identity an event is about, as recorded in its detail (ADR-0008). */
+  identityId?: string;
   from?: string;
   to?: string;
+  /**
+   * Internal cap for derived views (an Identity's recent activity); never an
+   * HTTP filter, so the Management API's audit read stays complete.
+   */
+  limit?: number;
 }
 
 interface AuditEventRow {
@@ -46,8 +54,9 @@ export class AuditService {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
   list(organizationId: string, filters: AuditFilters): AuditEventView[] {
-    const actor = this.normalizeFilter(filters.actor);
-    const kind = this.normalizeFilter(filters.kind);
+    const actor = optionalText(filters.actor);
+    const kind = optionalText(filters.kind);
+    const identityId = optionalText(filters.identityId);
     const from = this.instantFilter(filters.from, 'from');
     const to = this.instantFilter(filters.to, 'to');
     if (from && to && from > to) {
@@ -68,6 +77,10 @@ export class AuditService {
       params.push(actor, actor);
     }
     add('e.kind = ?', kind);
+    // Identity linkage lives in the event detail; the durable key is the
+    // identityId, never the email (which anonymization destroys and reuse
+    // recycles — ADR-0007).
+    add("json_extract(e.detail, '$.identityId') = ?", identityId);
     add('e.occurred_at >= ?', from);
     add('e.occurred_at <= ?', to);
 
@@ -80,9 +93,10 @@ export class AuditService {
            ON m.organization_id = e.organization_id AND m.administrator_id = e.actor
          LEFT JOIN administrators a ON a.id = m.administrator_id
          WHERE ${conditions.join(' AND ')}
-         ORDER BY e.occurred_at DESC, e.rowid DESC`,
+         ORDER BY e.occurred_at DESC, e.rowid DESC
+         ${filters.limit === undefined ? '' : 'LIMIT ?'}`,
       )
-      .all(...params) as unknown as AuditEventRow[];
+      .all(...params, ...(filters.limit === undefined ? [] : [filters.limit])) as unknown as AuditEventRow[];
 
     return rows.map((row) => ({
       id: row.id,
@@ -95,13 +109,6 @@ export class AuditService {
     }));
   }
 
-  /** Empty values are treated as absent: a filter left blank is no filter. */
-  private normalizeFilter(value: string | undefined): string | undefined {
-    if (value === undefined) return undefined;
-    const trimmed = value.trim();
-    return trimmed.length === 0 ? undefined : trimmed;
-  }
-
   /**
    * Accept only instants with no ambiguity: an ISO date (UTC midnight) or an
    * ISO date-time carrying an explicit offset. An offsetless date-time would
@@ -109,7 +116,7 @@ export class AuditService {
    * different windows per deployment.
    */
   private instantFilter(value: string | undefined, name: string): string | undefined {
-    const text = this.normalizeFilter(value);
+    const text = optionalText(value);
     if (text === undefined) return undefined;
     if (
       !isISO8601(text, { strict: true, strictSeparator: true }) ||

@@ -4,17 +4,34 @@
 
 **Blocked by:** 09 (codes to exchange exist; the Session parents the refresh tokens).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Code exchange succeeds once per code; replay is refused
-- [ ] A confidential client authenticates at the token endpoint with a currently-valid Client Secret (any of its concurrent secrets)
-- [ ] A public client must present valid PKCE; no secret is ever accepted from or required of a public client
-- [ ] Revoked or misused secrets fail exchange immediately
-- [ ] The ID token carries identity, email + verification state, audience (the Application), and timestamps, verifiable offline
-- [ ] The access token is a signed JWT with short TTL and audience limited to platform endpoints
-- [ ] Refresh tokens rotate on use; a rotated (previously-used) refresh token no longer works
-- [ ] Refresh tokens are children of the Session: they belong to the authentications that minted them
-- [ ] JWKS serves the current verification keys; discovery self-describes all endpoints
-- [ ] Userinfo serves claims for a valid access token; introspection and revocation endpoints behave to spec
-- [ ] A stock OIDC client library completes the full code + PKCE flow against the Instance with zero proprietary code
-- [ ] Black-box tests verify issued JWTs offline against JWKS over HTTP only
+- [x] Code exchange succeeds once per code; replay is refused
+- [x] A confidential client authenticates at the token endpoint with a currently-valid Client Secret (any of its concurrent secrets)
+- [x] A public client must present valid PKCE; no secret is ever accepted from or required of a public client
+- [x] Revoked or misused secrets fail exchange immediately
+- [x] The ID token carries identity, email + verification state, audience (the Application), and timestamps, verifiable offline
+- [x] The access token is a signed JWT with short TTL and audience limited to platform endpoints
+- [x] Refresh tokens rotate on use; a rotated (previously-used) refresh token no longer works
+- [x] Refresh tokens are children of the Session: they belong to the authentications that minted them
+- [x] JWKS serves the current verification keys; discovery self-describes all endpoints
+- [x] Userinfo serves claims for a valid access token; introspection and revocation endpoints behave to spec
+- [x] A stock OIDC client library completes the full code + PKCE flow against the Instance with zero proprietary code
+- [x] Black-box tests verify issued JWTs offline against JWKS over HTTP only
+
+## Comments
+
+Implementation notes:
+
+- Token endpoint: `POST /api/oidc/token`, form-encoded (`grant_type=authorization_code|refresh_token`). Client authentication runs first for every grant and is shared by the token, revocation, and introspection surfaces (`client-authentication.service.ts`): `client_secret_basic` (case-insensitive scheme) and `client_secret_post` for confidential clients against any currently-unrevoked concurrent secret; a public client is identified by Client ID alone and any secret it presents is refused. Errors are OAuth-shaped JSON (`invalid_client`, `invalid_request`, `invalid_grant`, `invalid_scope`, `unsupported_grant_type`); header-based auth failures carry the RFC 6749 §5.2 `WWW-Authenticate` challenge, and token responses carry `Cache-Control: no-store`.
+- Code exchange: the code is consumed atomically (`UPDATE ... WHERE consumed_at IS NULL`) *before* the remaining checks, so a bad PKCE verifier or redirect URI burns it and the endpoint is not a guessing oracle. The code's client, `redirect_uri` (canonical exact match), scope set, nonce, PKCE challenge, parent Session, and Identity liveness are all re-checked at exchange time. PKCE: required for public clients; when a confidential client presented a challenge it must also match; `code_verifier` without a challenge is refused.
+- Signing fabric (`signing-keys.service.ts`, ADR-0022): RS256 keys come from deployment configuration `IDENTIK_SIGNING_JWKS` (JSON array; first entry signs, all are published, so rotation is additive). Unset means an ephemeral generated key plus a loud warning — self-contained dev/test only; production must configure stable keys. `kid` is the JWK thumbprint unless supplied.
+- JWTs: the access token is an `at+jwt` signed JWT with `iss`/`aud` = the Instance, `sub`, `client_id`, `sid` (Session), `scope`, `jti`, and a short TTL (`IDENTIK_ACCESS_TOKEN_TTL_MS`, default 5 min) — deliberately untracked, so revocation cannot kill it and it dies naturally (ADR-0013). The ID token carries `iss`, `sub`, `aud` = Client ID, `iat`/`exp`, `auth_time` (Session creation), `sid`, `nonce` when requested, plus `email`/`email_verified` under the `email` scope and `preferred_username` under `profile`.
+- Refresh tokens (migration v8, `refresh_tokens`): opaque, stored verifiable-only, children of the Session (`session_id` FK) and the Identity, bounded by the Session's own expiry (`IDENTIK_REFRESH_TOKEN_TTL_MS`, default 30 days). Rotation is atomic; a spent token is refused. Reuse detection follows the OAuth 2.0 Security BCP: presenting an already-rotated token revokes that Session's whole refresh lineage (across Applications) and audits `refresh_token.reuse.detected`. Refresh re-checks the parent Session through `SessionsService.resolveById` (revoked, expired, password-reset watermark, suspended, unverified all fail closed) and may narrow scopes, never widen them.
+- Discovery/JWKS: `GET /.well-known/openid-configuration` self-describes every endpoint and capability from `issuer.service.ts`; `GET /api/oidc/jwks` publishes the public keys. Discovery sits at the Instance root because a path-prefixed `IDENTIK_BASE_URL` is expected to be routed by a prefix-stripping reverse proxy, which is also what makes the advertised endpoint URLs resolve.
+- Userinfo: `GET` and `POST` (OIDC Core §5.3.1). A valid access token yields `sub` always, `email`/`email_verified` under `email`, `preferred_username` under `profile`; Identity liveness is checked at ask-time, so suspension takes effect immediately. An ID token presented as an access token is refused by the `at+jwt` type. Responses are `no-store`.
+- Introspection (`POST /api/oidc/introspect`, RFC 7662) answers only for the authenticated client's own tokens: access tokens from verified claims plus live Identity state; refresh tokens only while their Session is live and they are unrotated/unrevoked/unexpired. Revocation (`POST /api/oidc/revoke`, RFC 7009) revokes refresh tokens and answers 200 uniformly, including for unknown or foreign tokens; access tokens are untracked by design. Both require the `token` parameter (400 `invalid_request` when absent) after client authentication.
+- Tests: `e2e/src/token-issuance.test.ts` (28) drives the whole surface over HTTP — discovery, JWKS with offline `jose` verification via `createRemoteJWKSet`, confidential and public grants, PKCE failures, replay, rotation/reuse, Session parentage via a password reset, userinfo, introspection, revocation, and two `openid-client` flows (public PKCE and confidential) as the zero-SDK assertion. `e2e/src/token-expiry.test.ts` (2) starts an Instance with one-second code/access TTLs and observes expiry plus the fact that a refresh token outlives its access token. 136 tests pass in the full suite.
+- Review round applied: per-Application scope configuration landed (spec story 55, previously deferred below). Migration v13 adds `applications.allowed_scopes` (default `openid email profile`); `PUT /api/applications/:id/scopes` (Administrator-accessible, `openid` required, supported scopes only, idempotent) audits `application.scopes.updated` with the previous and new sets; the authorization endpoint refuses a request exceeding the Application's set with `invalid_scope`, while discovery still advertises the platform-wide supported set. The configured set is enforced at token issuance too: a code exchange or refresh whose effective scope exceeds the current configuration is refused (`invalid_grant` / `invalid_scope`), so narrowing actually bites existing grants; `mint` re-checks Application enabled state and Enrollment in the same no-await window as the Session, so a pause landing mid-signing cannot leave a fresh token behind. `e2e/src/application-scopes.test.ts` (7 tests) covers defaults, configuration and audit, refusal, claim narrowing/widening, refresh narrowing, current-config enforcement, and validation/access.
+- Review round applied: shared `optionalText`/scope parsing/client-credential helpers; `scopes_supported` derives from the one scope set; RFC-conformant `no-store`, `WWW-Authenticate`, missing-`token` 400s, userinfo POST, and case-insensitive Basic scheme.
+- Deferred, deliberately: suspension/revocation actions and the cascade (ticket 13, which consumes `resolveById`, introspection verdicts, and rotation refusal); Application disable revoking app-minted refresh tokens (ticket 16); per-Organization session policy (ticket 18).

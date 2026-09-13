@@ -5,6 +5,7 @@ import {
   hashToken,
   randomToken,
 } from '../crypto/password';
+import { normalizeEmail } from '../identities/email';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from './uuid';
 
@@ -104,6 +105,9 @@ export class BootstrapService implements OnModuleInit {
     const membershipId = uuid();
     const passwordHash = await hashPassword(input.password);
     const now = new Date().toISOString();
+    // The Owner's email is a normalized handle, like every other Administrator
+    // write path and the sign-in lookup (ADR-0021).
+    const email = normalizeEmail(input.email);
 
     this.db.exec('BEGIN');
     try {
@@ -125,7 +129,7 @@ export class BootstrapService implements OnModuleInit {
         .prepare(
           'INSERT INTO administrators (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)',
         )
-        .run(administratorId, input.email, input.name, passwordHash, now);
+        .run(administratorId, email, input.name, passwordHash, now);
       this.db
         .prepare(
           'INSERT INTO memberships (id, organization_id, administrator_id, role) VALUES (?, ?, ?, ?)',

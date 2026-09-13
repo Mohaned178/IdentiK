@@ -73,11 +73,9 @@ describe('End-User sign-up with the email verification gate', () => {
   beforeAll(async () => {
     instance = await Instance.start(BACKEND_DIST);
 
-    const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
     const ceremony = await instance.request('/api/setup', {
       method: 'POST',
-      query: { token: match[1] },
+      query: { token: instance.setupToken() },
       body: { organizationName: ORGANIZATION_NAME, ...OWNER },
     });
     expect(ceremony.status).toBe(201);
@@ -97,7 +95,7 @@ describe('End-User sign-up with the email verification gate', () => {
   it('the sign-up data endpoint carries the Organization name', async () => {
     const info = await instance.request('/api/end-users/sign-up');
     expect(info.status).toBe(200);
-    expect(await info.json()).toEqual({ organizationName: ORGANIZATION_NAME });
+    expect(await info.json()).toMatchObject({ organizationName: ORGANIZATION_NAME });
   });
 
   it('sign-up with a new email is accepted with a uniform response', async () => {
@@ -289,11 +287,9 @@ describe('verification token expiry', () => {
       IDENTIK_VERIFICATION_TOKEN_TTL_MS: '500',
     });
     try {
-      const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-      if (!match) throw new Error('no setup token in console output');
       const ceremony = await instance.request('/api/setup', {
         method: 'POST',
-        query: { token: match[1] },
+        query: { token: instance.setupToken() },
         body: { organizationName: ORGANIZATION_NAME, ...OWNER },
       });
       expect(ceremony.status).toBe(201);

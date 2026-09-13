@@ -86,14 +86,25 @@ describe('Unified audit surface', () => {
   beforeAll(async () => {
     instance = await Instance.start(BACKEND_DIST);
 
-    const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
     const ceremony = await instance.request('/api/setup', {
       method: 'POST',
-      query: { token: match[1] },
+      query: { token: instance.setupToken() },
       body: { organizationName: ORGANIZATION_NAME, ...OWNER },
     });
     expect(ceremony.status).toBe(201);
+
+    // Story 58: failed Administrator sign-in attempts are audited with source
+    // and target, uniformly for a known and an unknown email.
+    const knownFailure = await instance.request('/api/administrators/sign-in', {
+      method: 'POST',
+      body: { email: OWNER.email, password: 'the wrong password' },
+    });
+    expect(knownFailure.status).toBe(401);
+    const unknownFailure = await instance.request('/api/administrators/sign-in', {
+      method: 'POST',
+      body: { email: 'ghost-admin@example.com', password: 'the wrong password' },
+    });
+    expect(unknownFailure.status).toBe(401);
 
     const owner = await instance.request('/api/administrators/sign-in', {
       method: 'POST',
@@ -104,11 +115,12 @@ describe('Unified audit surface', () => {
     ownerId = ((await owner.json()) as SignInView).administratorId;
 
     // Ticket 05: invitation issued by the Owner, accepted by the invitee.
-    await instance.request('/api/administrators/invitations', {
+    const invited = await instance.request('/api/administrators/invitations', {
       method: 'POST',
       headers: { cookie: ownerCookie },
       body: { email: MEMBER.email, role: 'member' },
     });
+    expect(invited.status).toBe(201);
     const invitationMail = (await instance.capturedEmails()).find(
       (mail) => mail.to === MEMBER.email && /invit/i.test(mail.subject),
     );
@@ -216,6 +228,7 @@ describe('Unified audit surface', () => {
       'bootstrap.completed',
       'administrator.invitation.issued',
       'administrator.invitation.accepted',
+      'administrator.sign_in.failed',
       'application.registered',
       'client_secret.generated',
       'client_secret.revoked',
@@ -240,6 +253,31 @@ describe('Unified audit surface', () => {
 
     const times = events.map((event) => Date.parse(event.occurredAt));
     expect(times).toEqual([...times].sort((a, b) => b - a));
+  });
+
+  it('records failed Administrator sign-in attempts with source and target', async () => {
+    const failures = (await auditEvents()).filter(
+      (event) => event.kind === 'administrator.sign_in.failed',
+    );
+
+    const known = failures.find((event) => event.detail.email === OWNER.email);
+    expect(known).toBeDefined();
+    expect(known!.actor).toBe('administrator');
+    expect(known!.detail).toMatchObject({ reason: 'invalid_credentials' });
+    expect(known!.detail.source).toBeTruthy();
+
+    // The unknown email is recorded identically: the audit surface reveals
+    // nothing the HTTP refusal did not.
+    const unknown = failures.find(
+      (event) => event.detail.email === 'ghost-admin@example.com',
+    );
+    expect(unknown).toBeDefined();
+    expect(unknown!.detail).toMatchObject({ reason: 'invalid_credentials' });
+    expect(unknown!.detail.source).toBeTruthy();
+
+    // A successful sign-in is not a failure event, and End-User failures keep
+    // their own population's kind.
+    expect(failures.some((event) => event.detail.email === MEMBER.email)).toBe(false);
   });
 
   it('resolves an Administrator actor to a human while keeping the raw actor', async () => {

@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { normalizeEmail } from '../identities/email';
 
 interface Migration {
   version: number;
@@ -213,6 +214,146 @@ const migrations: Migration[] = [
         expires_at TEXT NOT NULL,
         consumed_at TEXT
       )`);
+    },
+  },
+  {
+    version: 8,
+    up: (db) => {
+      // ADR-0013: a refresh token is a child of the Session whose authentication
+      // minted it — never an independent credential. Stored verifiable-only,
+      // single-use by the rotated_at arbiter (rotation on every use), and
+      // expiring no later than its parent Session. Access tokens are
+      // deliberately absent here: they are untracked signed JWTs that die
+      // naturally within a short TTL.
+      db.exec(`CREATE TABLE refresh_tokens (
+        id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        application_id TEXT NOT NULL REFERENCES applications(id),
+        identity_id TEXT NOT NULL REFERENCES identities(id),
+        scope TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        rotated_at TEXT,
+        revoked_at TEXT
+      )`);
+      db.exec('CREATE INDEX refresh_tokens_session_idx ON refresh_tokens(session_id)');
+      db.exec('CREATE INDEX refresh_tokens_application_idx ON refresh_tokens(application_id)');
+    },
+  },
+  {
+    version: 9,
+    up: (db) => {
+      // ADR-0007: deletion means anonymization. The Identity row survives as a
+      // pseudonymous shell so audit history stays attributable by identityId,
+      // while `anonymized_at` marks the terminal state no path reverses. The
+      // email, password, Sessions, and Enrollments are destroyed; the shell's
+      // handle is non-deliverable and never matches a sign-up.
+      db.exec('ALTER TABLE identities ADD COLUMN anonymized_at TEXT');
+    },
+  },
+  {
+    version: 10,
+    up: (db) => {
+      // ADR-0007: an Application has a reversible Disabled pause (new
+      // authentication blocked, app-minted refresh tokens revoked, Sessions
+      // survive) and an irreversible Deleted terminal state (Enrollments
+      // removed, credentials revoked, name pseudonymized). The row survives so
+      // audit history stays attributable by applicationId; Identities are
+      // untouched, including those left orphaned.
+      db.exec('ALTER TABLE applications ADD COLUMN disabled_at TEXT');
+      db.exec('ALTER TABLE applications ADD COLUMN deleted_at TEXT');
+    },
+  },
+  {
+    version: 11,
+    up: (db) => {
+      // ADR-0022: Organization-scoped policy is dashboard-governed and
+      // audit-logged, while the instance-scoped trust fabric (SMTP, signing
+      // keys, external providers) lives in deployment configuration and never
+      // appears here. One row per Organization per setting, each a JSON
+      // document the settings service merges with its defaults; the key set is
+      // the allowlist the Management API enforces, so no trust-fabric setting
+      // can be represented in this table.
+      db.exec(`CREATE TABLE organization_settings (
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        key TEXT NOT NULL CHECK (key IN ('branding', 'password_policy', 'session_policy')),
+        value TEXT NOT NULL,
+        updated_by TEXT REFERENCES administrators(id),
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (organization_id, key)
+      )`);
+    },
+  },
+  {
+    version: 12,
+    up: (db) => {
+      // ADR-0008/0018: an End User's email change is self-service and takes
+      // effect only once the new mailbox is proven. The request is a
+      // single-use, expiring, verifiable-only token bound to the Identity and
+      // the requested address; until it is consumed the Identity's email
+      // column is untouched, so an abandoned change leaves the handle exactly
+      // as it was. The new address is stored normalized/COLLATE NOCASE because
+      // it must be unique within the Organization (ADR-0005), verified or not.
+      db.exec(`CREATE TABLE email_change_requests (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        identity_id TEXT NOT NULL REFERENCES identities(id),
+        new_email TEXT NOT NULL COLLATE NOCASE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
+      )`);
+      db.exec('CREATE INDEX email_change_requests_identity_idx ON email_change_requests(identity_id)');
+    },
+  },
+  {
+    version: 13,
+    up: (db) => {
+      // Scopes are integration configuration governing token contents, not
+      // user-granted permissions (ADR-0016). Each Application carries its
+      // allowed scope set; the authorization endpoint refuses a request that
+      // exceeds it. Existing Applications keep the full supported set.
+      db.exec(
+        `ALTER TABLE applications ADD COLUMN allowed_scopes TEXT NOT NULL DEFAULT 'openid email profile'`,
+      );
+    },
+  },
+  {
+    version: 14,
+    up: (db) => {
+      // Administrator emails are normalized handles (trimmed, lower-cased) at
+      // sign-in lookup. The column's NOCASE collation folds ASCII only, so a
+      // row written before bootstrap normalized its input could hold Unicode
+      // case the lookup no longer matches. Fold historical rows with the same
+      // Unicode-aware helper; a collision means two Administrators normalize
+      // to one handle and must be resolved by the Operator before boot.
+      const rows = db
+        .prepare('SELECT id, email FROM administrators')
+        .all() as Array<{ id: string; email: string }>;
+      const seen = new Set<string>();
+      for (const row of rows) {
+        const folded = normalizeEmail(row.email);
+        if (seen.has(folded)) {
+          throw new Error(
+            'two Administrator emails collide under Unicode normalization; resolve them before booting',
+          );
+        }
+        seen.add(folded);
+      }
+      const update = db.prepare('UPDATE administrators SET email = ? WHERE id = ?');
+      for (const row of rows) update.run(normalizeEmail(row.email), row.id);
+    },
+  },
+  {
+    version: 15,
+    up: (db) => {
+      // The audit surface reads newest-first per Organization and per
+      // Identity; the index keeps those reads bounded as history grows.
+      db.exec(
+        'CREATE INDEX audit_events_organization_time_idx ON audit_events(organization_id, occurred_at)',
+      );
     },
   },
 ];

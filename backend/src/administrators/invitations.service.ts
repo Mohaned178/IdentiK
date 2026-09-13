@@ -2,6 +2,7 @@ import { ConflictException, Inject, Injectable } from '@nestjs/common';
 import { hashPassword, hashToken, randomToken } from '../crypto/password';
 import { parseTtlMs } from '../config/env';
 import { LinkBaseService } from '../config/link-base.service';
+import { normalizeEmail } from '../identities/email';
 import { MailService } from '../mail/mail.service';
 import { recordAuditEvent } from '../storage/audit';
 import { isUniqueViolation } from '../storage/sqlite';
@@ -66,7 +67,7 @@ export class InvitationsService {
     email: string;
     role: AdministratorRole;
   }): Promise<{ invitationId: string; email: string; role: AdministratorRole }> {
-    const email = input.email.trim().toLowerCase();
+    const email = normalizeEmail(input.email);
     const existing = this.db
       .prepare('SELECT id FROM administrators WHERE email = ?')
       .get(email) as { id: string } | undefined;

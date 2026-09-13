@@ -71,8 +71,12 @@ export class Instance {
     try {
       await waitUntilHealthy(url, child);
     } catch (error) {
+      const output = instance.consoleLog().trim();
       await instance.stop();
-      throw error;
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}` +
+          (output ? `\n--- Instance output ---\n${output}` : ''),
+      );
     }
     return instance;
   }
@@ -82,6 +86,18 @@ export class Instance {
     return this.consoleOutput.join('');
   }
 
+  /**
+   * The Bootstrap Ceremony's one-time token. The ceremony is initiated from the
+   * install process, so the console is its operator surface: this is the only
+   * place the token is revealed, and it is never re-minted (the harness never
+   * derives it from storage).
+   */
+  setupToken(): string {
+    const match = [...this.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
+    if (!match) throw new Error('no setup token in console output');
+    return match[1]!;
+  }
+
   async request(
     path: string,
     init?: {
@@ -89,6 +105,7 @@ export class Instance {
       headers?: Record<string, string>;
       query?: Record<string, string>;
       body?: unknown;
+      form?: Record<string, string>;
       redirect?: 'follow' | 'error' | 'manual';
     },
   ): Promise<Response> {
@@ -96,14 +113,23 @@ export class Instance {
     for (const [k, v] of Object.entries(init?.query ?? {})) {
       url.searchParams.set(k, v);
     }
-    const serialized = init?.body === undefined ? undefined : JSON.stringify(init.body);
+    const serialized = init?.form
+      ? new URLSearchParams(init.form).toString()
+      : init?.body === undefined
+        ? undefined
+        : JSON.stringify(init.body);
     return fetch(url, {
       method: init?.method ?? 'GET',
       redirect: init?.redirect ?? 'follow',
       headers:
         serialized === undefined
           ? init?.headers
-          : { 'content-type': 'application/json', ...init?.headers },
+          : {
+              'content-type': init?.form
+                ? 'application/x-www-form-urlencoded'
+                : 'application/json',
+              ...init?.headers,
+            },
       body: serialized,
     });
   }
@@ -165,7 +191,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function freePort(): Promise<number> {
+/** A currently free loopback port, for pointing an Instance at a known-dead address. */
+export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createNetServer();
     server.once('error', reject);

@@ -218,8 +218,10 @@ describe('Bootstrap Ceremony expiry', () => {
 
   it('a restart within the window keeps the armed ceremony running down — no fresh token is minted', async () => {
     const stateDir = join(tmpdir(), `identik-restart-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    // Five seconds, not 1.5: the restart cycle must complete well inside the
+    // window even on a loaded CI machine, or the test measures startup time.
     const first = await Instance.startAt(BACKEND_DIST, stateDir, {
-      IDENTIK_SETUP_TOKEN_TTL_MS: '1500',
+      IDENTIK_SETUP_TOKEN_TTL_MS: '5000',
     });
     try {
       const firstLog = first.consoleLog();
@@ -227,7 +229,7 @@ describe('Bootstrap Ceremony expiry', () => {
 
       await first.stop({ keepState: true });
       const second = await Instance.startAt(BACKEND_DIST, stateDir, {
-        IDENTIK_SETUP_TOKEN_TTL_MS: '1500',
+        IDENTIK_SETUP_TOKEN_TTL_MS: '5000',
       });
       try {
         const secondLog = second.consoleLog();
@@ -238,7 +240,7 @@ describe('Bootstrap Ceremony expiry', () => {
         const body = (await status.json()) as { completed: boolean; available: boolean };
         expect(body.available).toBe(true);
 
-        await new Promise((resolve) => setTimeout(resolve, 1600));
+        await new Promise((resolve) => setTimeout(resolve, 5100));
         const after = await second.request('/api/setup/status');
         const afterBody = (await after.json()) as { completed: boolean; available: boolean };
         expect(afterBody.available).toBe(false);
@@ -295,6 +297,38 @@ describe('Bootstrap Ceremony concurrency', () => {
         password: loser.password,
       });
       expect(loserSignIn.status).toBe(401);
+    } finally {
+      await instance.stop();
+    }
+  });
+});
+
+describe('Bootstrap Ceremony Owner email normalization', () => {
+  it('folds a non-ASCII email so the Owner signs in with any case', async () => {
+    // The sign-in lookup normalizes the submitted email (Unicode-aware
+    // toLowerCase), so the ceremony must store the same normalized handle:
+    // SQLite's NOCASE collation folds ASCII only.
+    const instance = await Instance.start(BACKEND_DIST);
+    try {
+      const ceremony = await completeCeremony(instance, instance.setupToken(), {
+        organizationName: 'Acme',
+        email: 'Ähmed@Example.com',
+        password: 'owner password 123',
+        name: 'Ahmed',
+      });
+      expect(ceremony.status).toBe(201);
+
+      const signedIn = await signIn(instance, {
+        email: 'ähmed@example.com',
+        password: 'owner password 123',
+      });
+      expect(signedIn.status).toBe(200);
+
+      const exactCase = await signIn(instance, {
+        email: 'Ähmed@Example.com',
+        password: 'owner password 123',
+      });
+      expect(exactCase.status).toBe(200);
     } finally {
       await instance.stop();
     }

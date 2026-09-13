@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a defect in the Identity Platform
+title: 'bug: '
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Reproducing from the HTTP
+        surface (the platform's tested seam) makes a fix land far faster than a
+        screenshot of an internal error.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: The observed behaviour, including the exact request and response where you can.
+      placeholder: A request to ... returned ..., but I expected ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A minimal, ordered list. Include request bodies, headers, and cookies (redact secrets).
+      placeholder: |
+        1. Boot an Instance with ...
+        2. POST /api/...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The tag or commit SHA you are running.
+      placeholder: v0.1.0 or 8951920
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Node version, OS, and any relevant deployment configuration.
+      placeholder: Node 24, Ubuntu 24.04, self-hosted, SQLite
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I have removed secrets, tokens, and personal data from this report.
+          required: true

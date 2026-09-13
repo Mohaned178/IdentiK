@@ -91,11 +91,9 @@ describe('Administrator invitation and Owner/Member roles', () => {
   beforeAll(async () => {
     instance = await Instance.start(BACKEND_DIST);
 
-    const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-    if (!match) throw new Error('no setup token in console output');
     const ceremony = await instance.request('/api/setup', {
       method: 'POST',
-      query: { token: match[1] },
+      query: { token: instance.setupToken() },
       body: { organizationName: ORGANIZATION_NAME, ...OWNER },
     });
     expect(ceremony.status).toBe(201);
@@ -164,13 +162,12 @@ describe('Administrator invitation and Owner/Member roles', () => {
   });
 
   it('the role distinction is enforced: an Owner may invite and a Member may not', async () => {
-    const owner = await signIn(instance, OWNER.email, OWNER.password);
-    const ownerBody = (await owner.json()) as { role: string };
-    expect(ownerBody.role).toBe('owner');
+    const invitee = 'role-distinction@example.com';
+    const byMember = await invite(memberCookie, { email: invitee, role: 'member' });
+    expect(byMember.status).toBe(403);
 
-    const member = await signIn(instance, MEMBER.email, MEMBER.password);
-    const memberBody = (await member.json()) as { role: string };
-    expect(memberBody.role).toBe('member');
+    const byOwner = await invite(ownerCookie, { email: invitee, role: 'member' });
+    expect(byOwner.status).toBe(201);
   });
 
   it('an Owner-role invitation grants the Owner role', async () => {
@@ -244,11 +241,9 @@ describe('invitation token expiry', () => {
       IDENTIK_INVITATION_TOKEN_TTL_MS: '500',
     });
     try {
-      const match = [...instance.consoleLog().matchAll(/setup token: ([A-Za-z0-9_-]+)/g)].at(-1);
-      if (!match) throw new Error('no setup token in console output');
       const ceremony = await instance.request('/api/setup', {
         method: 'POST',
-        query: { token: match[1] },
+        query: { token: instance.setupToken() },
         body: { organizationName: ORGANIZATION_NAME, ...OWNER },
       });
       expect(ceremony.status).toBe(201);

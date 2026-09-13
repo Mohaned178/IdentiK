@@ -1,0 +1,37 @@
+import { Body, Controller, Get, Put, Req, UseGuards } from '@nestjs/common';
+import { AdministratorGuard } from '../administrators/administrator.guard';
+import { OwnerGuard } from '../administrators/owner.guard';
+import {
+  requireAdministratorSession,
+  type AdministratorRequest,
+} from '../administrators/administrators.controller';
+import {
+  OrganizationSettingsService,
+  type OrganizationSettingsView,
+} from './organization-settings.service';
+
+/**
+ * The Organization-scoped settings surface (ADR-0019, ADR-0022): the
+ * dashboard edits branding, password policy, and session timeout here, and
+ * every Administrator can read the effective values. Writing is Owner-only;
+ * the trust fabric (SMTP, signing keys) is not addressable from this API at
+ * all.
+ */
+@Controller('api/organization')
+@UseGuards(AdministratorGuard)
+export class OrganizationSettingsController {
+  constructor(private readonly settings: OrganizationSettingsService) {}
+
+  @Get('settings')
+  view(@Req() req: AdministratorRequest): OrganizationSettingsView {
+    const session = requireAdministratorSession(req);
+    return this.settings.view(session.organizationId);
+  }
+
+  @Put('settings')
+  @UseGuards(OwnerGuard)
+  update(@Req() req: AdministratorRequest, @Body() body: unknown): OrganizationSettingsView {
+    const session = requireAdministratorSession(req);
+    return this.settings.update(session.organizationId, session.administratorId, body);
+  }
+}
