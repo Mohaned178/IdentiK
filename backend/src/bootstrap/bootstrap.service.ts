@@ -6,6 +6,7 @@ import {
   randomToken,
 } from '../crypto/password';
 import { normalizeEmail } from '../identities/email';
+import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from './uuid';
 
@@ -50,10 +51,10 @@ export class BootstrapService implements OnModuleInit {
   constructor(@Inject(DATABASE) private readonly db: Database) {}
 
   async onModuleInit(): Promise<void> {
-    const completed = this.completed();
+    const completed = await this.completed();
     if (completed) return;
 
-    const armed = this.readArmed();
+    const armed = await this.readArmed();
     if (armed) {
       // Restart before completion: the window keeps running down. The token
       // cannot be re-revealed (it was shown once); the Instance must be
@@ -66,14 +67,15 @@ export class BootstrapService implements OnModuleInit {
     const token = randomToken(32);
     const tokenHash = hashToken(token);
     const expiresAt = Date.now() + this.tokenTtlMs();
-    this.db
-      .prepare("INSERT OR REPLACE INTO instance_state (key, value) VALUES ('bootstrap_armed', ?)")
-      .run(
+    await this.db.run(
+      "INSERT OR REPLACE INTO instance_state (key, value) VALUES ('bootstrap_armed', ?)",
+      [
         JSON.stringify({
           token_hash: tokenHash,
           expires_at: new Date(expiresAt).toISOString(),
         } satisfies ArmedCeremony),
-      );
+      ],
+    );
     this.tokenHash = tokenHash;
     this.expiresAt = expiresAt;
     console.log(
@@ -83,8 +85,8 @@ export class BootstrapService implements OnModuleInit {
     );
   }
 
-  state(): BootstrapState {
-    const completed = this.completed();
+  async state(): Promise<BootstrapState> {
+    const completed = await this.completed();
     return { completed, available: !completed && this.tokenAlive() };
   }
 
@@ -92,7 +94,7 @@ export class BootstrapService implements OnModuleInit {
     token: string,
     input: { organizationName: string; email: string; password: string; name: string },
   ): Promise<CeremonyResult> {
-    const state = this.state();
+    const state = await this.state();
     if (state.completed) {
       return { ok: false, reason: CeremonyRefusedReason.AlreadyCompleted };
     }
@@ -109,51 +111,41 @@ export class BootstrapService implements OnModuleInit {
     // write path and the sign-in lookup (ADR-0021).
     const email = normalizeEmail(input.email);
 
-    this.db.exec('BEGIN');
-    try {
-      // The claim itself is the race-free arbiter: whichever request inserts
-      // this row first completes the ceremony; every later request loses.
-      const claimed = this.db
-        .prepare(
-          "INSERT OR IGNORE INTO instance_state (key, value) VALUES ('bootstrap', 'completed')",
-        )
-        .run();
-      if (claimed.changes !== 1) {
-        this.db.exec('ROLLBACK');
-        return { ok: false, reason: CeremonyRefusedReason.AlreadyCompleted };
-      }
-      this.db
-        .prepare('INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)')
-        .run(organizationId, input.organizationName, now);
-      this.db
-        .prepare(
-          'INSERT INTO administrators (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)',
-        )
-        .run(administratorId, email, input.name, passwordHash, now);
-      this.db
-        .prepare(
-          'INSERT INTO memberships (id, organization_id, administrator_id, role) VALUES (?, ?, ?, ?)',
-        )
-        .run(membershipId, organizationId, administratorId, 'owner');
-      this.db
-        .prepare(
-          'INSERT INTO audit_events (id, organization_id, kind, actor, detail, occurred_at) VALUES (?, ?, ?, ?, ?, ?)',
-        )
-        .run(
-          uuid(),
-          organizationId,
-          'bootstrap.completed',
-          'instance',
-          JSON.stringify({
-            organizationName: input.organizationName,
-            ownerAdministratorId: administratorId,
-          }),
-          now,
-        );
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+    // The claim itself is the race-free arbiter: whichever request inserts
+    // this row first completes the ceremony; every later request loses.
+    const claimed = await this.db.transaction(async (tx) => {
+      const { rowCount } = await tx.run(
+        "INSERT OR IGNORE INTO instance_state (key, value) VALUES ('bootstrap', 'completed')",
+      );
+      if (rowCount !== 1) return false;
+
+      await tx.run('INSERT INTO organizations (id, name, created_at) VALUES (?, ?, ?)', [
+        organizationId,
+        input.organizationName,
+        now,
+      ]);
+      await tx.run(
+        'INSERT INTO administrators (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)',
+        [administratorId, email, input.name, passwordHash, now],
+      );
+      await tx.run(
+        'INSERT INTO memberships (id, organization_id, administrator_id, role) VALUES (?, ?, ?, ?)',
+        [membershipId, organizationId, administratorId, 'owner'],
+      );
+      await recordAuditEvent(tx, {
+        organizationId,
+        actor: 'instance',
+        kind: 'bootstrap.completed',
+        detail: {
+          organizationName: input.organizationName,
+          ownerAdministratorId: administratorId,
+        },
+        occurredAt: now,
+      });
+      return true;
+    });
+    if (!claimed) {
+      return { ok: false, reason: CeremonyRefusedReason.AlreadyCompleted };
     }
 
     this.tokenHash = null;
@@ -168,17 +160,17 @@ export class BootstrapService implements OnModuleInit {
     };
   }
 
-  private completed(): boolean {
-    const row = this.db
-      .prepare("SELECT value FROM instance_state WHERE key = 'bootstrap'")
-      .get() as { value: string } | undefined;
+  private async completed(): Promise<boolean> {
+    const row = await this.db.get<{ value: string }>(
+      "SELECT value FROM instance_state WHERE key = 'bootstrap'",
+    );
     return row?.value === 'completed';
   }
 
-  private readArmed(): ArmedCeremony | null {
-    const row = this.db
-      .prepare("SELECT value FROM instance_state WHERE key = 'bootstrap_armed'")
-      .get() as { value: string } | undefined;
+  private async readArmed(): Promise<ArmedCeremony | null> {
+    const row = await this.db.get<{ value: string }>(
+      "SELECT value FROM instance_state WHERE key = 'bootstrap_armed'",
+    );
     if (!row) return null;
     try {
       return JSON.parse(row.value) as ArmedCeremony;

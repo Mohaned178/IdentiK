@@ -164,12 +164,14 @@ export class AdministratorsController {
    * does.
    */
   @Get('invitations')
-  invitationInfo(@Query('token') token: string | undefined): {
+  invitationInfo(
+    @Query('token') token: string | undefined,
+  ): Promise<{
     organizationName: string;
     valid: boolean;
     email: string | null;
     role: AdministratorRole | null;
-  } {
+  }> {
     if (typeof token !== 'string' || token.length === 0) {
       return this.invitations.inspect('');
     }

@@ -68,32 +68,33 @@ export class InvitationsService {
     role: AdministratorRole;
   }): Promise<{ invitationId: string; email: string; role: AdministratorRole }> {
     const email = normalizeEmail(input.email);
-    const existing = this.db
-      .prepare('SELECT id FROM administrators WHERE email = ?')
-      .get(email) as { id: string } | undefined;
+    const existing = await this.db.get<{ id: string }>(
+      'SELECT id FROM administrators WHERE email = ?',
+      [email],
+    );
     if (existing) {
       throw new ConflictException('an administrator with this email already exists');
     }
 
-    const organization = this.db
-      .prepare('SELECT name FROM organizations WHERE id = ?')
-      .get(input.organizationId) as { name: string } | undefined;
+    const organization = await this.db.get<{ name: string }>(
+      'SELECT name FROM organizations WHERE id = ?',
+      [input.organizationId],
+    );
     if (!organization) throw new ConflictException('no such organization');
 
-    const inviter = this.db
-      .prepare('SELECT name FROM administrators WHERE id = ?')
-      .get(input.invitedBy) as { name: string } | undefined;
+    const inviter = await this.db.get<{ name: string }>(
+      'SELECT name FROM administrators WHERE id = ?',
+      [input.invitedBy],
+    );
 
     const invitationId = uuid();
     const token = randomToken(32);
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO administrator_invitations
+    await this.db.run(
+      `INSERT INTO administrator_invitations
            (id, organization_id, email, role, token_hash, invited_by, expires_at, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
+      [
         invitationId,
         input.organizationId,
         email,
@@ -102,13 +103,19 @@ export class InvitationsService {
         input.invitedBy,
         new Date(Date.now() + this.invitationTtlMs()).toISOString(),
         now,
-      );
+      ],
+    );
 
-    this.audit(input.organizationId, input.invitedBy, 'administrator.invitation.issued', {
-      invitationId,
-      email,
-      role: input.role,
-      invitedBy: input.invitedBy,
+    await recordAuditEvent(this.db, {
+      organizationId: input.organizationId,
+      actor: input.invitedBy,
+      kind: 'administrator.invitation.issued',
+      detail: {
+        invitationId,
+        email,
+        role: input.role,
+        invitedBy: input.invitedBy,
+      },
     });
 
     await this.sendInvitationEmail({
@@ -129,13 +136,13 @@ export class InvitationsService {
    * accepting does. Presenting an expired link is the moment expiry becomes
    * observable, so it is audited here (once) as well as on a direct accept.
    */
-  inspect(token: string): InvitationInfo {
-    const row = this.findByToken(token);
+  async inspect(token: string): Promise<InvitationInfo> {
+    const row = await this.findByToken(token);
     if (!row) {
       return { valid: false, organizationName: '', email: null, role: null };
     }
     const live = row.consumed_at === null && new Date(row.expires_at).getTime() > Date.now();
-    if (!live && row.consumed_at === null) this.auditExpiryOnce(row);
+    if (!live && row.consumed_at === null) await this.auditExpiryOnce(row);
     return {
       valid: live,
       organizationName: row.organization_name,
@@ -156,18 +163,19 @@ export class InvitationsService {
     name: string;
     password: string;
   }): Promise<InvitationAcceptance> {
-    const invitation = this.findByToken(input.token);
+    const invitation = await this.findByToken(input.token);
     if (!invitation || invitation.consumed_at !== null) {
       return { ok: false, reason: 'invalid' };
     }
     if (new Date(invitation.expires_at).getTime() <= Date.now()) {
-      this.auditExpiryOnce(invitation);
+      await this.auditExpiryOnce(invitation);
       return { ok: false, reason: 'expired' };
     }
 
-    const existing = this.db
-      .prepare('SELECT id FROM administrators WHERE email = ?')
-      .get(invitation.email) as { id: string } | undefined;
+    const existing = await this.db.get<{ id: string }>(
+      'SELECT id FROM administrators WHERE email = ?',
+      [invitation.email],
+    );
     if (existing) return { ok: false, reason: 'invalid' };
 
     const passwordHash = await hashPassword(input.password);
@@ -175,43 +183,46 @@ export class InvitationsService {
     const membershipId = uuid();
     const now = new Date().toISOString();
 
-    this.db.exec('BEGIN');
+    let consumed: boolean;
     try {
-      const consumed = this.db
-        .prepare(
+      consumed = await this.db.transaction(async (tx) => {
+        const claimed = await tx.get<{ id: string }>(
           `UPDATE administrator_invitations SET consumed_at = ?
            WHERE id = ? AND consumed_at IS NULL AND expires_at > ?
            RETURNING id`,
-        )
-        .get(now, invitation.id, now);
-      if (!consumed) {
-        this.db.exec('ROLLBACK');
-        return { ok: false, reason: 'invalid' };
-      }
+          [now, invitation.id, now],
+        );
+        if (!claimed) return false;
 
-      this.db
-        .prepare(
+        await tx.run(
           'INSERT INTO administrators (id, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?)',
-        )
-        .run(administratorId, invitation.email, input.name, passwordHash, now);
-      this.db
-        .prepare(
+          [administratorId, invitation.email, input.name, passwordHash, now],
+        );
+        await tx.run(
           'INSERT INTO memberships (id, organization_id, administrator_id, role) VALUES (?, ?, ?, ?)',
-        )
-        .run(membershipId, invitation.organization_id, administratorId, invitation.role);
+          [membershipId, invitation.organization_id, administratorId, invitation.role],
+        );
 
-      this.audit(invitation.organization_id, administratorId, 'administrator.invitation.accepted', {
-        invitationId: invitation.id,
-        administratorId,
-        email: invitation.email,
-        role: invitation.role,
+        await recordAuditEvent(tx, {
+          organizationId: invitation.organization_id,
+          actor: administratorId,
+          kind: 'administrator.invitation.accepted',
+          detail: {
+            invitationId: invitation.id,
+            administratorId,
+            email: invitation.email,
+            role: invitation.role,
+          },
+        });
+        return true;
       });
-      this.db.exec('COMMIT');
     } catch (error) {
-      this.db.exec('ROLLBACK');
+      // A lost email race surfaces as a unique violation out of the rolled-back
+      // transaction; the caller sees the same refusal as an unknown link.
       if (isUniqueViolation(error)) return { ok: false, reason: 'invalid' };
       throw error;
     }
+    if (!consumed) return { ok: false, reason: 'invalid' };
 
     return {
       ok: true,
@@ -223,16 +234,15 @@ export class InvitationsService {
     };
   }
 
-  private findByToken(token: string): InvitationRow | undefined {
-    return this.db
-      .prepare(
-        `SELECT i.id, i.organization_id, i.email, i.role, i.invited_by, i.expires_at,
+  private async findByToken(token: string): Promise<InvitationRow | undefined> {
+    return this.db.get<InvitationRow>(
+      `SELECT i.id, i.organization_id, i.email, i.role, i.invited_by, i.expires_at,
                 i.consumed_at, o.name AS organization_name
          FROM administrator_invitations i
          JOIN organizations o ON o.id = i.organization_id
          WHERE i.token_hash = ?`,
-      )
-      .get(hashToken(token)) as InvitationRow | undefined;
+      [hashToken(token)],
+    );
   }
 
   /**
@@ -240,16 +250,15 @@ export class InvitationsService {
    * presented (page load or accept). The guarded UPDATE makes "audit once"
    * race-free across both paths.
    */
-  private auditExpiryOnce(invitation: InvitationRow): void {
+  private async auditExpiryOnce(invitation: InvitationRow): Promise<void> {
     const now = new Date().toISOString();
-    const marked = this.db
-      .prepare(
-        `UPDATE administrator_invitations SET expiry_audited_at = ?
+    const marked = await this.db.run(
+      `UPDATE administrator_invitations SET expiry_audited_at = ?
          WHERE id = ? AND expiry_audited_at IS NULL`,
-      )
-      .run(now, invitation.id);
-    if (marked.changes !== 1) return;
-    recordAuditEvent(this.db, {
+      [now, invitation.id],
+    );
+    if (marked.rowCount !== 1) return;
+    await recordAuditEvent(this.db, {
       organizationId: invitation.organization_id,
       actor: 'instance',
       kind: 'administrator.invitation.expired',
@@ -276,15 +285,6 @@ export class InvitationsService {
         `Choose your own password (nobody else sets it) by opening the link below:\n\n${link}\n\n` +
         `The link is single-use and expires soon. If you did not expect this invitation, you can ignore it.`,
     });
-  }
-
-  private audit(
-    organizationId: string,
-    actor: string,
-    kind: string,
-    detail: Record<string, unknown>,
-  ): void {
-    recordAuditEvent(this.db, { organizationId, actor, kind, detail });
   }
 
   private invitationTtlMs(): number {

@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The async contract is defined in one place; implementations are checked against it by the compiler
-- [ ] A temporary SQLite-backed implementation satisfies the contract while existing synchronous access continues to work
-- [ ] `transaction(fn)` runs its statements on one connection, commits on success, and rolls back on throw
-- [ ] Placeholder and affected-row semantics match what the final PostgreSQL facade will provide
-- [ ] The full end-to-end suite passes unchanged on SQLite
+- [x] The async contract is defined in one place; implementations are checked against it by the compiler
+- [x] A temporary SQLite-backed implementation satisfies the contract while existing synchronous access continues to work
+- [x] `transaction(fn)` runs its statements on one connection, commits on success, and rolls back on throw
+- [x] Placeholder and affected-row semantics match what the final PostgreSQL facade will provide
+- [x] The full end-to-end suite passes unchanged on SQLite
