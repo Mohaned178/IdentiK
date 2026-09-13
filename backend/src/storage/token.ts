@@ -1,11 +1,10 @@
-import type { DataAccess } from './data-access';
+import type { PrismaService } from './prisma.service';
 
 export const DATABASE = Symbol('DATABASE');
 
 /**
- * The Instance's data handle: the temporary Stage 1 facade over the ORM
- * client's parameterized raw access (ADR-0026, ADR-0027). Services inject it
- * exactly as they always have; Stage 2 re-points this alias at the typed
- * client and Finalize deletes the facade behind it.
+ * The Instance's injected data handle: the ORM client (ADR-0026, ADR-0027).
+ * Typed queries come first; the temporary Stage 1 facade methods still on the
+ * client are deleted module by module until Finalize.
  */
-export type Database = DataAccess;
+export type Database = PrismaService;

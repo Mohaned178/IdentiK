@@ -4,7 +4,7 @@ import { parseTtlMs } from '../config/env';
 import { identityGate } from '../identities/identity-state';
 import { OrganizationSettingsService } from '../settings/organization-settings.service';
 import { recordAuditEvent } from '../storage/audit';
-import type { DataAccess } from '../storage/data-access';
+import type { DataAccess, DataHandle } from '../storage/data-access';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 
@@ -286,7 +286,7 @@ export class SessionsService {
    * tokens outlive it. Callers own the transaction.
    */
   private async revokeRow(
-    db: DataAccess,
+    db: DataHandle,
     row: SessionRef,
     reason: SessionRevocationReason,
     actor: string,

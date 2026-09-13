@@ -1,8 +1,8 @@
-import { Provider } from '@nestjs/common';
+import { Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client';
-import { PrismaDatabase } from './postgres';
-import { DATABASE, type Database } from './token';
+import type { DataAccess, DataHandle, RunResult } from './data-access';
+import { PrismaRawAccess, transactionHandle } from './postgres';
 
 /** The one documented way an Instance Operator brings the schema up to date. */
 const MIGRATE_COMMAND = 'npx prisma migrate deploy';
@@ -72,18 +72,59 @@ async function assertSchemaPresent(prisma: PrismaClient): Promise<void> {
 }
 
 /**
- * Provides the Instance's data handle: a single ORM client on the PostgreSQL
- * driver adapter, wrapped in the Stage 1 facade. Organization-owned tables are
- * Organization-scoped from day one (ADR-0001); platform-population tables
- * (administrators, their sessions) are Instance-global per ADR-0002/0021.
+ * The Instance's injected data client: one ORM client on the PostgreSQL driver
+ * adapter, provided through the `DATABASE` token. It owns the connection pool
+ * and the startup schema check, and disconnects when the Instance shuts down.
+ * The facade methods below are the temporary Stage 1 compatibility surface
+ * (ADR-0026, ADR-0027) that unconverted modules still call; Stage 2 deletes
+ * them module by module until Finalize removes the last of them.
  */
-export const databaseProvider: Provider = {
-  provide: DATABASE,
-  useFactory: async (): Promise<Database> => {
-    const prisma = new PrismaClient({
-      adapter: new PrismaPg({ connectionString: databaseUrl() }),
+@Injectable()
+export class PrismaService extends PrismaClient implements DataAccess, OnModuleInit, OnModuleDestroy {
+  private readonly raw = new PrismaRawAccess(this);
+
+  constructor() {
+    super({ adapter: new PrismaPg({ connectionString: databaseUrl() }) });
+  }
+
+  async onModuleInit(): Promise<void> {
+    await assertSchemaPresent(this);
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.$disconnect();
+  }
+
+  run(sql: string, params: readonly unknown[] = []): Promise<RunResult> {
+    return this.raw.run(sql, params);
+  }
+
+  get<T = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = [],
+  ): Promise<T | undefined> {
+    return this.raw.get<T>(sql, params);
+  }
+
+  all<T = Record<string, unknown>>(
+    sql: string,
+    params: readonly unknown[] = [],
+  ): Promise<T[]> {
+    return this.raw.all<T>(sql, params);
+  }
+
+  exec(sql: string): Promise<void> {
+    return this.raw.exec(sql);
+  }
+
+  transaction<T>(fn: (tx: DataHandle) => Promise<T>): Promise<T> {
+    // SQLite let a unit of work run as long as it needed on the one
+    // connection; the interactive transaction's defaults (5s timeout, 2s wait
+    // for a connection) would be a new failure mode for large cascades. Keep
+    // both generous until Stage 2 revisits transaction policy.
+    return this.$transaction((tx) => fn(transactionHandle(tx)), {
+      maxWait: 10_000,
+      timeout: 30_000,
     });
-    await assertSchemaPresent(prisma);
-    return new PrismaDatabase(prisma);
-  },
-};
+  }
+}

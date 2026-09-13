@@ -10,7 +10,7 @@ import { hashToken, randomToken } from '../crypto/password';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { recordAuditEvent } from '../storage/audit';
-import type { DataAccess } from '../storage/data-access';
+import type { DataAccess, DataHandle } from '../storage/data-access';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import {
@@ -452,7 +452,7 @@ export class ApplicationsService {
    * first secret inside its own transaction.
    */
   private async issueSecretWith(
-    db: DataAccess,
+    db: DataHandle,
     input: {
       organizationId: string;
       applicationId: string;
