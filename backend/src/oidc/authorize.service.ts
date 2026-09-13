@@ -107,8 +107,8 @@ export class AuthorizeService {
   ) {}
 
   /** GET: reuse a live Session, or render the hosted sign-in page. */
-  begin(request: AuthorizationRequest, ssoToken: string | null): AuthorizeOutcome {
-    const validated = this.validate(request);
+  async begin(request: AuthorizationRequest, ssoToken: string | null): Promise<AuthorizeOutcome> {
+    const validated = await this.validate(request);
     if (validated.kind === 'invalid') return validated.outcome;
 
     const session = this.reusableSession(validated.request, ssoToken);
@@ -127,7 +127,7 @@ export class AuthorizeService {
     ssoToken: string | null,
     context: SignInContext,
   ): Promise<AuthorizationSignInOutcome> {
-    const validated = this.validate(request);
+    const validated = await this.validate(request);
     if (validated.kind === 'invalid') return validated.outcome;
 
     const existing = this.reusableSession(validated.request, ssoToken);
@@ -234,10 +234,10 @@ export class AuthorizeService {
     );
   }
 
-  private validate(request: AuthorizationRequest): Validation {
+  private async validate(request: AuthorizationRequest): Promise<Validation> {
     const clientId = optionalText(request.clientId);
     if (!clientId) return this.errorPage('invalid_client', 'client_id is required');
-    const application = this.applications.findForAuthorization(clientId);
+    const application = await this.applications.findForAuthorization(clientId);
     if (!application) return this.errorPage('invalid_client', 'unknown client_id');
 
     const rawRedirectUri = optionalText(request.redirectUri);

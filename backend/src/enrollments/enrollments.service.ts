@@ -2,6 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { identityState, type IdentityState } from '../identities/identity-state';
 import { SessionsService } from '../sessions/sessions.service';
 import { recordAuditEvent } from '../storage/audit';
+import type { DataAccess } from '../storage/data-access';
 import { isUniqueViolation } from '../storage/sqlite';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
@@ -111,16 +112,16 @@ export class EnrollmentsService {
   /**
    * Remove every Enrollment of one Application (ADR-0007): irreversible
    * Application deletion takes the Application's Enrollments with it, while
-   * the Identities themselves survive untouched. A plain statement so the
-   * caller can compose it into its deletion transaction; returns how many
+   * the Identities themselves survive untouched. Takes the caller's client so
+   * it can compose into their deletion transaction; returns how many
    * Enrollments were removed. There is no per-Enrollment audit event — the
    * deletion event records the collection effect.
    */
-  removeAllForApplication(applicationId: string): number {
-    const removed = this.db
-      .prepare('DELETE FROM enrollments WHERE application_id = ?')
-      .run(applicationId);
-    return Number(removed.changes);
+  async removeAllForApplication(db: DataAccess, applicationId: string): Promise<number> {
+    const removed = await db.run('DELETE FROM enrollments WHERE application_id = ?', [
+      applicationId,
+    ]);
+    return removed.rowCount;
   }
 
   /**

@@ -42,7 +42,7 @@ export type ClientAuthentication =
 export class ClientAuthenticationService {
   constructor(private readonly applications: ApplicationsService) {}
 
-  authenticate(credentials: PresentedCredentials): ClientAuthentication {
+  async authenticate(credentials: PresentedCredentials): Promise<ClientAuthentication> {
     const header = credentials.authorization?.trim();
     const basicHeader = header !== undefined && /^Basic /i.test(header);
     if (header !== undefined && header.length > 0 && !basicHeader) {
@@ -62,7 +62,7 @@ export class ClientAuthenticationService {
 
     const clientId = basic?.clientId ?? credentials.clientId;
     if (!clientId) return { ok: false, description: 'client_id is required' };
-    const application = this.applications.findClient(clientId);
+    const application = await this.applications.findClient(clientId);
     if (!application) return { ok: false, description: 'unknown client' };
 
     const secret = basic ? basic.secret : (credentials.clientSecret ?? undefined);
@@ -74,7 +74,7 @@ export class ClientAuthenticationService {
     }
 
     if (!secret) return { ok: false, description: 'client authentication is required' };
-    if (!this.applications.verifyClientSecret(application.id, secret)) {
+    if (!(await this.applications.verifyClientSecret(application.id, secret))) {
       return { ok: false, description: 'invalid Client Secret' };
     }
     return {

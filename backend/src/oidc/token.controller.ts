@@ -38,7 +38,7 @@ export class TokenController {
     };
     await this.throttle.wait('token', subject);
 
-    const authentication = this.clients.authenticate(credentials);
+    const authentication = await this.clients.authenticate(credentials);
     if (!authentication.ok) {
       this.throttle.record('token', subject);
       sendInvalidClient(res, credentials, authentication.description);

@@ -10,6 +10,7 @@ import { hashToken, randomToken } from '../crypto/password';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { recordAuditEvent } from '../storage/audit';
+import type { DataAccess } from '../storage/data-access';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import {
@@ -121,12 +122,12 @@ export class ApplicationsService {
    * Register an Application. A Web Application additionally receives its first
    * Client Secret, shown once in the returned `clientSecret`.
    */
-  register(input: {
+  async register(input: {
     organizationId: string;
     actor: string;
     name: string;
     type: ApplicationType;
-  }): { application: ApplicationView; clientSecret: string | null } {
+  }): Promise<{ application: ApplicationView; clientSecret: string | null }> {
     const name = input.name.trim();
     if (name.length === 0) throw new BadRequestException('an Application name is required');
     const id = uuid();
@@ -137,14 +138,11 @@ export class ApplicationsService {
     // Registration and the confidential client's first secret are one unit:
     // a Web Application must never exist without the credential that makes it
     // useful, and a failed issuance must not leave a half-registered row.
-    this.db.exec('BEGIN');
-    try {
-      this.db
-        .prepare(
-          `INSERT INTO applications (id, organization_id, name, type, client_id, created_by, created_at, allowed_scopes)
+    const clientSecret = await this.db.transaction(async (tx) => {
+      await tx.run(
+        `INSERT INTO applications (id, organization_id, name, type, client_id, created_by, created_at, allowed_scopes)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
+        [
           id,
           input.organizationId,
           name,
@@ -153,44 +151,45 @@ export class ApplicationsService {
           input.actor,
           now,
           allowedScopes.join(' '),
-        );
+        ],
+      );
 
-      this.audit(input.organizationId, input.actor, 'application.registered', {
-        applicationId: id,
-        name,
-        type: input.type,
-        clientId,
+      await recordAuditEvent(tx, {
+        organizationId: input.organizationId,
+        actor: input.actor,
+        kind: 'application.registered',
+        detail: {
+          applicationId: id,
+          name,
+          type: input.type,
+          clientId,
+        },
       });
 
-      let clientSecret: string | null = null;
-      if (input.type === 'web') {
-        clientSecret = this.issueSecret({
-          organizationId: input.organizationId,
-          applicationId: id,
-          actor: input.actor,
-          label: 'default',
-        }).clientSecret;
-      }
-      this.db.exec('COMMIT');
-      return { application: this.view(input.organizationId, id), clientSecret };
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+      if (input.type !== 'web') return null;
+      const issued = await this.issueSecretWith(tx, {
+        organizationId: input.organizationId,
+        applicationId: id,
+        actor: input.actor,
+        label: 'default',
+      });
+      return issued.clientSecret;
+    });
+
+    return { application: await this.view(this.db, input.organizationId, id), clientSecret };
   }
 
-  list(organizationId: string): ApplicationView[] {
-    const rows = this.db
-      .prepare(
-        `SELECT id, name, type, client_id, disabled_at, deleted_at, created_at, allowed_scopes FROM applications
+  async list(organizationId: string): Promise<ApplicationView[]> {
+    const rows = await this.db.all<ApplicationRow>(
+      `SELECT id, name, type, client_id, disabled_at, deleted_at, created_at, allowed_scopes FROM applications
          WHERE organization_id = ? ORDER BY created_at`,
-      )
-      .all(organizationId) as unknown as ApplicationRow[];
-    return rows.map((row) => this.toView(row));
+      [organizationId],
+    );
+    return Promise.all(rows.map((row) => this.toView(this.db, row)));
   }
 
-  find(organizationId: string, id: string): ApplicationView {
-    return this.view(organizationId, id);
+  async find(organizationId: string, id: string): Promise<ApplicationView> {
+    return this.view(this.db, organizationId, id);
   }
 
   /**
@@ -199,54 +198,80 @@ export class ApplicationsService {
    * platform Sessions survive — a pause is not credential revocation, so the
    * Client Secrets stay valid. Reversible via `enable`; idempotent.
    */
-  disable(input: { organizationId: string; applicationId: string; actor: string }): ApplicationView {
-    const application = this.requireApplication(input.organizationId, input.applicationId);
-    if (application.deleted_at !== null) return this.view(input.organizationId, application.id);
+  async disable(input: {
+    organizationId: string;
+    applicationId: string;
+    actor: string;
+  }): Promise<ApplicationView> {
+    const application = await this.requireApplication(
+      this.db,
+      input.organizationId,
+      input.applicationId,
+    );
+    if (application.deleted_at !== null) {
+      return this.view(this.db, input.organizationId, application.id);
+    }
 
     const now = new Date().toISOString();
     // State change, revocation, and audit are one unit: a paused Application
     // whose app-minted tokens outlive the pause is the lie disable exists to
     // prevent.
-    this.db.exec('BEGIN');
-    try {
-      const changed = this.db
-        .prepare(
-          'UPDATE applications SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL AND deleted_at IS NULL',
-        )
-        .run(now, application.id);
-      if (Number(changed.changes) === 1) {
-        const refreshTokensRevoked = this.sessions.revokeRefreshTokensForApplication(application.id);
-        this.audit(input.organizationId, input.actor, 'application.disabled', {
+    await this.db.transaction(async (tx) => {
+      const changed = await tx.run(
+        'UPDATE applications SET disabled_at = ? WHERE id = ? AND disabled_at IS NULL AND deleted_at IS NULL',
+        [now, application.id],
+      );
+      if (changed.rowCount !== 1) return;
+
+      const refreshTokensRevoked = await this.sessions.revokeRefreshTokensForApplication(
+        tx,
+        application.id,
+      );
+      await recordAuditEvent(tx, {
+        organizationId: input.organizationId,
+        actor: input.actor,
+        kind: 'application.disabled',
+        detail: {
           applicationId: application.id,
           name: application.name,
           refreshTokensRevoked,
-        });
-      }
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-    return this.view(input.organizationId, application.id);
+        },
+      });
+    });
+    return this.view(this.db, input.organizationId, application.id);
   }
 
   /** Reverse the pause. Revoked refresh tokens stay dead (ADR-0007). */
-  enable(input: { organizationId: string; applicationId: string; actor: string }): ApplicationView {
-    const application = this.requireApplication(input.organizationId, input.applicationId);
-    if (application.deleted_at !== null) return this.view(input.organizationId, application.id);
+  async enable(input: {
+    organizationId: string;
+    applicationId: string;
+    actor: string;
+  }): Promise<ApplicationView> {
+    const application = await this.requireApplication(
+      this.db,
+      input.organizationId,
+      input.applicationId,
+    );
+    if (application.deleted_at !== null) {
+      return this.view(this.db, input.organizationId, application.id);
+    }
 
-    const changed = this.db
-      .prepare(
-        'UPDATE applications SET disabled_at = NULL WHERE id = ? AND disabled_at IS NOT NULL AND deleted_at IS NULL',
-      )
-      .run(application.id);
-    if (Number(changed.changes) === 1) {
-      this.audit(input.organizationId, input.actor, 'application.enabled', {
-        applicationId: application.id,
-        name: application.name,
+    const changed = await this.db.run(
+      'UPDATE applications SET disabled_at = NULL WHERE id = ? AND disabled_at IS NOT NULL AND deleted_at IS NULL',
+      [application.id],
+    );
+    if (changed.rowCount === 1) {
+      await recordAuditEvent(this.db, {
+        organizationId: input.organizationId,
+        actor: input.actor,
+        kind: 'application.enabled',
+        detail: {
+          applicationId: application.id,
+          name: application.name,
+        },
       });
     }
-    return this.view(input.organizationId, application.id);
+    return this.view(this.db, input.organizationId, application.id);
   }
 
   /**
@@ -256,58 +281,69 @@ export class ApplicationsService {
    * surviving audit trail. Identities are never touched: the Organization owns
    * them, so even Identities left with no Enrollments survive. Idempotent.
    */
-  remove(input: { organizationId: string; applicationId: string; actor: string }): ApplicationView {
-    const application = this.requireApplication(input.organizationId, input.applicationId);
-    if (application.deleted_at !== null) return this.view(input.organizationId, application.id);
+  async remove(input: {
+    organizationId: string;
+    applicationId: string;
+    actor: string;
+  }): Promise<ApplicationView> {
+    const application = await this.requireApplication(
+      this.db,
+      input.organizationId,
+      input.applicationId,
+    );
+    if (application.deleted_at !== null) {
+      return this.view(this.db, input.organizationId, application.id);
+    }
 
     const now = new Date().toISOString();
     const pseudonym = deletedApplicationPseudonym(application.id);
 
-    this.db.exec('BEGIN');
-    try {
+    await this.db.transaction(async (tx) => {
       // The terminal marker is the race-free arbiter: a concurrent second
-      // delete rolls back without duplicating the event or re-pseudonymizing.
-      const marked = this.db
-        .prepare(
-          'UPDATE applications SET name = ?, disabled_at = COALESCE(disabled_at, ?), deleted_at = ? WHERE id = ? AND deleted_at IS NULL',
-        )
-        .run(pseudonym, now, now, application.id);
-      if (Number(marked.changes) !== 1) {
-        this.db.exec('ROLLBACK');
-        return this.view(input.organizationId, application.id);
-      }
-      const secrets = this.db
-        .prepare(
-          `UPDATE client_secrets SET revoked_at = ?, revoked_by = ?
+      // delete commits without duplicating the event or re-pseudonymizing.
+      const marked = await tx.run(
+        'UPDATE applications SET name = ?, disabled_at = COALESCE(disabled_at, ?), deleted_at = ? WHERE id = ? AND deleted_at IS NULL',
+        [pseudonym, now, now, application.id],
+      );
+      if (marked.rowCount !== 1) return;
+
+      const secrets = await tx.run(
+        `UPDATE client_secrets SET revoked_at = ?, revoked_by = ?
             WHERE application_id = ? AND revoked_at IS NULL`,
-        )
-        .run(now, input.actor, application.id);
-      const refreshTokensRevoked = this.sessions.revokeRefreshTokensForApplication(application.id);
-      const enrollmentsRemoved = this.enrollments.removeAllForApplication(application.id);
+        [now, input.actor, application.id],
+      );
+      const refreshTokensRevoked = await this.sessions.revokeRefreshTokensForApplication(
+        tx,
+        application.id,
+      );
+      const enrollmentsRemoved = await this.enrollments.removeAllForApplication(
+        tx,
+        application.id,
+      );
       // The durable key is the applicationId; the human-facing name in
       // historical details is PII, so the surviving trail is re-attributed to
       // the pseudonymous shell.
-      this.db
-        .prepare(
-          `UPDATE audit_events SET detail = json_set(detail, '$.name', ?)
+      await tx.run(
+        `UPDATE audit_events SET detail = json_set(detail, '$.name', ?)
             WHERE organization_id = ?
               AND json_extract(detail, '$.applicationId') = ?
               AND json_extract(detail, '$.name') IS NOT NULL`,
-        )
-        .run(pseudonym, input.organizationId, application.id);
-      this.audit(input.organizationId, input.actor, 'application.deleted', {
-        applicationId: application.id,
-        pseudonym,
-        enrollmentsRemoved,
-        secretsRevoked: Number(secrets.changes),
-        refreshTokensRevoked,
+        [pseudonym, input.organizationId, application.id],
+      );
+      await recordAuditEvent(tx, {
+        organizationId: input.organizationId,
+        actor: input.actor,
+        kind: 'application.deleted',
+        detail: {
+          applicationId: application.id,
+          pseudonym,
+          enrollmentsRemoved,
+          secretsRevoked: secrets.rowCount,
+          refreshTokensRevoked,
+        },
       });
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-    return this.view(input.organizationId, application.id);
+    });
+    return this.view(this.db, input.organizationId, application.id);
   }
 
   /**
@@ -316,34 +352,30 @@ export class ApplicationsService {
    * an unknown client; the caller decides how to refuse without leaking which
    * part was wrong.
    */
-  findForAuthorization(clientId: string): AuthorizeClient | undefined {
-    const row = this.db
-      .prepare(
-        `SELECT a.id, a.client_id, a.organization_id, a.name, a.type, a.disabled_at, a.deleted_at,
+  async findForAuthorization(clientId: string): Promise<AuthorizeClient | undefined> {
+    const row = await this.db.get<{
+      id: string;
+      client_id: string;
+      organization_id: string;
+      organization_name: string;
+      name: string;
+      type: ApplicationType;
+      disabled_at: string | null;
+      deleted_at: string | null;
+      allowed_scopes: string;
+    }>(
+      `SELECT a.id, a.client_id, a.organization_id, a.name, a.type, a.disabled_at, a.deleted_at,
                 a.allowed_scopes, o.name AS organization_name
          FROM applications a JOIN organizations o ON o.id = a.organization_id
          WHERE a.client_id = ?`,
-      )
-      .get(clientId) as
-      | {
-          id: string;
-          client_id: string;
-          organization_id: string;
-          organization_name: string;
-          name: string;
-          type: ApplicationType;
-          disabled_at: string | null;
-          deleted_at: string | null;
-          allowed_scopes: string;
-        }
-      | undefined;
+      [clientId],
+    );
     if (!row) return undefined;
 
-    const redirectUris = this.db
-      .prepare(
-        'SELECT uri FROM redirect_uris WHERE application_id = ? ORDER BY created_at, id',
-      )
-      .all(row.id) as unknown as Array<{ uri: string }>;
+    const redirectUris = await this.db.all<{ uri: string }>(
+      'SELECT uri FROM redirect_uris WHERE application_id = ? ORDER BY created_at, id',
+      [row.id],
+    );
     return {
       id: row.id,
       clientId: row.client_id,
@@ -358,22 +390,19 @@ export class ApplicationsService {
   }
 
   /** Resolve a Client ID at the token boundary; no redirect URIs needed there. */
-  findClient(clientId: string): ClientRecord | undefined {
-    const row = this.db
-      .prepare(
-        'SELECT id, client_id, organization_id, type, disabled_at, deleted_at, allowed_scopes FROM applications WHERE client_id = ?',
-      )
-      .get(clientId) as
-      | {
-          id: string;
-          client_id: string;
-          organization_id: string;
-          type: ApplicationType;
-          disabled_at: string | null;
-          deleted_at: string | null;
-          allowed_scopes: string;
-        }
-      | undefined;
+  async findClient(clientId: string): Promise<ClientRecord | undefined> {
+    const row = await this.db.get<{
+      id: string;
+      client_id: string;
+      organization_id: string;
+      type: ApplicationType;
+      disabled_at: string | null;
+      deleted_at: string | null;
+      allowed_scopes: string;
+    }>(
+      'SELECT id, client_id, organization_id, type, disabled_at, deleted_at, allowed_scopes FROM applications WHERE client_id = ?',
+      [clientId],
+    );
     if (!row) return undefined;
     return {
       id: row.id,
@@ -391,13 +420,12 @@ export class ApplicationsService {
    * revoked secret simply is not in the active set any more. Secrets are
    * high-entropy, so comparing their stored hashes is the verification.
    */
-  verifyClientSecret(applicationId: string, secret: string): boolean {
+  async verifyClientSecret(applicationId: string, secret: string): Promise<boolean> {
     const presented = Buffer.from(hashToken(secret));
-    const hashes = this.db
-      .prepare(
-        'SELECT secret_hash FROM client_secrets WHERE application_id = ? AND revoked_at IS NULL',
-      )
-      .all(applicationId) as unknown as Array<{ secret_hash: string }>;
+    const hashes = await this.db.all<{ secret_hash: string }>(
+      'SELECT secret_hash FROM client_secrets WHERE application_id = ? AND revoked_at IS NULL',
+      [applicationId],
+    );
     for (const row of hashes) {
       const stored = Buffer.from(row.secret_hash);
       if (stored.length === presented.length && timingSafeEqual(stored, presented)) return true;
@@ -409,13 +437,33 @@ export class ApplicationsService {
    * Issue an additional labeled Client Secret for a Web Application, returning
    * the plaintext once. Public clients are structurally refused.
    */
-  issueSecret(input: {
+  async issueSecret(input: {
     organizationId: string;
     applicationId: string;
     actor: string;
     label: string;
-  }): { secret: SecretView; clientSecret: string } {
-    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
+  }): Promise<{ secret: SecretView; clientSecret: string }> {
+    return this.issueSecretWith(this.db, input);
+  }
+
+  /**
+   * The issuance itself, on the caller's client so registration can mint the
+   * first secret inside its own transaction.
+   */
+  private async issueSecretWith(
+    db: DataAccess,
+    input: {
+      organizationId: string;
+      applicationId: string;
+      actor: string;
+      label: string;
+    },
+  ): Promise<{ secret: SecretView; clientSecret: string }> {
+    const application = await this.requireMutableApplication(
+      db,
+      input.organizationId,
+      input.applicationId,
+    );
     if (application.type !== 'web') {
       throw new BadRequestException(
         'a SPA/Mobile Application is never issued a Client Secret',
@@ -427,17 +475,21 @@ export class ApplicationsService {
     const label = input.label.trim();
     if (label.length === 0) throw new BadRequestException('a Client Secret label is required');
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO client_secrets (id, application_id, label, secret_hash, created_by, created_at)
+    await db.run(
+      `INSERT INTO client_secrets (id, application_id, label, secret_hash, created_by, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(secretId, input.applicationId, label, hashToken(clientSecret), input.actor, now);
+      [secretId, input.applicationId, label, hashToken(clientSecret), input.actor, now],
+    );
 
-    this.audit(input.organizationId, input.actor, 'client_secret.generated', {
-      applicationId: input.applicationId,
-      secretId,
-      label,
+    await recordAuditEvent(db, {
+      organizationId: input.organizationId,
+      actor: input.actor,
+      kind: 'client_secret.generated',
+      detail: {
+        applicationId: input.applicationId,
+        secretId,
+        label,
+      },
     });
 
     return { secret: { id: secretId, label, createdAt: now, revokedAt: null }, clientSecret };
@@ -447,30 +499,39 @@ export class ApplicationsService {
    * Revoke one secret by id, leaving every sibling untouched. Idempotent: a
    * second revoke of a dead secret is not an error, it simply changes nothing.
    */
-  revokeSecret(input: {
+  async revokeSecret(input: {
     organizationId: string;
     applicationId: string;
     secretId: string;
     actor: string;
-  }): SecretView {
-    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
-    const row = this.db
-      .prepare('SELECT id, label, created_at, revoked_at FROM client_secrets WHERE id = ? AND application_id = ?')
-      .get(input.secretId, application.id) as SecretRow | undefined;
+  }): Promise<SecretView> {
+    const application = await this.requireMutableApplication(
+      this.db,
+      input.organizationId,
+      input.applicationId,
+    );
+    const row = await this.db.get<SecretRow>(
+      'SELECT id, label, created_at, revoked_at FROM client_secrets WHERE id = ? AND application_id = ?',
+      [input.secretId, application.id],
+    );
     if (!row) throw new NotFoundException('no such Client Secret');
 
     if (row.revoked_at === null) {
       const now = new Date().toISOString();
-      this.db
-        .prepare(
-          `UPDATE client_secrets SET revoked_at = ?, revoked_by = ?
+      await this.db.run(
+        `UPDATE client_secrets SET revoked_at = ?, revoked_by = ?
            WHERE id = ? AND revoked_at IS NULL`,
-        )
-        .run(now, input.actor, input.secretId);
-      this.audit(input.organizationId, input.actor, 'client_secret.revoked', {
-        applicationId: application.id,
-        secretId: input.secretId,
-        label: row.label,
+        [now, input.actor, input.secretId],
+      );
+      await recordAuditEvent(this.db, {
+        organizationId: input.organizationId,
+        actor: input.actor,
+        kind: 'client_secret.revoked',
+        detail: {
+          applicationId: application.id,
+          secretId: input.secretId,
+          label: row.label,
+        },
       });
       row.revoked_at = now;
     }
@@ -484,39 +545,42 @@ export class ApplicationsService {
    * authorization endpoint will later compare against. Duplicates are refused
    * so a URI has at most one identity per Application.
    */
-  addRedirectUri(input: {
+  async addRedirectUri(input: {
     organizationId: string;
     applicationId: string;
     actor: string;
     uri: string;
-  }): RedirectUriView {
-    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
+  }): Promise<RedirectUriView> {
+    const application = await this.requireMutableApplication(
+      this.db,
+      input.organizationId,
+      input.applicationId,
+    );
     const uri = validateRedirectUri(input.uri);
-    this.refuseDuplicateRedirectUri(application.id, uri);
+    await this.refuseDuplicateRedirectUri(this.db, application.id, uri);
 
     const id = uuid();
     const now = new Date().toISOString();
     // The change and its audit event are one unit: a persisted redirect URI
     // with no event beside it is the silent code-interception primitive
     // ADR-0010 exists to prevent.
-    this.db.exec('BEGIN');
-    try {
-      this.db
-        .prepare(
-          `INSERT INTO redirect_uris (id, application_id, uri, created_by, created_at)
+    await this.db.transaction(async (tx) => {
+      await tx.run(
+        `INSERT INTO redirect_uris (id, application_id, uri, created_by, created_at)
            VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(id, application.id, uri, input.actor, now);
-      this.audit(input.organizationId, input.actor, 'redirect_uri.added', {
-        applicationId: application.id,
-        uriId: id,
-        uri,
+        [id, application.id, uri, input.actor, now],
+      );
+      await recordAuditEvent(tx, {
+        organizationId: input.organizationId,
+        actor: input.actor,
+        kind: 'redirect_uri.added',
+        detail: {
+          applicationId: application.id,
+          uriId: id,
+          uri,
+        },
       });
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+    });
     return { id, uri, createdAt: now, updatedAt: null };
   }
 
@@ -525,63 +589,75 @@ export class ApplicationsService {
    * same as for an addition; the prior value rides along in the audit event so
    * the exact change is answerable after the fact.
    */
-  updateRedirectUri(input: {
+  async updateRedirectUri(input: {
     organizationId: string;
     applicationId: string;
     uriId: string;
     actor: string;
     uri: string;
-  }): RedirectUriView {
-    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
-    const row = this.requireRedirectUri(application.id, input.uriId);
+  }): Promise<RedirectUriView> {
+    const application = await this.requireMutableApplication(
+      this.db,
+      input.organizationId,
+      input.applicationId,
+    );
+    const row = await this.requireRedirectUri(this.db, application.id, input.uriId);
     const uri = validateRedirectUri(input.uri);
     if (uri === row.uri) return this.redirectUriView(row);
 
-    this.refuseDuplicateRedirectUri(application.id, uri, row.id);
+    await this.refuseDuplicateRedirectUri(this.db, application.id, uri, row.id);
     const now = new Date().toISOString();
-    this.db.exec('BEGIN');
-    try {
-      this.db
-        .prepare('UPDATE redirect_uris SET uri = ?, updated_by = ?, updated_at = ? WHERE id = ?')
-        .run(uri, input.actor, now, row.id);
-      this.audit(input.organizationId, input.actor, 'redirect_uri.updated', {
-        applicationId: application.id,
-        uriId: row.id,
-        previousUri: row.uri,
+    await this.db.transaction(async (tx) => {
+      await tx.run('UPDATE redirect_uris SET uri = ?, updated_by = ?, updated_at = ? WHERE id = ?', [
         uri,
+        input.actor,
+        now,
+        row.id,
+      ]);
+      await recordAuditEvent(tx, {
+        organizationId: input.organizationId,
+        actor: input.actor,
+        kind: 'redirect_uri.updated',
+        detail: {
+          applicationId: application.id,
+          uriId: row.id,
+          previousUri: row.uri,
+          uri,
+        },
       });
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+    });
     return { id: row.id, uri, createdAt: row.created_at, updatedAt: now };
   }
 
   /** Remove a redirect URI. There is no prefix or wildcard echo to clean up. */
-  removeRedirectUri(input: {
+  async removeRedirectUri(input: {
     organizationId: string;
     applicationId: string;
     uriId: string;
     actor: string;
-  }): RedirectUriView {
-    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
-    const row = this.requireRedirectUri(application.id, input.uriId);
-    this.db.exec('BEGIN');
-    try {
-      this.db
-        .prepare('DELETE FROM redirect_uris WHERE id = ? AND application_id = ?')
-        .run(row.id, application.id);
-      this.audit(input.organizationId, input.actor, 'redirect_uri.removed', {
-        applicationId: application.id,
-        uriId: row.id,
-        uri: row.uri,
+  }): Promise<RedirectUriView> {
+    const application = await this.requireMutableApplication(
+      this.db,
+      input.organizationId,
+      input.applicationId,
+    );
+    const row = await this.requireRedirectUri(this.db, application.id, input.uriId);
+    await this.db.transaction(async (tx) => {
+      await tx.run('DELETE FROM redirect_uris WHERE id = ? AND application_id = ?', [
+        row.id,
+        application.id,
+      ]);
+      await recordAuditEvent(tx, {
+        organizationId: input.organizationId,
+        actor: input.actor,
+        kind: 'redirect_uri.removed',
+        detail: {
+          applicationId: application.id,
+          uriId: row.id,
+          uri: row.uri,
+        },
       });
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+    });
     return this.redirectUriView(row);
   }
 
@@ -593,13 +669,17 @@ export class ApplicationsService {
    * lever: narrowing integration configuration is not a destructive or
    * credential-issuing action.
    */
-  setScopes(input: {
+  async setScopes(input: {
     organizationId: string;
     applicationId: string;
     actor: string;
     scopes: unknown;
-  }): ApplicationView {
-    const application = this.requireMutableApplication(input.organizationId, input.applicationId);
+  }): Promise<ApplicationView> {
+    const application = await this.requireMutableApplication(
+      this.db,
+      input.organizationId,
+      input.applicationId,
+    );
     const scopes = parseConfiguredScope(input.scopes);
     if (!scopes) {
       throw new BadRequestException(
@@ -607,44 +687,55 @@ export class ApplicationsService {
       );
     }
     const previous = splitScope(application.allowed_scopes);
-    if (previous.join(' ') === scopes.join(' ')) return this.toView(application);
+    if (previous.join(' ') === scopes.join(' ')) return this.toView(this.db, application);
 
-    this.db.exec('BEGIN');
-    try {
-      this.db
-        .prepare('UPDATE applications SET allowed_scopes = ? WHERE id = ?')
-        .run(scopes.join(' '), application.id);
-      this.audit(input.organizationId, input.actor, 'application.scopes.updated', {
-        applicationId: application.id,
-        previousScopes: previous,
-        scopes,
+    await this.db.transaction(async (tx) => {
+      await tx.run('UPDATE applications SET allowed_scopes = ? WHERE id = ?', [
+        scopes.join(' '),
+        application.id,
+      ]);
+      await recordAuditEvent(tx, {
+        organizationId: input.organizationId,
+        actor: input.actor,
+        kind: 'application.scopes.updated',
+        detail: {
+          applicationId: application.id,
+          previousScopes: previous,
+          scopes,
+        },
       });
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
-    return this.view(input.organizationId, application.id);
+    });
+    return this.view(this.db, input.organizationId, application.id);
   }
 
-  private requireRedirectUri(applicationId: string, uriId: string): RedirectUriRow {
-    const row = this.db
-      .prepare(
-        'SELECT id, uri, created_at, updated_at FROM redirect_uris WHERE id = ? AND application_id = ?',
-      )
-      .get(uriId, applicationId) as RedirectUriRow | undefined;
+  private async requireRedirectUri(
+    db: DataAccess,
+    applicationId: string,
+    uriId: string,
+  ): Promise<RedirectUriRow> {
+    const row = await db.get<RedirectUriRow>(
+      'SELECT id, uri, created_at, updated_at FROM redirect_uris WHERE id = ? AND application_id = ?',
+      [uriId, applicationId],
+    );
     if (!row) throw new NotFoundException('no such redirect URI');
     return row;
   }
 
-  private refuseDuplicateRedirectUri(applicationId: string, uri: string, exceptId?: string): void {
+  private async refuseDuplicateRedirectUri(
+    db: DataAccess,
+    applicationId: string,
+    uri: string,
+    exceptId?: string,
+  ): Promise<void> {
     const duplicate = exceptId
-      ? this.db
-          .prepare('SELECT id FROM redirect_uris WHERE application_id = ? AND uri = ? AND id <> ?')
-          .get(applicationId, uri, exceptId)
-      : this.db
-          .prepare('SELECT id FROM redirect_uris WHERE application_id = ? AND uri = ?')
-          .get(applicationId, uri);
+      ? await db.get(
+          'SELECT id FROM redirect_uris WHERE application_id = ? AND uri = ? AND id <> ?',
+          [applicationId, uri, exceptId],
+        )
+      : await db.get('SELECT id FROM redirect_uris WHERE application_id = ? AND uri = ?', [
+          applicationId,
+          uri,
+        ]);
     if (duplicate) throw new ConflictException('this redirect URI is already registered');
   }
 
@@ -662,12 +753,15 @@ export class ApplicationsService {
     return row.disabled_at === null && row.deleted_at === null;
   }
 
-  private requireApplication(organizationId: string, id: string): ApplicationRow {
-    const row = this.db
-      .prepare(
-        'SELECT id, name, type, client_id, disabled_at, deleted_at, created_at, allowed_scopes FROM applications WHERE id = ? AND organization_id = ?',
-      )
-      .get(id, organizationId) as ApplicationRow | undefined;
+  private async requireApplication(
+    db: DataAccess,
+    organizationId: string,
+    id: string,
+  ): Promise<ApplicationRow> {
+    const row = await db.get<ApplicationRow>(
+      'SELECT id, name, type, client_id, disabled_at, deleted_at, created_at, allowed_scopes FROM applications WHERE id = ? AND organization_id = ?',
+      [id, organizationId],
+    );
     if (!row) throw new NotFoundException('no such Application');
     return row;
   }
@@ -678,29 +772,31 @@ export class ApplicationsService {
    * redirect mutation goes through here so "credentials revoked immediately"
    * cannot be undone by minting a replacement after deletion (ADR-0007).
    */
-  private requireMutableApplication(organizationId: string, id: string): ApplicationRow {
-    const application = this.requireApplication(organizationId, id);
+  private async requireMutableApplication(
+    db: DataAccess,
+    organizationId: string,
+    id: string,
+  ): Promise<ApplicationRow> {
+    const application = await this.requireApplication(db, organizationId, id);
     if (application.deleted_at !== null) {
       throw new ConflictException('the Application has been deleted and cannot be changed');
     }
     return application;
   }
 
-  private view(organizationId: string, id: string): ApplicationView {
-    return this.toView(this.requireApplication(organizationId, id));
+  private async view(db: DataAccess, organizationId: string, id: string): Promise<ApplicationView> {
+    return this.toView(db, await this.requireApplication(db, organizationId, id));
   }
 
-  private toView(row: ApplicationRow): ApplicationView {
-    const secrets = this.db
-      .prepare(
-        'SELECT id, label, created_at, revoked_at FROM client_secrets WHERE application_id = ? ORDER BY created_at, id',
-      )
-      .all(row.id) as unknown as SecretRow[];
-    const redirectUris = this.db
-      .prepare(
-        'SELECT id, uri, created_at, updated_at FROM redirect_uris WHERE application_id = ? ORDER BY created_at, id',
-      )
-      .all(row.id) as unknown as RedirectUriRow[];
+  private async toView(db: DataAccess, row: ApplicationRow): Promise<ApplicationView> {
+    const secrets = await db.all<SecretRow>(
+      'SELECT id, label, created_at, revoked_at FROM client_secrets WHERE application_id = ? ORDER BY created_at, id',
+      [row.id],
+    );
+    const redirectUris = await db.all<RedirectUriRow>(
+      'SELECT id, uri, created_at, updated_at FROM redirect_uris WHERE application_id = ? ORDER BY created_at, id',
+      [row.id],
+    );
     return {
       id: row.id,
       name: row.name,
@@ -720,14 +816,5 @@ export class ApplicationsService {
       })),
       redirectUris: redirectUris.map((entry) => this.redirectUriView(entry)),
     };
-  }
-
-  private audit(
-    organizationId: string,
-    actor: string,
-    kind: string,
-    detail: Record<string, unknown>,
-  ): void {
-    recordAuditEvent(this.db, { organizationId, actor, kind, detail });
   }
 }

@@ -4,6 +4,7 @@ import { parseTtlMs } from '../config/env';
 import { identityGate } from '../identities/identity-state';
 import { OrganizationSettingsService } from '../settings/organization-settings.service';
 import { recordAuditEvent } from '../storage/audit';
+import type { DataAccess } from '../storage/data-access';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 
@@ -259,16 +260,15 @@ export class SessionsService {
    * Revoke every refresh token minted through one Application's flows
    * (ADR-0007), leaving every Session — and every other Application's tokens —
    * alive. Used by the Application Disabled pause and by irreversible
-   * Application deletion. A plain statement so callers can compose it into
-   * their own transaction; idempotent by the `revoked_at IS NULL` guard.
+   * Application deletion. Takes the caller's client so it can compose into
+   * their transaction; idempotent by the `revoked_at IS NULL` guard.
    */
-  revokeRefreshTokensForApplication(applicationId: string): number {
-    const changed = this.db
-      .prepare(
-        'UPDATE refresh_tokens SET revoked_at = ? WHERE application_id = ? AND revoked_at IS NULL',
-      )
-      .run(new Date().toISOString(), applicationId);
-    return Number(changed.changes);
+  async revokeRefreshTokensForApplication(db: DataAccess, applicationId: string): Promise<number> {
+    const changed = await db.run(
+      'UPDATE refresh_tokens SET revoked_at = ? WHERE application_id = ? AND revoked_at IS NULL',
+      [new Date().toISOString(), applicationId],
+    );
+    return changed.rowCount;
   }
 
   /** One revoke-many unit: every row dies, one collection audit event lives. */

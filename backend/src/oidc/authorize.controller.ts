@@ -39,8 +39,11 @@ export class AuthorizeController {
   ) {}
 
   @Get('authorize')
-  begin(@Req() req: Request, @Res() res: Response): void {
-    this.render(this.authorize.begin(readAuthorizationRequest(req), ssoTokenFrom(req)), res);
+  async begin(@Req() req: Request, @Res() res: Response): Promise<void> {
+    this.render(
+      await this.authorize.begin(readAuthorizationRequest(req), ssoTokenFrom(req)),
+      res,
+    );
   }
 
   @Post('authorize')

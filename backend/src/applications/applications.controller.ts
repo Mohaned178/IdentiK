@@ -75,10 +75,10 @@ export class ApplicationsController {
   ) {}
 
   @Post()
-  register(
+  async register(
     @Req() req: AdministratorRequest,
     @Body() body: RegisterApplicationBody,
-  ): { application: ApplicationView; clientSecret: string | null } {
+  ): Promise<{ application: ApplicationView; clientSecret: string | null }> {
     const session = requireAdministratorSession(req);
     if (body.type === 'web') {
       assertOwner(
@@ -95,18 +95,18 @@ export class ApplicationsController {
   }
 
   @Get()
-  list(@Req() req: AdministratorRequest): { applications: ApplicationView[] } {
+  async list(@Req() req: AdministratorRequest): Promise<{ applications: ApplicationView[] }> {
     const session = requireAdministratorSession(req);
-    return { applications: this.applications.list(session.organizationId) };
+    return { applications: await this.applications.list(session.organizationId) };
   }
 
   @Get(':id')
-  find(
+  async find(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
-  ): { application: ApplicationView } {
+  ): Promise<{ application: ApplicationView }> {
     const session = requireAdministratorSession(req);
-    return { application: this.applications.find(session.organizationId, id) };
+    return { application: await this.applications.find(session.organizationId, id) };
   }
 
   /**
@@ -116,13 +116,13 @@ export class ApplicationsController {
    */
   @Post(':id/disable')
   @HttpCode(200)
-  disable(
+  async disable(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
-  ): { application: ApplicationView } {
+  ): Promise<{ application: ApplicationView }> {
     const session = requireAdministratorSession(req);
     return {
-      application: this.applications.disable({
+      application: await this.applications.disable({
         organizationId: session.organizationId,
         applicationId: id,
         actor: session.administratorId,
@@ -132,13 +132,13 @@ export class ApplicationsController {
 
   @Post(':id/enable')
   @HttpCode(200)
-  enable(
+  async enable(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
-  ): { application: ApplicationView } {
+  ): Promise<{ application: ApplicationView }> {
     const session = requireAdministratorSession(req);
     return {
-      application: this.applications.enable({
+      application: await this.applications.enable({
         organizationId: session.organizationId,
         applicationId: id,
         actor: session.administratorId,
@@ -155,11 +155,11 @@ export class ApplicationsController {
    */
   @Delete(':id')
   @UseGuards(OwnerGuard)
-  delete(
+  async delete(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
     @Body() body: { confirm?: unknown },
-  ): { application: ApplicationView } {
+  ): Promise<{ application: ApplicationView }> {
     const session = requireAdministratorSession(req);
     if (body?.confirm !== true) {
       throw new BadRequestException(
@@ -168,7 +168,7 @@ export class ApplicationsController {
       );
     }
     return {
-      application: this.applications.remove({
+      application: await this.applications.remove({
         organizationId: session.organizationId,
         applicationId: id,
         actor: session.administratorId,
@@ -230,11 +230,11 @@ export class ApplicationsController {
 
   @Post(':id/secrets')
   @UseGuards(OwnerGuard)
-  issueSecret(
+  async issueSecret(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
     @Body() body: GenerateSecretBody,
-  ): { secret: SecretView; clientSecret: string } {
+  ): Promise<{ secret: SecretView; clientSecret: string }> {
     const session = requireAdministratorSession(req);
     return this.applications.issueSecret({
       organizationId: session.organizationId,
@@ -247,14 +247,14 @@ export class ApplicationsController {
   @Post(':id/secrets/:secretId/revoke')
   @HttpCode(200)
   @UseGuards(OwnerGuard)
-  revokeSecret(
+  async revokeSecret(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
     @Param('secretId') secretId: string,
-  ): { secret: SecretView } {
+  ): Promise<{ secret: SecretView }> {
     const session = requireAdministratorSession(req);
     return {
-      secret: this.applications.revokeSecret({
+      secret: await this.applications.revokeSecret({
         organizationId: session.organizationId,
         applicationId: id,
         secretId,
@@ -265,14 +265,14 @@ export class ApplicationsController {
 
   @Post(':id/redirect-uris')
   @UseGuards(OwnerGuard)
-  addRedirectUri(
+  async addRedirectUri(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
     @Body() body: RedirectUriBody,
-  ): { redirectUri: RedirectUriView } {
+  ): Promise<{ redirectUri: RedirectUriView }> {
     const session = requireAdministratorSession(req);
     return {
-      redirectUri: this.applications.addRedirectUri({
+      redirectUri: await this.applications.addRedirectUri({
         organizationId: session.organizationId,
         applicationId: id,
         actor: session.administratorId,
@@ -283,15 +283,15 @@ export class ApplicationsController {
 
   @Patch(':id/redirect-uris/:uriId')
   @UseGuards(OwnerGuard)
-  updateRedirectUri(
+  async updateRedirectUri(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
     @Param('uriId') uriId: string,
     @Body() body: RedirectUriBody,
-  ): { redirectUri: RedirectUriView } {
+  ): Promise<{ redirectUri: RedirectUriView }> {
     const session = requireAdministratorSession(req);
     return {
-      redirectUri: this.applications.updateRedirectUri({
+      redirectUri: await this.applications.updateRedirectUri({
         organizationId: session.organizationId,
         applicationId: id,
         uriId,
@@ -303,14 +303,14 @@ export class ApplicationsController {
 
   @Delete(':id/redirect-uris/:uriId')
   @UseGuards(OwnerGuard)
-  removeRedirectUri(
+  async removeRedirectUri(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
     @Param('uriId') uriId: string,
-  ): { redirectUri: RedirectUriView } {
+  ): Promise<{ redirectUri: RedirectUriView }> {
     const session = requireAdministratorSession(req);
     return {
-      redirectUri: this.applications.removeRedirectUri({
+      redirectUri: await this.applications.removeRedirectUri({
         organizationId: session.organizationId,
         applicationId: id,
         uriId,
@@ -327,14 +327,14 @@ export class ApplicationsController {
    * issuing.
    */
   @Put(':id/scopes')
-  configureScopes(
+  async configureScopes(
     @Req() req: AdministratorRequest,
     @Param('id') id: string,
     @Body() body: ConfigureScopesBody,
-  ): { application: ApplicationView } {
+  ): Promise<{ application: ApplicationView }> {
     const session = requireAdministratorSession(req);
     return {
-      application: this.applications.setScopes({
+      application: await this.applications.setScopes({
         organizationId: session.organizationId,
         applicationId: id,
         actor: session.administratorId,

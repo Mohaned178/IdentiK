@@ -4,9 +4,9 @@
 
 **Blocked by:** 02 (async data-access facade)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The applications module uses only the async contract for storage; no synchronous statements remain
-- [ ] Every transaction in the module uses the contract's transaction
-- [ ] Exact-match redirect URI behavior, secret issuance, and disable/delete semantics are unchanged
-- [ ] The full end-to-end suite passes unchanged on SQLite
+- [x] The applications module uses only the async contract for storage; no synchronous statements remain
+- [x] Every transaction in the module uses the contract's transaction
+- [x] Exact-match redirect URI behavior, secret issuance, and disable/delete semantics are unchanged
+- [x] The full end-to-end suite passes unchanged on SQLite
