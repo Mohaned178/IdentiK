@@ -44,11 +44,12 @@ migrating straight from the tarball uses the pinned CLI:
 ## Repository layout
 
 ```
-backend/          NestJS service — the only deployable artifact
-e2e/              Vitest end-to-end tests that drive a live Instance over HTTP
-.scratch/         Specs and implementation tickets (the local issue tracker)
-docs/adr/         Architecture Decision Records
-CONTEXT.md        Domain glossary
+backend/                NestJS service — the only deployable artifact
+e2e/                    Vitest end-to-end tests that drive a live Instance over HTTP
+.scratch/               Specs and implementation tickets (the local issue tracker)
+docs/adr/               Architecture Decision Records
+docs/operator-guide.md  The supported deployment envelope for Instance Operators
+CONTEXT.md              Domain glossary
 ```
 
 ## Checks
