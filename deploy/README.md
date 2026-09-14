@@ -26,10 +26,13 @@ The deploy unit is the git checkout at the release tag: `docker-compose.yml`,
 
 ## 1. First install
 
-One time, on the provisioned host:
+One time, on the provisioned host. Automated path (each step is one command with what
+it does in the script header):
 
 ```sh
-# 1. The host baseline is at the end of this document; apply it first.
+# 1. The host baseline: key-only SSH, firewall 22/80/443, unattended updates,
+#    Docker + compose v2 from the official repo, /opt/identik. Idempotent.
+curl -fsSL https://raw.githubusercontent.com/Mohaned178/IdentiK/v0.1.0/deploy/provision.sh | bash
 
 # 2. The checkout, pinned at a released tag.
 install -d -o root -g root -m 0755 /opt/identik
@@ -37,32 +40,29 @@ git clone https://github.com/mohaned178/identik.git /opt/identik
 cd /opt/identik
 git checkout v0.1.0
 
-# 3. The secrets file: root-owned, 0600, gitignored (verify: git check-ignore deploy/.env).
-cd deploy
-cp .env.example .env
-chown root:root .env && chmod 0600 .env
-# Fill it in: POSTGRES_PASSWORD (openssl rand -hex 24), IDENTIK_HOSTNAME,
-# IDENTIK_IMAGE_TAG (the released tag), the SMTP relay values, and
-# IDENTIK_SIGNING_JWKS minted by `docker run --rm <image> keygen`.
-chmod 0755 deploy.sh backup.sh
+# 3. The secrets: generates the PostgreSQL password (openssl rand -hex 24) and
+#    the signing JWKS (via the image's keygen), prompts for hostname + SMTP.
+#    Writes root-owned 0600 deploy/.env (verify: git check-ignore deploy/.env).
+bash deploy/setup-env.sh            # [IMAGE_TAG] defaults to ghcr.io/…/v0.1.0
 
 # 4. Registry access, if the image package is private.
 echo "$GHCR_READ_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
 
-# 5. Boot the database and proxy, then deploy the app through the tested script.
-cd /opt/identik/deploy
-docker compose up -d postgres proxy
-./deploy.sh v0.1.0
+# 5. Boot database + proxy, then the tested deploy sequence, then prints the
+#    one-time setup token. DNS for IDENTIK_HOSTNAME must already point here.
+bash deploy/first-deploy.sh
 
 # 6. Confirm the first-boot state.
-docker compose ps
 curl -fsS "https://<hostname>/api/setup/status"   # completed:false, available:true
 ```
 
-The first boot prints a one-time setup token — capture it immediately, see
+The first boot prints the one-time setup token — capture it immediately, see
 [section 6](#6-first-boot-and-bootstrap). Then install backups
 ([section 8](#8-backups)) and the external probe
 ([section 10](#10-observability-floor)).
+
+Manual alternative: every step above is exactly the procedure below broken out
+by hand (skipped here — the scripts are their runbook).
 
 ## 2. Normal deploy
 
@@ -258,6 +258,17 @@ EOF
 chmod 0644 /etc/cron.d/identik-backup
 ```
 
+Automated alternative — `backup-setup.sh` scaffolds `backup.conf` from your
+answers (generating an age identity when the destination is not private),
+runs the first backup by hand, and installs the crontab itself:
+
+```sh
+cd /opt/identik/deploy
+# Must be finished before running it: an off-site destination with write
+# access from this host. The offsite command receives the staging dir as $1.
+bash backup-setup.sh
+```
+
 The script fails loudly (non-zero exit) on any step: dump, checksum, `.env`
 copy, off-host copy, or off-host prune. Check freshness and integrity with:
 
@@ -325,6 +336,15 @@ Metrics, tracing, and log aggregation are deferred. The floor is:
   probe is not a monitor.
 - **Container logs**: stdout/stderr with json-file rotation caps of 10 MB × 3
   per service, set in `docker-compose.yml`.
+
+Setup helper — after the stack is up, `probe-setup.sh` verifies readiness from
+the host and prints the exact values to paste into the external monitor
+(URL, keyword, interval, alert threshold, TLS-expiry check):
+
+```sh
+cd /opt/identik/deploy
+bash probe-setup.sh
+```
 
 How to check the Instance:
 
