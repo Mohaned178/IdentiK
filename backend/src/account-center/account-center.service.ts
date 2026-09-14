@@ -90,8 +90,8 @@ export class AccountCenterService {
     return rows.map((row) => ({
       applicationId: row.applicationId,
       name: row.application.name,
-      type: row.application.type as ApplicationType,
-      enrolledAt: row.createdAt,
+      type: row.application.type,
+      enrolledAt: row.createdAt.toISOString(),
       suspended: row.suspendedAt !== null,
     }));
   }

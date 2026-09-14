@@ -1,6 +1,7 @@
-// Stage 1 of the PostgreSQL + Prisma migration keeps the legacy storage
-// shapes (text timestamps, integer booleans, string enum columns) so the
-// engine swap is behavior-preserving. Native types land in Stage 2.
+// Stage 2 of the PostgreSQL + Prisma migration: the schema expresses its own
+// invariants with native types — boolean verification state, timezone-aware
+// millisecond instants, JSONB audit detail, and closed enums — instead of
+// integer, text, and CHECK-constraint encodings.
 //
 // Table and column names are mapped to the existing snake_case vocabulary so
 // raw exceptions and the domain language stay stable.
@@ -15,10 +16,31 @@ datasource db {
   provider = "postgresql"
 }
 
+enum AdministratorRole {
+  owner
+  member
+}
+
+enum IdentityTokenKind {
+  email_verification
+  password_reset
+}
+
+enum ApplicationType {
+  web
+  spa
+}
+
+enum OrganizationSettingKey {
+  branding
+  password_policy
+  session_policy
+}
+
 model Organization {
-  id        String @id
+  id        String   @id
   name      String
-  createdAt String @map("created_at")
+  createdAt DateTime @map("created_at") @db.Timestamptz(3)
 
   memberships              Membership[]
   auditEvents              AuditEvent[]
@@ -33,11 +55,11 @@ model Organization {
 }
 
 model Administrator {
-  id           String @id
-  email        String @unique
+  id           String   @id
+  email        String   @unique
   name         String
-  passwordHash String @map("password_hash")
-  createdAt    String @map("created_at")
+  passwordHash String   @map("password_hash")
+  createdAt    DateTime @map("created_at") @db.Timestamptz(3)
 
   memberships                 Membership[]
   administratorInvitations    AdministratorInvitation[]
@@ -52,10 +74,10 @@ model Administrator {
 }
 
 model Membership {
-  id              String @id
-  organizationId  String @map("organization_id")
-  administratorId String @map("administrator_id")
-  role            String
+  id              String            @id
+  organizationId  String            @map("organization_id")
+  administratorId String            @map("administrator_id")
+  role            AdministratorRole
 
   organization  Organization  @relation(fields: [organizationId], references: [id])
   administrator Administrator @relation(fields: [administratorId], references: [id])
@@ -66,12 +88,12 @@ model Membership {
 }
 
 model AdminSession {
-  id           String  @id
-  membershipId String  @map("membership_id")
-  tokenHash    String  @unique @map("token_hash")
-  createdAt    String  @map("created_at")
-  expiresAt    String  @map("expires_at")
-  revokedAt    String? @map("revoked_at")
+  id           String    @id
+  membershipId String    @map("membership_id")
+  tokenHash    String    @unique @map("token_hash")
+  createdAt    DateTime  @map("created_at") @db.Timestamptz(3)
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt    DateTime? @map("revoked_at") @db.Timestamptz(3)
 
   membership Membership @relation(fields: [membershipId], references: [id])
 
@@ -79,13 +101,13 @@ model AdminSession {
 }
 
 model AuditEvent {
-  id             String  @id
-  organizationId String? @map("organization_id")
+  id             String   @id
+  organizationId String?  @map("organization_id")
   kind           String
   actor          String
-  detail         String
-  occurredAt     String  @map("occurred_at")
-  seq            Int     @unique @default(autoincrement())
+  detail         Json     @db.JsonB
+  occurredAt     DateTime @map("occurred_at") @db.Timestamptz(3)
+  seq            Int      @unique @default(autoincrement())
 
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
@@ -101,15 +123,15 @@ model InstanceState {
 }
 
 model Identity {
-  id                String  @id
-  organizationId    String  @map("organization_id")
+  id                String    @id
+  organizationId    String    @map("organization_id")
   email             String
-  emailVerified     Int     @default(0) @map("email_verified")
-  passwordHash      String  @map("password_hash")
-  createdAt         String  @map("created_at")
-  sessionsRevokedAt String? @map("sessions_revoked_at")
-  suspendedAt       String? @map("suspended_at")
-  anonymizedAt      String? @map("anonymized_at")
+  emailVerified     Boolean   @default(false) @map("email_verified")
+  passwordHash      String    @map("password_hash")
+  createdAt         DateTime  @map("created_at") @db.Timestamptz(3)
+  sessionsRevokedAt DateTime? @map("sessions_revoked_at") @db.Timestamptz(3)
+  suspendedAt       DateTime? @map("suspended_at") @db.Timestamptz(3)
+  anonymizedAt      DateTime? @map("anonymized_at") @db.Timestamptz(3)
 
   organization        Organization         @relation(fields: [organizationId], references: [id])
   identityTokens      IdentityToken[]
@@ -124,13 +146,13 @@ model Identity {
 }
 
 model IdentityToken {
-  id         String  @id
-  identityId String  @map("identity_id")
-  kind       String
-  tokenHash  String  @unique @map("token_hash")
-  expiresAt  String  @map("expires_at")
-  consumedAt String? @map("consumed_at")
-  createdAt  String  @map("created_at")
+  id         String            @id
+  identityId String            @map("identity_id")
+  kind       IdentityTokenKind
+  tokenHash  String            @unique @map("token_hash")
+  expiresAt  DateTime          @map("expires_at") @db.Timestamptz(3)
+  consumedAt DateTime?         @map("consumed_at") @db.Timestamptz(3)
+  createdAt  DateTime          @map("created_at") @db.Timestamptz(3)
 
   identity Identity @relation(fields: [identityId], references: [id])
 
@@ -138,55 +160,55 @@ model IdentityToken {
 }
 
 model AdministratorInvitation {
-  id              String  @id
-  organizationId  String  @map("organization_id")
+  id              String            @id
+  organizationId  String            @map("organization_id")
   email           String
-  role            String
-  tokenHash       String  @unique @map("token_hash")
-  invitedBy       String  @map("invited_by")
-  expiresAt       String  @map("expires_at")
-  consumedAt      String? @map("consumed_at")
-  expiryAuditedAt String? @map("expiry_audited_at")
-  createdAt       String  @map("created_at")
+  role            AdministratorRole
+  tokenHash       String            @unique @map("token_hash")
+  invitedBy       String            @map("invited_by")
+  expiresAt       DateTime          @map("expires_at") @db.Timestamptz(3)
+  consumedAt      DateTime?         @map("consumed_at") @db.Timestamptz(3)
+  expiryAuditedAt DateTime?         @map("expiry_audited_at") @db.Timestamptz(3)
+  createdAt       DateTime          @map("created_at") @db.Timestamptz(3)
 
-  organization Organization  @relation(fields: [organizationId], references: [id])
+  organization           Organization  @relation(fields: [organizationId], references: [id])
   invitedByAdministrator Administrator @relation(fields: [invitedBy], references: [id])
 
   @@map("administrator_invitations")
 }
 
 model Application {
-  id             String  @id
-  organizationId String  @map("organization_id")
+  id             String          @id
+  organizationId String          @map("organization_id")
   name           String
-  type           String
-  clientId       String  @unique @map("client_id")
-  createdBy      String  @map("created_by")
-  createdAt      String  @map("created_at")
-  disabledAt     String? @map("disabled_at")
-  deletedAt      String? @map("deleted_at")
-  allowedScopes  String  @default("openid email profile") @map("allowed_scopes")
+  type           ApplicationType
+  clientId       String          @unique @map("client_id")
+  createdBy      String          @map("created_by")
+  createdAt      DateTime        @map("created_at") @db.Timestamptz(3)
+  disabledAt     DateTime?       @map("disabled_at") @db.Timestamptz(3)
+  deletedAt      DateTime?       @map("deleted_at") @db.Timestamptz(3)
+  allowedScopes  String          @default("openid email profile") @map("allowed_scopes")
 
-  organization       Organization        @relation(fields: [organizationId], references: [id])
-  createdByAdministrator Administrator    @relation(fields: [createdBy], references: [id])
-  clientSecrets      ClientSecret[]
-  redirectUris       RedirectUri[]
-  enrollments        Enrollment[]
-  authorizationCodes AuthorizationCode[]
-  refreshTokens      RefreshToken[]
+  organization             Organization        @relation(fields: [organizationId], references: [id])
+  createdByAdministrator   Administrator       @relation(fields: [createdBy], references: [id])
+  clientSecrets            ClientSecret[]
+  redirectUris             RedirectUri[]
+  enrollments              Enrollment[]
+  authorizationCodes       AuthorizationCode[]
+  refreshTokens            RefreshToken[]
 
   @@map("applications")
 }
 
 model ClientSecret {
-  id            String  @id
-  applicationId String  @map("application_id")
+  id            String    @id
+  applicationId String    @map("application_id")
   label         String
-  secretHash    String  @unique @map("secret_hash")
-  createdBy     String  @map("created_by")
-  createdAt     String  @map("created_at")
-  revokedAt     String? @map("revoked_at")
-  revokedBy     String? @map("revoked_by")
+  secretHash    String    @unique @map("secret_hash")
+  createdBy     String    @map("created_by")
+  createdAt     DateTime  @map("created_at") @db.Timestamptz(3)
+  revokedAt     DateTime? @map("revoked_at") @db.Timestamptz(3)
+  revokedBy     String?   @map("revoked_by")
 
   application            Application    @relation(fields: [applicationId], references: [id])
   createdByAdministrator Administrator  @relation("ClientSecretCreatedBy", fields: [createdBy], references: [id])
@@ -196,13 +218,13 @@ model ClientSecret {
 }
 
 model RedirectUri {
-  id            String  @id
-  applicationId String  @map("application_id")
+  id            String    @id
+  applicationId String    @map("application_id")
   uri           String
-  createdBy     String  @map("created_by")
-  createdAt     String  @map("created_at")
-  updatedBy     String? @map("updated_by")
-  updatedAt     String? @map("updated_at")
+  createdBy     String    @map("created_by")
+  createdAt     DateTime  @map("created_at") @db.Timestamptz(3)
+  updatedBy     String?   @map("updated_by")
+  updatedAt     DateTime? @map("updated_at") @db.Timestamptz(3)
 
   application            Application    @relation(fields: [applicationId], references: [id])
   createdByAdministrator Administrator  @relation("RedirectUriCreatedBy", fields: [createdBy], references: [id])
@@ -213,11 +235,11 @@ model RedirectUri {
 }
 
 model Enrollment {
-  id            String  @id
-  identityId    String  @map("identity_id")
-  applicationId String  @map("application_id")
-  createdAt     String  @map("created_at")
-  suspendedAt   String? @map("suspended_at")
+  id            String    @id
+  identityId    String    @map("identity_id")
+  applicationId String    @map("application_id")
+  createdAt     DateTime  @map("created_at") @db.Timestamptz(3)
+  suspendedAt   DateTime? @map("suspended_at") @db.Timestamptz(3)
 
   identity    Identity    @relation(fields: [identityId], references: [id])
   application Application @relation(fields: [applicationId], references: [id])
@@ -227,15 +249,15 @@ model Enrollment {
 }
 
 model Session {
-  id             String  @id
-  identityId     String  @map("identity_id")
-  organizationId String  @map("organization_id")
-  ssoTokenHash   String  @unique @map("sso_token_hash")
-  userAgent      String? @map("user_agent")
-  createdAt      String  @map("created_at")
-  lastSeenAt     String  @map("last_seen_at")
-  expiresAt      String  @map("expires_at")
-  revokedAt      String? @map("revoked_at")
+  id             String    @id
+  identityId     String    @map("identity_id")
+  organizationId String    @map("organization_id")
+  ssoTokenHash   String    @unique @map("sso_token_hash")
+  userAgent      String?   @map("user_agent")
+  createdAt      DateTime  @map("created_at") @db.Timestamptz(3)
+  lastSeenAt     DateTime  @map("last_seen_at") @db.Timestamptz(3)
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt      DateTime? @map("revoked_at") @db.Timestamptz(3)
 
   identity           Identity            @relation(fields: [identityId], references: [id])
   organization       Organization        @relation(fields: [organizationId], references: [id])
@@ -246,19 +268,19 @@ model Session {
 }
 
 model AuthorizationCode {
-  id                  String  @id
-  codeHash            String  @unique @map("code_hash")
-  applicationId       String  @map("application_id")
-  identityId          String  @map("identity_id")
-  sessionId           String  @map("session_id")
-  redirectUri         String  @map("redirect_uri")
+  id                  String    @id
+  codeHash            String    @unique @map("code_hash")
+  applicationId       String    @map("application_id")
+  identityId          String    @map("identity_id")
+  sessionId           String    @map("session_id")
+  redirectUri         String    @map("redirect_uri")
   scope               String
-  codeChallenge       String? @map("code_challenge")
-  codeChallengeMethod String? @map("code_challenge_method")
+  codeChallenge       String?   @map("code_challenge")
+  codeChallengeMethod String?   @map("code_challenge_method")
   nonce               String?
-  createdAt           String  @map("created_at")
-  expiresAt           String  @map("expires_at")
-  consumedAt          String? @map("consumed_at")
+  createdAt           DateTime  @map("created_at") @db.Timestamptz(3)
+  expiresAt           DateTime  @map("expires_at") @db.Timestamptz(3)
+  consumedAt          DateTime? @map("consumed_at") @db.Timestamptz(3)
 
   application Application @relation(fields: [applicationId], references: [id])
   identity    Identity    @relation(fields: [identityId], references: [id])
@@ -268,16 +290,16 @@ model AuthorizationCode {
 }
 
 model RefreshToken {
-  id            String  @id
-  tokenHash     String  @unique @map("token_hash")
-  sessionId     String  @map("session_id")
-  applicationId String  @map("application_id")
-  identityId    String  @map("identity_id")
+  id            String    @id
+  tokenHash     String    @unique @map("token_hash")
+  sessionId     String    @map("session_id")
+  applicationId String    @map("application_id")
+  identityId    String    @map("identity_id")
   scope         String
-  createdAt     String  @map("created_at")
-  expiresAt     String  @map("expires_at")
-  rotatedAt     String? @map("rotated_at")
-  revokedAt     String? @map("revoked_at")
+  createdAt     DateTime  @map("created_at") @db.Timestamptz(3)
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(3)
+  rotatedAt     DateTime? @map("rotated_at") @db.Timestamptz(3)
+  revokedAt     DateTime? @map("revoked_at") @db.Timestamptz(3)
 
   session     Session     @relation(fields: [sessionId], references: [id])
   application Application @relation(fields: [applicationId], references: [id])
@@ -289,28 +311,28 @@ model RefreshToken {
 }
 
 model OrganizationSetting {
-  organizationId String  @map("organization_id")
-  key            String
+  organizationId String                 @map("organization_id")
+  key            OrganizationSettingKey
   value          String
-  updatedBy      String? @map("updated_by")
-  updatedAt      String  @map("updated_at")
+  updatedBy      String?                @map("updated_by")
+  updatedAt      DateTime               @map("updated_at") @db.Timestamptz(3)
 
-  organization            Organization   @relation(fields: [organizationId], references: [id])
-  updatedByAdministrator  Administrator? @relation(fields: [updatedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  organization           Organization   @relation(fields: [organizationId], references: [id])
+  updatedByAdministrator Administrator? @relation(fields: [updatedBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
   @@id([organizationId, key])
   @@map("organization_settings")
 }
 
 model EmailChangeRequest {
-  id             String  @id
-  organizationId String  @map("organization_id")
-  identityId     String  @map("identity_id")
-  newEmail       String  @map("new_email")
-  tokenHash      String  @unique @map("token_hash")
-  expiresAt      String  @map("expires_at")
-  consumedAt     String? @map("consumed_at")
-  createdAt      String  @map("created_at")
+  id             String    @id
+  organizationId String    @map("organization_id")
+  identityId     String    @map("identity_id")
+  newEmail       String    @map("new_email")
+  tokenHash      String    @unique @map("token_hash")
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(3)
+  consumedAt     DateTime? @map("consumed_at") @db.Timestamptz(3)
+  createdAt      DateTime  @map("created_at") @db.Timestamptz(3)
 
   organization Organization @relation(fields: [organizationId], references: [id])
   identity     Identity     @relation(fields: [identityId], references: [id])

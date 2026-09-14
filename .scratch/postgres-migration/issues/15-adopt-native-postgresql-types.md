@@ -4,10 +4,10 @@
 
 **Blocked by:** 10, 11, 12, 13, 14 (all typed conversions)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Schema and database use boolean, timestamptz(3), jsonb, and enums; no integer-boolean or text-timestamp encodings remain
-- [ ] The migration is hand-reviewed: it drops only the superseded CHECKs and preserves the email CHECKs
-- [ ] Instant comparisons use native dates; HTTP payloads keep the same ISO-8601 format as before
-- [ ] Token expiry, audit windows, and single-use behaviors are unchanged
-- [ ] `npm run verify` is green
+- [x] Schema and database use boolean, timestamptz(3), jsonb, and enums; no integer-boolean or text-timestamp encodings remain
+- [x] The migration is hand-reviewed: it drops only the superseded CHECKs and preserves the email CHECKs
+- [x] Instant comparisons use native dates; HTTP payloads keep the same ISO-8601 format as before
+- [x] Token expiry, audit windows, and single-use behaviors are unchanged
+- [x] `npm run verify` is green

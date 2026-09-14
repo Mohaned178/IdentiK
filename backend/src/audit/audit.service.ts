@@ -33,8 +33,8 @@ interface AuditEventRow {
   actor: string;
   actor_name: string | null;
   actor_email: string | null;
-  detail: string;
-  occurred_at: string;
+  detail: unknown;
+  occurred_at: Date;
 }
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
@@ -48,6 +48,11 @@ const ZONED = /(Z|[+-]\d{2}:\d{2})$/i;
  * stays in the payload because it may be a non-human actor (`instance`,
  * `end-user`). The actor itself is resolved only through a Membership in this
  * Organization, never through the global Administrator record.
+ *
+ * The list is one of the two deliberate raw-SQL exceptions (ADR-0027): the
+ * actor join plus the JSONB identity filter over an optional limit is not
+ * expressible (or not worth expressing) in typed Prisma. The statement is
+ * built from parameterized fragments only, never interpolated values.
  */
 @Injectable()
 export class AuditService {
@@ -64,8 +69,8 @@ export class AuditService {
     }
 
     const conditions = ['e.organization_id = ?'];
-    const params: (string | number)[] = [organizationId];
-    const add = (clause: string, value: string | undefined): void => {
+    const params: (string | number | Date)[] = [organizationId];
+    const add = (clause: string, value: string | Date | undefined): void => {
       if (value === undefined) return;
       conditions.push(clause);
       params.push(value);
@@ -80,11 +85,14 @@ export class AuditService {
     // Identity linkage lives in the event detail; the durable key is the
     // identityId, never the email (which anonymization destroys and reuse
     // recycles — ADR-0007).
-    add("(e.detail::jsonb ->> 'identityId') = ?", identityId);
+    add("(e.detail ->> 'identityId') = ?", identityId);
     add('e.occurred_at >= ?', from);
     add('e.occurred_at <= ?', to);
     if (filters.limit !== undefined) params.push(filters.limit);
 
+    // Deliberate raw-SQL exception (ADR-0027): the actor join, the JSONB
+    // identity filter, and the optional limit are one dynamic query typed
+    // reads cannot express. Conditions and values are parameterized.
     const rows = await this.db.all<AuditEventRow>(
       `SELECT e.id, e.kind, e.actor, e.detail, e.occurred_at,
               a.name AS actor_name, a.email AS actor_email
@@ -104,8 +112,8 @@ export class AuditService {
       actor: row.actor,
       actorName: row.actor_name,
       actorEmail: row.actor_email,
-      detail: JSON.parse(row.detail),
-      occurredAt: row.occurred_at,
+      detail: row.detail,
+      occurredAt: row.occurred_at.toISOString(),
     }));
   }
 
@@ -115,7 +123,7 @@ export class AuditService {
    * parse in the server's local zone, so the same filter would select
    * different windows per deployment.
    */
-  private instantFilter(value: string | undefined, name: string): string | undefined {
+  private instantFilter(value: string | undefined, name: string): Date | undefined {
     const text = optionalText(value);
     if (text === undefined) return undefined;
     if (
@@ -132,6 +140,6 @@ export class AuditService {
         `${name} must be an ISO-8601 instant carrying a timezone (or a date)`,
       );
     }
-    return parsed.toISOString();
+    return parsed;
   }
 }

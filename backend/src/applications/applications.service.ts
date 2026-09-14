@@ -26,7 +26,9 @@ import {
   splitScope,
 } from '../oidc/scopes';
 
-export type ApplicationType = 'web' | 'spa';
+import type { ApplicationType } from '../generated/prisma/client';
+
+export type { ApplicationType };
 
 export interface SecretView {
   id: string;
@@ -108,7 +110,7 @@ export class ApplicationsService {
     if (name.length === 0) throw new BadRequestException('an Application name is required');
     const id = uuid();
     const clientId = randomToken(16);
-    const now = new Date().toISOString();
+    const now = new Date();
     const allowedScopes = DEFAULT_APPLICATION_SCOPES;
 
     // Registration and the confidential client's first secret are one unit:
@@ -185,7 +187,7 @@ export class ApplicationsService {
       return this.view(this.db, input.organizationId, application.id);
     }
 
-    const now = new Date().toISOString();
+    const now = new Date();
     // State change, revocation, and audit are one unit: a paused Application
     // whose app-minted tokens outlive the pause is the lie disable exists to
     // prevent.
@@ -268,7 +270,7 @@ export class ApplicationsService {
       return this.view(this.db, input.organizationId, application.id);
     }
 
-    const now = new Date().toISOString();
+    const now = new Date();
     const pseudonym = deletedApplicationPseudonym(application.id);
 
     await this.db.transaction(async (tx) => {
@@ -300,17 +302,17 @@ export class ApplicationsService {
         application.id,
       );
       // Deliberate raw-SQL exception (ADR-0027): the surviving trail's detail
-      // is a JSON text column, and rewriting one field in place — only where
-      // that field exists — is jsonb_set's job; no typed update expresses it.
+      // is a JSONB column, and rewriting one field in place — only where that
+      // field exists — is jsonb_set's job; no typed update expresses it.
       // Parameterized, never interpolated. The durable key is the
       // applicationId; the human-facing name in historical details is PII, so
       // the trail is re-attributed to the pseudonymous shell.
       await tx.run(
         `UPDATE audit_events
-            SET detail = jsonb_set(detail::jsonb, '{name}', to_jsonb(?::text))::text
+            SET detail = jsonb_set(detail, '{name}', to_jsonb(?::text))
           WHERE organization_id = ?
-            AND (detail::jsonb ->> 'applicationId') = ?
-            AND (detail::jsonb ->> 'name') IS NOT NULL`,
+            AND (detail ->> 'applicationId') = ?
+            AND (detail ->> 'name') IS NOT NULL`,
         [pseudonym, input.organizationId, application.id],
       );
       await recordAuditEvent(tx, {
@@ -354,7 +356,7 @@ export class ApplicationsService {
       organizationId: row.organizationId,
       organizationName: row.organization.name,
       name: row.name,
-      type: row.type as ApplicationType,
+      type: row.type,
       enabled: this.isUsable(row),
       redirectUris: row.redirectUris.map((entry) => entry.uri),
       allowedScopes: splitScope(row.allowedScopes),
@@ -380,7 +382,7 @@ export class ApplicationsService {
       id: row.id,
       clientId: row.clientId,
       organizationId: row.organizationId,
-      type: row.type as ApplicationType,
+      type: row.type,
       enabled: this.isUsable(row),
       allowedScopes: splitScope(row.allowedScopes),
     };
@@ -446,7 +448,7 @@ export class ApplicationsService {
     const clientSecret = randomToken(32);
     const label = input.label.trim();
     if (label.length === 0) throw new BadRequestException('a Client Secret label is required');
-    const now = new Date().toISOString();
+    const now = new Date();
     await db.clientSecret.create({
       data: {
         id: secretId,
@@ -469,7 +471,10 @@ export class ApplicationsService {
       },
     });
 
-    return { secret: { id: secretId, label, createdAt: now, revokedAt: null }, clientSecret };
+    return {
+      secret: { id: secretId, label, createdAt: now.toISOString(), revokedAt: null },
+      clientSecret,
+    };
   }
 
   /**
@@ -493,7 +498,7 @@ export class ApplicationsService {
     if (!row) throw new NotFoundException('no such Client Secret');
 
     if (row.revokedAt === null) {
-      const now = new Date().toISOString();
+      const now = new Date();
       await this.db.clientSecret.updateMany({
         where: { id: input.secretId, revokedAt: null },
         data: { revokedAt: now, revokedBy: input.actor },
@@ -511,7 +516,12 @@ export class ApplicationsService {
       row.revokedAt = now;
     }
 
-    return { id: row.id, label: row.label, createdAt: row.createdAt, revokedAt: row.revokedAt };
+    return {
+      id: row.id,
+      label: row.label,
+      createdAt: row.createdAt.toISOString(),
+      revokedAt: row.revokedAt?.toISOString() ?? null,
+    };
   }
 
   /**
@@ -535,7 +545,7 @@ export class ApplicationsService {
     await this.refuseDuplicateRedirectUri(this.db, application.id, uri);
 
     const id = uuid();
-    const now = new Date().toISOString();
+    const now = new Date();
     // The change and its audit event are one unit: a persisted redirect URI
     // with no event beside it is the silent code-interception primitive
     // ADR-0010 exists to prevent.
@@ -560,7 +570,7 @@ export class ApplicationsService {
         },
       });
     });
-    return { id, uri, createdAt: now, updatedAt: null };
+    return { id, uri, createdAt: now.toISOString(), updatedAt: null };
   }
 
   /**
@@ -585,7 +595,7 @@ export class ApplicationsService {
     if (uri === row.uri) return this.redirectUriView(row);
 
     await this.refuseDuplicateRedirectUri(this.db, application.id, uri, row.id);
-    const now = new Date().toISOString();
+    const now = new Date();
     await this.db.transaction(async (tx) => {
       // updateMany, not update: a concurrently removed row must keep the old
       // statement's silent no-op instead of failing the transaction.
@@ -605,7 +615,7 @@ export class ApplicationsService {
         },
       });
     });
-    return { id: row.id, uri, createdAt: row.createdAt, updatedAt: now };
+    return { id: row.id, uri, createdAt: row.createdAt.toISOString(), updatedAt: now.toISOString() };
   }
 
   /** Remove a redirect URI. There is no prefix or wildcard echo to clean up. */
@@ -717,8 +727,8 @@ export class ApplicationsService {
     return {
       id: row.id,
       uri: row.uri,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt?.toISOString() ?? null,
     };
   }
 
@@ -773,19 +783,19 @@ export class ApplicationsService {
     return {
       id: row.id,
       name: row.name,
-      type: row.type as ApplicationType,
+      type: row.type,
       clientId: row.clientId,
       state: applicationState({
         disabled: row.disabledAt !== null,
         deleted: row.deletedAt !== null,
       }),
-      createdAt: row.createdAt,
+      createdAt: row.createdAt.toISOString(),
       allowedScopes: splitScope(row.allowedScopes),
       secrets: secrets.map((secret) => ({
         id: secret.id,
         label: secret.label,
-        createdAt: secret.createdAt,
-        revokedAt: secret.revokedAt,
+        createdAt: secret.createdAt.toISOString(),
+        revokedAt: secret.revokedAt?.toISOString() ?? null,
       })),
       redirectUris: redirectUris.map((entry) => this.redirectUriView(entry)),
     };

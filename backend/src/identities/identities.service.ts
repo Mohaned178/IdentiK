@@ -17,13 +17,12 @@ import {
 import { recordAuditEvent } from '../storage/audit';
 import { isUniqueViolation } from '../storage/postgres';
 import { DATABASE, Database } from '../storage/token';
+import type { IdentityTokenKind } from '../generated/prisma/client';
 import { uuid } from '../bootstrap/uuid';
 import { normalizeEmail } from './email';
 import { anonymizedHandle, anonymizedPseudonym, identityGate } from './identity-state';
 
 type ReservationInsert = { created: true; identityId: string } | { created: false };
-
-type IdentityTokenKind = 'email_verification' | 'password_reset';
 
 /**
  * The Identity fields the mailbox-proof and state-lever flows need. The
@@ -43,8 +42,8 @@ type IdentitySummary = {
   id: string;
   organizationId: string;
   email: string;
-  emailVerified: number;
-  anonymizedAt: string | null;
+  emailVerified: boolean;
+  anonymizedAt: Date | null;
 };
 
 /** The state levers' Organization-scoped target: enough to find, name, and
@@ -192,8 +191,8 @@ export class IdentitiesService {
     if (!identityId) return false;
 
     const activated = await this.db.identity.updateMany({
-      where: { id: identityId, emailVerified: 0, anonymizedAt: null },
-      data: { emailVerified: 1 },
+      where: { id: identityId, emailVerified: false, anonymizedAt: null },
+      data: { emailVerified: true },
     });
     if (activated.count !== 1) return false;
 
@@ -275,15 +274,15 @@ export class IdentitiesService {
     const identity = await this.findIdentityById(identityId);
     if (!identity || identity.anonymizedAt !== null) return false;
 
-    const now = new Date().toISOString();
+    const now = new Date();
     await this.db.identity.update({
       where: { id: identity.id },
-      data: { passwordHash, emailVerified: 1, sessionsRevokedAt: now },
+      data: { passwordHash, emailVerified: true, sessionsRevokedAt: now },
     });
 
     // Mailbox proof is mailbox proof (ADR-0011): a reset on an Unverified
     // Reservation activates it, audited like a verification click.
-    if (identity.emailVerified === 0) {
+    if (!identity.emailVerified) {
       await recordAuditEvent(this.db, {
         organizationId: identity.organizationId,
         actor: 'end-user',
@@ -423,8 +422,8 @@ export class IdentitiesService {
         identityId: identity.id,
         newEmail,
         tokenHash: hashToken(token),
-        expiresAt: new Date(now.getTime() + this.emailChangeTtlMs()).toISOString(),
-        createdAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + this.emailChangeTtlMs()),
+        createdAt: now,
       },
     });
     await recordAuditEvent(this.db, {
@@ -448,7 +447,7 @@ export class IdentitiesService {
    * and the token stays spent. An anonymized Identity has no handle to move.
    */
   async verifyEmailChange(token: string): Promise<boolean> {
-    const now = new Date().toISOString();
+    const now = new Date();
     const tokenHash = hashToken(token);
     // The guarded claim is the single-use arbiter; the request is read back
     // only once it is ours.
@@ -466,7 +465,7 @@ export class IdentitiesService {
     try {
       const moved = await this.db.identity.updateMany({
         where: { id: identity.id, anonymizedAt: null },
-        data: { email: request.newEmail, emailVerified: 1 },
+        data: { email: request.newEmail, emailVerified: true },
       });
       if (moved.count !== 1) return false;
     } catch (error) {
@@ -507,7 +506,7 @@ export class IdentitiesService {
 
   /** The address a live email-change request would move the Identity to. */
   async pendingEmailChange(identityId: string): Promise<string | null> {
-    const now = new Date().toISOString();
+    const now = new Date();
     const row = await this.db.emailChangeRequest.findFirst({
       where: { identityId, consumedAt: null, expiresAt: { gt: now } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -534,7 +533,7 @@ export class IdentitiesService {
         newEmail,
         identityId: { not: identity.id },
         consumedAt: null,
-        expiresAt: { gt: new Date().toISOString() },
+        expiresAt: { gt: new Date() },
       },
       select: { id: true },
     });
@@ -576,7 +575,7 @@ export class IdentitiesService {
     // Reservation has no verified email to deliver to, and "force password
     // reset" would be a contradiction — there is no credential its owner has
     // ever held. Reservations heal through the mailbox-proof flows instead.
-    if (identity.emailVerified === 0) {
+    if (!identity.emailVerified) {
       throw new ConflictException('the Identity has no verified email');
     }
 
@@ -617,7 +616,7 @@ export class IdentitiesService {
     if (identity.anonymizedAt !== null) return;
     const changed = await this.db.identity.updateMany({
       where: { id: identity.id, suspendedAt: null },
-      data: { suspendedAt: new Date().toISOString() },
+      data: { suspendedAt: new Date() },
     });
     if (changed.count !== 1) return;
 
@@ -649,7 +648,7 @@ export class IdentitiesService {
     const identity = await this.requireIdentity(input.organizationId, input.identityId);
     const changed = await this.db.identity.updateMany({
       where: { id: identity.id, suspendedAt: { not: null } },
-      data: { suspendedAt: null, sessionsRevokedAt: new Date().toISOString() },
+      data: { suspendedAt: null, sessionsRevokedAt: new Date() },
     });
     if (changed.count === 1) {
       await recordAuditEvent(this.db, {
@@ -698,7 +697,7 @@ export class IdentitiesService {
     const identity = await this.requireIdentity(input.organizationId, input.identityId);
     if (identity.anonymizedAt !== null) return;
 
-    const now = new Date().toISOString();
+    const now = new Date();
     const pseudonym = anonymizedPseudonym(identity.id);
     const shellHandle = anonymizedHandle(identity.id);
 
@@ -712,7 +711,7 @@ export class IdentitiesService {
         data: {
           email: shellHandle,
           passwordHash: DUMMY_PASSWORD_HASH,
-          emailVerified: 0,
+          emailVerified: false,
           suspendedAt: null,
           anonymizedAt: now,
           sessionsRevokedAt: now,
@@ -733,21 +732,20 @@ export class IdentitiesService {
           ],
         },
       });
-      // Deliberate raw-SQL exceptions (ADR-0027): the audit detail is a JSON
-      // text column and these are jsonb_set field rewrites — typed updates
-      // cannot express them. Every statement is parameterized, never
-      // interpolated. The durable key is the identityId; the email in
-      // historical details is PII, so the old trail is re-attributed to the
-      // shell, never left naming the person. Scoped to this Identity's events
-      // and the End-User lifecycle kinds that carry only an email, so an
-      // Administrator invitation mentioning the same address is never
-      // rewritten.
+      // Deliberate raw-SQL exceptions (ADR-0027): the audit detail is a JSONB
+      // column and these are jsonb_set field rewrites — typed updates cannot
+      // express them. Every statement is parameterized, never interpolated.
+      // The durable key is the identityId; the email in historical details is
+      // PII, so the old trail is re-attributed to the shell, never left naming
+      // the person. Scoped to this Identity's events and the End-User
+      // lifecycle kinds that carry only an email, so an Administrator
+      // invitation mentioning the same address is never rewritten.
       await tx.run(
         `UPDATE audit_events
-            SET detail = jsonb_set(detail::jsonb, '{email}', to_jsonb(?::text))::text
+            SET detail = jsonb_set(detail, '{email}', to_jsonb(?::text))
           WHERE organization_id = ?
-            AND (detail::jsonb ->> 'email') = ?
-            AND ((detail::jsonb ->> 'identityId') = ?
+            AND (detail ->> 'email') = ?
+            AND ((detail ->> 'identityId') = ?
                  OR kind LIKE 'identity.%' OR kind LIKE 'enrollment.%')`,
         [pseudonym, identity.organizationId, identity.email, identity.id],
       );
@@ -757,23 +755,23 @@ export class IdentitiesService {
       // (ADR-0007).
       await tx.run(
         `UPDATE audit_events
-            SET detail = jsonb_set(detail::jsonb, '{email}', to_jsonb(?::text))::text
-          WHERE organization_id = ? AND (detail::jsonb ->> 'identityId') = ?
+            SET detail = jsonb_set(detail, '{email}', to_jsonb(?::text))
+          WHERE organization_id = ? AND (detail ->> 'identityId') = ?
             AND kind LIKE 'identity.email_change.%'`,
         [pseudonym, identity.organizationId, identity.id],
       );
       await tx.run(
         `UPDATE audit_events
-            SET detail = jsonb_set(detail::jsonb, '{newEmail}', to_jsonb(?::text))::text
-          WHERE organization_id = ? AND (detail::jsonb ->> 'newEmail') IS NOT NULL
-            AND (detail::jsonb ->> 'identityId') = ?`,
+            SET detail = jsonb_set(detail, '{newEmail}', to_jsonb(?::text))
+          WHERE organization_id = ? AND (detail ->> 'newEmail') IS NOT NULL
+            AND (detail ->> 'identityId') = ?`,
         [pseudonym, identity.organizationId, identity.id],
       );
       await tx.run(
         `UPDATE audit_events
-            SET detail = jsonb_set(detail::jsonb, '{previousEmail}', to_jsonb(?::text))::text
-          WHERE organization_id = ? AND (detail::jsonb ->> 'previousEmail') IS NOT NULL
-            AND (detail::jsonb ->> 'identityId') = ?`,
+            SET detail = jsonb_set(detail, '{previousEmail}', to_jsonb(?::text))
+          WHERE organization_id = ? AND (detail ->> 'previousEmail') IS NOT NULL
+            AND (detail ->> 'identityId') = ?`,
         [pseudonym, identity.organizationId, identity.id],
       );
       // The freed address may also appear as some *other* Identity's requested
@@ -781,14 +779,14 @@ export class IdentitiesService {
       // of the person (ADR-0007).
       await tx.run(
         `UPDATE audit_events
-            SET detail = jsonb_set(detail::jsonb, '{newEmail}', to_jsonb(?::text))::text
-          WHERE organization_id = ? AND (detail::jsonb ->> 'newEmail') = ?`,
+            SET detail = jsonb_set(detail, '{newEmail}', to_jsonb(?::text))
+          WHERE organization_id = ? AND (detail ->> 'newEmail') = ?`,
         [pseudonym, identity.organizationId, identity.email],
       );
       await tx.run(
         `UPDATE audit_events
-            SET detail = jsonb_set(detail::jsonb, '{previousEmail}', to_jsonb(?::text))::text
-          WHERE organization_id = ? AND (detail::jsonb ->> 'previousEmail') = ?`,
+            SET detail = jsonb_set(detail, '{previousEmail}', to_jsonb(?::text))
+          WHERE organization_id = ? AND (detail ->> 'previousEmail') = ?`,
         [pseudonym, identity.organizationId, identity.email],
       );
       await recordAuditEvent(tx, {
@@ -838,9 +836,9 @@ export class IdentitiesService {
           id: identityId,
           organizationId,
           email,
-          emailVerified: 0,
+          emailVerified: false,
           passwordHash,
-          createdAt: new Date().toISOString(),
+          createdAt: new Date(),
         },
       });
       return { created: true, identityId };
@@ -864,8 +862,8 @@ export class IdentitiesService {
         identityId,
         kind,
         tokenHash: hashToken(token),
-        expiresAt: expiresAt.toISOString(),
-        createdAt: new Date().toISOString(),
+        expiresAt,
+        createdAt: new Date(),
       },
     });
     return token;
@@ -914,7 +912,7 @@ export class IdentitiesService {
     kind: IdentityTokenKind,
     token: string,
   ): Promise<string | undefined> {
-    const now = new Date().toISOString();
+    const now = new Date();
     const tokenHash = hashToken(token);
     const claimed = await this.db.identityToken.updateMany({
       where: { tokenHash, kind, consumedAt: null, expiresAt: { gt: now } },
@@ -930,7 +928,7 @@ export class IdentitiesService {
 
   /** Whether a live mailbox-proof token of one kind exists — without consuming it. */
   private async peekToken(kind: IdentityTokenKind, token: string): Promise<boolean> {
-    const now = new Date().toISOString();
+    const now = new Date();
     const row = await this.db.identityToken.findFirst({
       where: { tokenHash: hashToken(token), kind, consumedAt: null, expiresAt: { gt: now } },
       select: { id: true },
@@ -947,7 +945,7 @@ export class IdentitiesService {
     kind: IdentityTokenKind,
     token: string,
   ): Promise<{ identityId: string; organizationId: string } | undefined> {
-    const now = new Date().toISOString();
+    const now = new Date();
     const row = await this.db.identityToken.findFirst({
       where: { tokenHash: hashToken(token), kind, consumedAt: null, expiresAt: { gt: now } },
       select: {

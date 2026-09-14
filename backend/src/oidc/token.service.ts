@@ -194,7 +194,7 @@ export class TokenService {
 
     // Single-use, race-free, and deliberately first: a spent code stays spent
     // even when the rest of the exchange fails.
-    const now = new Date().toISOString();
+    const now = new Date();
     const consumed = await this.db.authorizationCode.updateMany({
       where: { id: row.id, consumedAt: null },
       data: { consumedAt: now },
@@ -202,7 +202,9 @@ export class TokenService {
     if (consumed.count !== 1) {
       return invalidGrant('the authorization code has already been used');
     }
-    if (row.expiresAt <= now) return invalidGrant('the authorization code has expired');
+    if (row.expiresAt.getTime() <= now.getTime()) {
+      return invalidGrant('the authorization code has expired');
+    }
     if (row.applicationId !== client.id) {
       return invalidGrant('the authorization code was not issued to this client');
     }
@@ -290,8 +292,10 @@ export class TokenService {
       return invalidGrant('the refresh token has already been used');
     }
 
-    const now = new Date().toISOString();
-    if (row.expiresAt <= now) return invalidGrant('the refresh token has expired');
+    const now = new Date();
+    if (row.expiresAt.getTime() <= now.getTime()) {
+      return invalidGrant('the refresh token has expired');
+    }
 
     const session = await this.sessions.resolveById(row.sessionId, { touch: true });
     if (!session) {
@@ -350,7 +354,7 @@ export class TokenService {
   private async revokeLineage(row: RefreshTokenWithSession): Promise<void> {
     const revoked = await this.db.refreshToken.updateMany({
       where: { sessionId: row.sessionId, revokedAt: null },
-      data: { revokedAt: new Date().toISOString() },
+      data: { revokedAt: new Date() },
     });
     if (revoked.count === 0) return;
     await recordAuditEvent(this.db, {
@@ -405,7 +409,7 @@ export class TokenService {
     if (input.nonce !== undefined) idClaims.nonce = input.nonce;
     if (input.scopes.includes('email')) {
       idClaims.email = input.identity.email;
-      idClaims.email_verified = input.identity.emailVerified === 1;
+      idClaims.email_verified = input.identity.emailVerified;
     }
     if (input.scopes.includes('profile')) {
       idClaims.preferred_username = input.identity.email;
@@ -443,8 +447,8 @@ export class TokenService {
         applicationId: input.client.id,
         identityId: input.identity.id,
         scope,
-        createdAt: new Date(nowMs).toISOString(),
-        expiresAt: new Date(refreshExpiresMs).toISOString(),
+        createdAt: new Date(nowMs),
+        expiresAt: new Date(refreshExpiresMs),
       },
     });
 
@@ -478,7 +482,7 @@ export class TokenService {
     const body: Record<string, unknown> = { sub: identity.id };
     if (scopes.includes('email')) {
       body.email = identity.email;
-      body.email_verified = identity.emailVerified === 1;
+      body.email_verified = identity.emailVerified;
     }
     if (scopes.includes('profile')) {
       body.preferred_username = identity.email;
@@ -520,8 +524,12 @@ export class TokenService {
 
     const row = await this.findRefreshToken(token);
     if (row && row.applicationId === client.id) {
-      const now = new Date().toISOString();
-      if (row.revokedAt === null && row.rotatedAt === null && row.expiresAt > now) {
+      const now = new Date();
+      if (
+        row.revokedAt === null &&
+        row.rotatedAt === null &&
+        row.expiresAt.getTime() > now.getTime()
+      ) {
         const session = await this.sessions.resolveById(row.sessionId);
         if (session && (await this.enrollments.allows(row.identityId, row.applicationId))) {
           return {
@@ -553,7 +561,7 @@ export class TokenService {
     if (!row || row.applicationId !== client.id || row.revokedAt !== null) return;
     await this.db.refreshToken.updateMany({
       where: { id: row.id, revokedAt: null },
-      data: { revokedAt: new Date().toISOString() },
+      data: { revokedAt: new Date() },
     });
   }
 
@@ -602,6 +610,6 @@ function narrowScope(granted: string[], requested: string): string[] | null {
   return scopes.every((scope) => allowed.has(scope)) ? scopes : null;
 }
 
-function epochSeconds(instant: string): number {
-  return Math.floor(new Date(instant).getTime() / 1000);
+function epochSeconds(instant: Date): number {
+  return Math.floor(instant.getTime() / 1000);
 }

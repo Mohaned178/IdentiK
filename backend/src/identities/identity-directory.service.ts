@@ -100,8 +100,8 @@ export class IdentityDirectoryService {
     return rows.map((row) => ({
       applicationId: row.applicationId,
       applicationName: row.application.name,
-      applicationType: row.application.type as ApplicationType,
-      enrolledAt: row.createdAt,
+      applicationType: row.application.type,
+      enrolledAt: row.createdAt.toISOString(),
       suspended: row.suspendedAt !== null,
     }));
   }
@@ -113,13 +113,13 @@ export class IdentityDirectoryService {
       // An anonymized Identity has no email left; the surviving shell is
       // displayed by its id-derived pseudonym (ADR-0007).
       email: anonymized ? anonymizedPseudonym(row.id) : row.email,
-      emailVerified: row.emailVerified === 1,
+      emailVerified: row.emailVerified,
       state: identityState({
-        emailVerified: row.emailVerified === 1,
+        emailVerified: row.emailVerified,
         suspended: row.suspendedAt !== null,
         anonymized,
       }),
-      createdAt: row.createdAt,
+      createdAt: row.createdAt.toISOString(),
     };
   }
 }

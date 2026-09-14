@@ -362,8 +362,8 @@ export class AuthorizeService {
         codeChallenge: request.codeChallenge ?? null,
         codeChallengeMethod: request.codeChallengeMethod ?? null,
         nonce: request.nonce ?? null,
-        createdAt: now.toISOString(),
-        expiresAt: expiresAt.toISOString(),
+        createdAt: now,
+        expiresAt,
       },
     });
     return code;

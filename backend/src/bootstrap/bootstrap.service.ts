@@ -111,7 +111,7 @@ export class BootstrapService implements OnModuleInit {
     const administratorId = uuid();
     const membershipId = uuid();
     const passwordHash = await hashPassword(input.password);
-    const now = new Date().toISOString();
+    const now = new Date();
     // The Owner's email is a normalized handle, like every other Administrator
     // write path and the sign-in lookup (ADR-0021).
     const email = normalizeEmail(input.email);

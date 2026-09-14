@@ -5,7 +5,9 @@ import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 
-export type AdministratorRole = 'owner' | 'member';
+import type { AdministratorRole } from '../generated/prisma/client';
+
+export type { AdministratorRole };
 
 export interface AdministratorSessionInfo {
   membershipId: string;
@@ -69,8 +71,8 @@ export class AdministratorsService {
         id: uuid(),
         membershipId: membership.id,
         tokenHash: await hashToken(token),
-        createdAt: now.toISOString(),
-        expiresAt: expires.toISOString(),
+        createdAt: now,
+        expiresAt: expires,
       },
     });
 
@@ -82,7 +84,7 @@ export class AdministratorsService {
         administratorId: admin.id,
         organizationId: membership.organization.id,
         organizationName: membership.organization.name,
-        role: membership.role as AdministratorRole,
+        role: membership.role,
       },
     };
   }
@@ -130,10 +132,10 @@ export class AdministratorsService {
     });
     if (!row) return null;
     if (row.revokedAt !== null) return null;
-    if (new Date(row.expiresAt).getTime() < Date.now()) return null;
+    if (row.expiresAt.getTime() < Date.now()) return null;
     return {
       membershipId: row.membershipId,
-      role: row.membership.role as AdministratorRole,
+      role: row.membership.role,
       organizationId: row.membership.organizationId,
       organizationName: row.membership.organization.name,
       administratorId: row.membership.administratorId,
@@ -143,7 +145,7 @@ export class AdministratorsService {
   async signOut(token: string): Promise<void> {
     await this.db.adminSession.updateMany({
       where: { tokenHash: await hashToken(token) },
-      data: { revokedAt: new Date().toISOString() },
+      data: { revokedAt: new Date() },
     });
   }
 }

@@ -70,7 +70,7 @@ export class EnrollmentsService {
           id: uuid(),
           identityId: input.identityId,
           applicationId: input.applicationId,
-          createdAt: new Date().toISOString(),
+          createdAt: new Date(),
         },
       });
     } catch (error) {
@@ -145,7 +145,7 @@ export class EnrollmentsService {
     if (!current.suspended) {
       await this.db.enrollment.updateMany({
         where: { identityId: input.identityId, applicationId: input.applicationId },
-        data: { suspendedAt: new Date().toISOString() },
+        data: { suspendedAt: new Date() },
       });
       await this.sessions.revokeAllForIdentity({
         identityId: input.identityId,
@@ -222,13 +222,13 @@ export class EnrollmentsService {
     return {
       identityId: row.identityId,
       email: row.identity.email,
-      emailVerified: row.identity.emailVerified === 1,
+      emailVerified: row.identity.emailVerified,
       state: identityState({
-        emailVerified: row.identity.emailVerified === 1,
+        emailVerified: row.identity.emailVerified,
         suspended: row.identity.suspendedAt !== null,
         anonymized: row.identity.anonymizedAt !== null,
       }),
-      enrolledAt: row.createdAt,
+      enrolledAt: row.createdAt.toISOString(),
       suspended: row.suspendedAt !== null,
     };
   }
@@ -248,14 +248,14 @@ export class EnrollmentsService {
   private async find(
     identityId: string,
     applicationId: string,
-  ): Promise<{ suspendedAt: string | null } | null> {
+  ): Promise<{ suspendedAt: Date | null } | null> {
     return this.db.enrollment.findUnique({
       where: { identityId_applicationId: { identityId, applicationId } },
       select: { suspendedAt: true },
     });
   }
 
-  private gate(row: { suspendedAt: string | null }): EnrollmentGate {
+  private gate(row: { suspendedAt: Date | null }): EnrollmentGate {
     return row.suspendedAt === null ? { allowed: true } : { allowed: false, reason: 'suspended' };
   }
 }

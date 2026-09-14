@@ -104,7 +104,7 @@ export class SessionsService {
     const now = new Date();
     const expiresAt = new Date(
       now.getTime() + (await this.settings.idleTimeoutMs(input.organizationId)),
-    ).toISOString();
+    );
     await this.db.session.create({
       data: {
         id,
@@ -112,8 +112,8 @@ export class SessionsService {
         organizationId: input.organizationId,
         ssoTokenHash: hashToken(token),
         userAgent: input.userAgent,
-        createdAt: now.toISOString(),
-        lastSeenAt: now.toISOString(),
+        createdAt: now,
+        lastSeenAt: now,
         expiresAt,
       },
     });
@@ -149,7 +149,7 @@ export class SessionsService {
     const session = this.toSession(row);
     if (!session) return null;
     const expiresAt = options.touch === true ? await this.touch(row) : row.expiresAt;
-    return { ...session, createdAt: row.createdAt, expiresAt };
+    return { ...session, createdAt: row.createdAt.toISOString(), expiresAt: expiresAt.toISOString() };
   }
 
   /**
@@ -251,7 +251,7 @@ export class SessionsService {
   async revokeRefreshTokensForApplication(db: DataHandle, applicationId: string): Promise<number> {
     const changed = await db.refreshToken.updateMany({
       where: { applicationId, revokedAt: null },
-      data: { revokedAt: new Date().toISOString() },
+      data: { revokedAt: new Date() },
     });
     return changed.count;
   }
@@ -283,7 +283,7 @@ export class SessionsService {
     reason: SessionRevocationReason,
     actor: string,
   ): Promise<void> {
-    const now = new Date().toISOString();
+    const now = new Date();
     await db.session.updateMany({
       where: { id: row.id, revokedAt: null },
       data: { revokedAt: now },
@@ -304,8 +304,8 @@ export class SessionsService {
     return {
       id: row.id,
       device: row.userAgent,
-      createdAt: row.createdAt,
-      lastSeenAt: row.lastSeenAt,
+      createdAt: row.createdAt.toISOString(),
+      lastSeenAt: row.lastSeenAt.toISOString(),
     };
   }
 
@@ -322,14 +322,14 @@ export class SessionsService {
    * refreshes the window" rule — no scheduler exists, so idleness is judged
    * lazily at the next resolution.
    */
-  private async touch(row: { id: string; organizationId: string }): Promise<string> {
+  private async touch(row: { id: string; organizationId: string }): Promise<Date> {
     const now = new Date();
     const expiresAt = new Date(
       now.getTime() + (await this.settings.idleTimeoutMs(row.organizationId)),
-    ).toISOString();
+    );
     await this.db.session.update({
       where: { id: row.id },
-      data: { lastSeenAt: now.toISOString(), expiresAt },
+      data: { lastSeenAt: now, expiresAt },
     });
     return expiresAt;
   }
@@ -346,11 +346,11 @@ export class SessionsService {
   }
 
   private isLive(row: SessionWithIdentity): boolean {
-    const now = new Date().toISOString();
+    const now = new Date();
     if (row.revokedAt !== null) return false;
     // `expiresAt` is the idle deadline the Organization's window sets and
     // every activity refreshes (ADR-0022), so an untouched Session lapses.
-    if (row.expiresAt <= now) return false;
+    if (row.expiresAt.getTime() <= now.getTime()) return false;
     // The Identity's own gate is shared with the credential and token paths,
     // so suspension, anonymization, and an unverified handle cannot be
     // half-enforced here (ADR-0006/0007/0011).

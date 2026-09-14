@@ -1,3 +1,4 @@
+import type { Prisma } from '../generated/prisma/client';
 import type { DataHandle } from './data-access';
 import { uuid } from '../bootstrap/uuid';
 
@@ -6,8 +7,8 @@ import { uuid } from '../bootstrap/uuid';
  * every security-relevant action records who/what/when against its
  * Organization. Central here so the shape cannot drift between feature
  * modules. Accepts the injected client or a transaction handle, so a write
- * inside a unit of work stays in it. Typed since Stage 2's foundation; the
- * detail stays a JSON string until the native jsonb conversion.
+ * inside a unit of work stays in it. Since ticket 15 the detail is stored as
+ * native JSONB and the instant is a native date.
  */
 export async function recordAuditEvent(
   db: DataHandle,
@@ -16,7 +17,7 @@ export async function recordAuditEvent(
     actor: string;
     kind: string;
     detail: Record<string, unknown>;
-    occurredAt?: string;
+    occurredAt?: Date;
   },
 ): Promise<void> {
   await db.auditEvent.create({
@@ -25,8 +26,8 @@ export async function recordAuditEvent(
       organizationId: event.organizationId,
       kind: event.kind,
       actor: event.actor,
-      detail: JSON.stringify(event.detail),
-      occurredAt: event.occurredAt ?? new Date().toISOString(),
+      detail: event.detail as Prisma.InputJsonValue,
+      occurredAt: event.occurredAt ?? new Date(),
     },
   });
 }

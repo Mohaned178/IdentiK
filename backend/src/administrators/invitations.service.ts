@@ -83,7 +83,7 @@ export class InvitationsService {
 
     const invitationId = uuid();
     const token = randomToken(32);
-    const now = new Date().toISOString();
+    const now = new Date();
     await this.db.administratorInvitation.create({
       data: {
         id: invitationId,
@@ -92,7 +92,7 @@ export class InvitationsService {
         role: input.role,
         tokenHash: hashToken(token),
         invitedBy: input.invitedBy,
-        expiresAt: new Date(Date.now() + this.invitationTtlMs()).toISOString(),
+        expiresAt: new Date(Date.now() + this.invitationTtlMs()),
         createdAt: now,
       },
     });
@@ -132,13 +132,13 @@ export class InvitationsService {
     if (!row) {
       return { valid: false, organizationName: '', email: null, role: null };
     }
-    const live = row.consumedAt === null && new Date(row.expiresAt).getTime() > Date.now();
+    const live = row.consumedAt === null && row.expiresAt.getTime() > Date.now();
     if (!live && row.consumedAt === null) await this.auditExpiryOnce(row);
     return {
       valid: live,
       organizationName: row.organization.name,
       email: live ? row.email : null,
-      role: live ? (row.role as AdministratorRole) : null,
+      role: live ? row.role : null,
     };
   }
 
@@ -158,7 +158,7 @@ export class InvitationsService {
     if (!invitation || invitation.consumedAt !== null) {
       return { ok: false, reason: 'invalid' };
     }
-    if (new Date(invitation.expiresAt).getTime() <= Date.now()) {
+    if (invitation.expiresAt.getTime() <= Date.now()) {
       await this.auditExpiryOnce(invitation);
       return { ok: false, reason: 'expired' };
     }
@@ -170,7 +170,7 @@ export class InvitationsService {
     const passwordHash = await hashPassword(input.password);
     const administratorId = uuid();
     const membershipId = uuid();
-    const now = new Date().toISOString();
+    const now = new Date();
 
     let consumed: boolean;
     try {
@@ -226,7 +226,7 @@ export class InvitationsService {
       organizationId: invitation.organizationId,
       organizationName: invitation.organization.name,
       email: invitation.email,
-      role: invitation.role as AdministratorRole,
+      role: invitation.role,
     };
   }
 
@@ -255,7 +255,7 @@ export class InvitationsService {
    * race-free across both paths.
    */
   private async auditExpiryOnce(invitation: InvitationWithOrganization): Promise<void> {
-    const now = new Date().toISOString();
+    const now = new Date();
     const marked = await this.db.administratorInvitation.updateMany({
       where: { id: invitation.id, expiryAuditedAt: null },
       data: { expiryAuditedAt: now },
