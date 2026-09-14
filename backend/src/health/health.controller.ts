@@ -2,6 +2,7 @@ import { Controller, Get, Inject, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { MailHealth } from '../mail/mail-transport';
 import { MailService } from '../mail/mail.service';
+import { ShutdownService } from '../lifecycle/shutdown.service';
 import { DATABASE, type Database } from '../storage/token';
 
 /** How long the readiness database probe may take before it counts as down. */
@@ -13,7 +14,8 @@ export interface LivenessView {
 
 export interface ReadinessView {
   status: 'ok' | 'degraded' | 'unavailable';
-  checks: {
+  /** Present whenever the dependencies were probed; absent while draining. */
+  checks?: {
     database: { ok: boolean };
     mail: MailHealth;
   };
@@ -24,14 +26,17 @@ export interface ReadinessView {
  * orchestrator never restarts it for a slow dependency; readiness reports the
  * dependencies — the database gates readiness (503 when unreachable), the mail
  * relay only degrades it: the SMTP-binding contract keeps an unreachable relay
- * diagnostic, never fatal. Both bodies are deliberately coarse: booleans and
- * the binding name, never a host, an error string, or a timestamp.
+ * diagnostic, never fatal. A draining Instance reports unavailable at once —
+ * no probes — so a restart stops receiving new work. Both bodies are
+ * deliberately coarse: booleans and the binding name, never a host, an error
+ * string, or a timestamp.
  */
 @Controller('health')
 export class HealthController {
   constructor(
     private readonly mail: MailService,
     @Inject(DATABASE) private readonly db: Database,
+    private readonly shutdown: ShutdownService,
   ) {}
 
   @Get('live')
@@ -41,6 +46,11 @@ export class HealthController {
 
   @Get('ready')
   async readiness(@Res({ passthrough: true }) res: Response): Promise<ReadinessView> {
+    // Draining: the verdict is immediate — no probe may delay the 503.
+    if (this.shutdown.isDraining()) {
+      res.status(503);
+      return { status: 'unavailable' };
+    }
     const [database, mail] = await Promise.all([this.databaseProbe(), this.mail.health()]);
     const status = !database.ok ? 'unavailable' : mail.reachable ? 'ok' : 'degraded';
     if (status === 'unavailable') res.status(503);

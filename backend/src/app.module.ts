@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from './config/config.module';
 import { HealthModule } from './health/health.module';
+import { LifecycleModule } from './lifecycle/lifecycle.module';
 import { MailModule } from './mail/mail.module';
 import { StorageModule } from './storage/storage.module';
 import { BootstrapModule } from './bootstrap/bootstrap.module';
@@ -14,6 +15,7 @@ import { SettingsModule } from './settings/settings.module';
 @Module({
   imports: [
     ConfigModule,
+    LifecycleModule,
     HealthModule,
     MailModule,
     StorageModule,

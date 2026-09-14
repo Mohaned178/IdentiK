@@ -168,6 +168,33 @@ export class Instance {
       await dropDatabase(this.databaseName);
     }
   }
+
+  /** Send SIGTERM; the Instance is expected to drain its in-flight work and exit. */
+  async terminate(): Promise<void> {
+    if (this.disposed || !this.child) return;
+    this.child.kill('SIGTERM');
+  }
+
+  /** Resolve with the exit code when the process exits; reject if it outlives the timeout. */
+  async waitForExit(timeoutMs = 15_000): Promise<number | null> {
+    const child = this.child;
+    if (!child) throw new Error('the Instance is not running');
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        onceExit(child),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`the Instance did not exit within ${timeoutMs}ms`)),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    return child.exitCode;
+  }
 }
 
 async function waitUntilHealthy(url: string, child: ChildProcess): Promise<void> {
@@ -211,6 +238,22 @@ export function freePort(): Promise<number> {
 
 export function backendDistFromWorkspaceRoot(root: string): string {
   return join(root, 'backend', 'dist');
+}
+
+/**
+ * Starts an Instance that is expected to refuse to boot (bad configuration or
+ * a schema gate). Returns the process output — the refusal message an
+ * operator would see — and throws when the Instance served traffic instead.
+ */
+export async function startupRefusal(starting: Promise<Instance>): Promise<string> {
+  let instance: Instance;
+  try {
+    instance = await starting;
+  } catch (error) {
+    return String(error);
+  }
+  await instance.stop();
+  throw new Error('expected the Instance to refuse to start, but it served traffic');
 }
 
 export { WORKSPACE_ROOT } from './provision';
