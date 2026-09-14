@@ -4,11 +4,11 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `/health/live` answers 200 `{ "status": "ok" }` while the process serves.
-- [ ] `/health/ready` answers 200 for `ok` and `degraded`, 503 for `unavailable`; making PostgreSQL unreachable flips it and restoring connectivity recovers it.
-- [ ] An unreachable mail relay yields `degraded`, never 503, and no relay endpoint or error text appears in the body.
-- [ ] Bodies carry no hosts, error strings, or timestamps; both endpoints stay unauthenticated.
-- [ ] `/health` answers as the readiness alias; the e2e harness uses `/health/ready` as its ready probe.
-- [ ] Suite green.
+- [x] `/health/live` answers 200 `{ "status": "ok" }` while the process serves.
+- [x] `/health/ready` answers 200 for `ok` and `degraded`, 503 for `unavailable`; making PostgreSQL unreachable flips it and restoring connectivity recovers it.
+- [x] An unreachable mail relay yields `degraded`, never 503, and no relay endpoint or error text appears in the body.
+- [x] Bodies carry no hosts, error strings, or timestamps; both endpoints stay unauthenticated.
+- [x] `/health` answers as the readiness alias; the e2e harness uses `/health/ready` as its ready probe.
+- [x] Suite green.
