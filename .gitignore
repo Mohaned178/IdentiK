@@ -3,6 +3,7 @@ dist/
 *.tsbuildinfo
 coverage/
 .env
+local/.env
 deploy/backup.conf
 .agents/skills/impeccable/scripts/bin/
 backend/src/generated/
