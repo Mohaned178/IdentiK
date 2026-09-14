@@ -1,19 +1,20 @@
+import { type CountName, type DurationName, instanceConfig } from './instance-config';
+
 /**
- * Parse a positive-millisecond duration from the Instance Operator's
- * deployment configuration, falling back to the feature's default when unset
- * or nonsensical. The exact windows are deliberately left open by the spec.
+ * Read a deployment duration from the validated configuration. Values were
+ * validated once at startup (see instance-config); a variable that is absent
+ * keeps the caller's documented default. Present-but-invalid values never
+ * reach here — they fail startup with the variable named.
  */
-export function parseTtlMs(name: string, fallbackMs: number): number {
-  const raw = Number(process.env[name]);
-  return Number.isFinite(raw) && raw > 0 ? raw : fallbackMs;
+export function parseTtlMs(name: DurationName, fallbackMs: number): number {
+  return instanceConfig().durations.get(name) ?? fallbackMs;
 }
 
 /**
- * Parse a non-negative whole-number count (e.g. the number of attempts
- * allowed before throttling escalates) from deployment configuration,
- * falling back when unset or nonsensical.
+ * Read a non-negative whole-number count from the validated configuration
+ * (e.g. the number of attempts allowed before throttling escalates). Absent
+ * names keep the caller's documented default.
  */
-export function parseCount(name: string, fallback: number): number {
-  const raw = Number(process.env[name]);
-  return Number.isInteger(raw) && raw >= 0 ? raw : fallback;
+export function parseCount(name: CountName, fallback: number): number {
+  return instanceConfig().counts.get(name) ?? fallback;
 }

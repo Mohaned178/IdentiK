@@ -1,3 +1,5 @@
+import { optionalEnv } from '../config/env-var';
+
 /**
  * SMTP connection details come from deployment configuration only (ADR-0022):
  * the Instance Operator holds the trust fabric, and these values are never
@@ -44,8 +46,8 @@ export function readSmtpSettings(env: NodeJS.ProcessEnv = process.env): SmtpSett
 }
 
 function smtpAuth(env: NodeJS.ProcessEnv): SmtpAuth | null {
-  const user = optional(env, 'SMTP_USER');
-  const password = optional(env, 'SMTP_PASSWORD');
+  const user = optionalEnv(env, 'SMTP_USER');
+  const password = optionalEnv(env, 'SMTP_PASSWORD');
   if (user && !password) {
     throw new Error(
       'SMTP_PASSWORD must be set when SMTP_USER is set — refusing to authenticate with an empty credential.',
@@ -60,18 +62,11 @@ function smtpAuth(env: NodeJS.ProcessEnv): SmtpAuth | null {
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
-  const value = optional(env, name);
+  const value = optionalEnv(env, name);
   if (value === null) {
     throw new Error(`${name} must be set when MAIL_TRANSPORT_BINDING=smtp.`);
   }
   return value;
-}
-
-function optional(env: NodeJS.ProcessEnv, name: string): string | null {
-  const raw = env[name];
-  if (typeof raw !== 'string') return null;
-  const value = raw.trim();
-  return value.length > 0 ? value : null;
 }
 
 function smtpPort(env: NodeJS.ProcessEnv): number {

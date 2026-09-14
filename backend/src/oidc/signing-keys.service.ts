@@ -12,6 +12,7 @@ import {
   type KeyLike,
 } from 'jose';
 import { IssuerService } from './issuer.service';
+import { instanceConfig } from '../config/instance-config';
 
 export interface AccessTokenClaims extends JWTPayload {
   sub: string;
@@ -47,7 +48,7 @@ export class SigningKeysService implements OnModuleInit {
   constructor(private readonly issuer: IssuerService) {}
 
   async onModuleInit(): Promise<void> {
-    const configured = process.env.IDENTIK_SIGNING_JWKS;
+    const configured = instanceConfig().signingJwks;
     await this.load(configured ? this.parseConfigured(configured) : await this.ephemeral());
     this.verifier = createLocalJWKSet({ keys: this.keys.map((key) => key.publicJwk) });
   }

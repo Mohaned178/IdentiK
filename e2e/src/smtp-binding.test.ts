@@ -41,7 +41,10 @@ interface MailHealth {
 
 interface HealthView {
   status: string;
-  mail: MailHealth;
+  checks: {
+    database: { ok: boolean };
+    mail: MailHealth;
+  };
 }
 
 /** A local SMTP relay that records the mail the Instance hands it. */
@@ -122,7 +125,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function health(instance: Instance): Promise<HealthView> {
-  const res = await instance.request('/health');
+  const res = await instance.request('/health/ready');
   expect(res.status).toBe(200);
   return (await res.json()) as HealthView;
 }
@@ -136,7 +139,7 @@ async function waitForMailHealth(
   let last: HealthView | undefined;
   while (Date.now() < deadline) {
     last = await health(instance);
-    if (predicate(last.mail)) return last;
+    if (predicate(last.checks.mail)) return last;
     await sleep(250);
   }
   throw new Error(`mail health never matched; last seen: ${JSON.stringify(last)}`);
@@ -219,7 +222,7 @@ describe('SMTP transport binding delivers platform mail', () => {
   it('health names the SMTP binding and reports the relay reachable, exposing no infrastructure detail', async () => {
     const view = await health(instance);
     expect(view.status).toBe('ok');
-    expect(view.mail).toEqual({ binding: 'smtp', reachable: true });
+    expect(view.checks.mail).toEqual({ binding: 'smtp', reachable: true });
     expect(JSON.stringify(view)).not.toContain(RELAY_PASSWORD);
     expect(JSON.stringify(view)).not.toContain(`127.0.0.1:${sink.port}`);
   });
@@ -361,7 +364,7 @@ describe('misconfigured SMTP relay is diagnosable without leaking secrets', () =
   it('health reports the unreachable relay as degraded, exposing neither endpoint nor credential', async () => {
     const view = await waitForMailHealth(instance, (mail) => !mail.reachable);
     expect(view.status).toBe('degraded');
-    expect(view.mail).toEqual({ binding: 'smtp', reachable: false });
+    expect(view.checks.mail).toEqual({ binding: 'smtp', reachable: false });
     expect(JSON.stringify(view)).not.toContain(RELAY_PASSWORD);
     expect(JSON.stringify(view)).not.toContain(`127.0.0.1:${port}`);
   });
@@ -414,7 +417,7 @@ describe('the capture binding remains the test binding', () => {
   it('is selected by configuration alone, with the capture surface mounted', async () => {
     const view = await health(instance);
     expect(view.status).toBe('ok');
-    expect(view.mail).toEqual({ binding: 'capture', reachable: true });
+    expect(view.checks.mail).toEqual({ binding: 'capture', reachable: true });
 
     const sent = await instance.request('/dev/mail', {
       method: 'POST',

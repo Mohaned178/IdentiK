@@ -1,38 +1,10 @@
 import { Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client';
+import { instanceConfig } from '../config/instance-config';
 
 /** The one documented way an Instance Operator brings the schema up to date. */
 const MIGRATE_COMMAND = 'npx prisma migrate deploy';
-
-/**
- * Read and validate the Instance's persistence configuration. The database
- * URL is the only storage setting; it must be present and an absolute
- * PostgreSQL URL with a host and a database name before any connection is
- * attempted.
- */
-function databaseUrl(): string {
-  const url = process.env.DATABASE_URL;
-  if (!url) {
-    throw new Error('DATABASE_URL must be set to the PostgreSQL connection URL');
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error('DATABASE_URL must be an absolute PostgreSQL URL');
-  }
-  if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') {
-    throw new Error('DATABASE_URL must use the postgres:// or postgresql:// scheme');
-  }
-  if (parsed.hostname.length === 0) {
-    throw new Error('DATABASE_URL must name a PostgreSQL host');
-  }
-  if (parsed.pathname.length <= 1) {
-    throw new Error('DATABASE_URL must name a database');
-  }
-  return url;
-}
 
 /** Whether a statement failed because the table it names does not exist. */
 function isUndefinedTable(error: unknown): boolean {
@@ -84,7 +56,7 @@ async function assertSchemaPresent(prisma: PrismaClient): Promise<void> {
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   constructor() {
     super({
-      adapter: new PrismaPg({ connectionString: databaseUrl() }),
+      adapter: new PrismaPg({ connectionString: instanceConfig().databaseUrl }),
       // SQLite let a unit of work run as long as it needed on its one
       // connection; Prisma's defaults (5s timeout, 2s wait for a connection)
       // would be a new failure mode for large cascades such as a revoke-all.

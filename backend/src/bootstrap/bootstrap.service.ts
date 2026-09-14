@@ -6,6 +6,7 @@ import {
   randomToken,
 } from '../crypto/password';
 import { normalizeEmail } from '../identities/email';
+import { parseTtlMs } from '../config/env';
 import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from './uuid';
@@ -205,8 +206,7 @@ export class BootstrapService implements OnModuleInit {
   }
 
   private tokenTtlMs(): number {
-    const raw = Number(process.env.IDENTIK_SETUP_TOKEN_TTL_MS);
-    return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60 * 1000;
+    return parseTtlMs('IDENTIK_SETUP_TOKEN_TTL_MS', 30 * 60 * 1000);
   }
 
   private tokenTtlLabel(): string {

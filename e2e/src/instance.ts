@@ -29,7 +29,7 @@ export class Instance {
 
   private constructor(
     readonly url: string,
-    private readonly databaseName: string,
+    readonly databaseName: string,
   ) {}
 
   static async start(backendDist: string, env: Record<string, string> = {}): Promise<Instance> {
@@ -60,6 +60,9 @@ export class Instance {
         DATABASE_URL: databaseUrl(databaseName),
         IDENTIK_BASE_URL: url,
         MAIL_TRANSPORT_BINDING: 'capture',
+        // The suite runs the Instance in development mode: captured mail and
+        // ephemeral signing keys. Production-strict tests clear it explicitly.
+        IDENTIK_DEV_MODE: '1',
         ...env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -174,7 +177,7 @@ async function waitUntilHealthy(url: string, child: ChildProcess): Promise<void>
       throw new Error(`Instance exited before becoming healthy (code ${child.exitCode})`);
     }
     try {
-      const res = await fetch(new URL('/health', url));
+      const res = await fetch(new URL('/health/ready', url));
       if (res.ok) return;
     } catch {
       // not up yet

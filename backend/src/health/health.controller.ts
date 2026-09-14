@@ -1,20 +1,76 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Inject, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { MailHealth } from '../mail/mail-transport';
 import { MailService } from '../mail/mail.service';
+import { DATABASE, type Database } from '../storage/token';
 
-export interface HealthView {
-  /** `degraded` when a configured dependency — today, the mail relay — is unreachable. */
-  status: 'ok' | 'degraded';
-  mail: MailHealth;
+/** How long the readiness database probe may take before it counts as down. */
+const DATABASE_PROBE_TIMEOUT_MS = 2_000;
+
+export interface LivenessView {
+  status: 'ok';
 }
 
+export interface ReadinessView {
+  status: 'ok' | 'degraded' | 'unavailable';
+  checks: {
+    database: { ok: boolean };
+    mail: MailHealth;
+  };
+}
+
+/**
+ * The Instance's operational surface. Liveness reports the process alone so an
+ * orchestrator never restarts it for a slow dependency; readiness reports the
+ * dependencies — the database gates readiness (503 when unreachable), the mail
+ * relay only degrades it: the SMTP-binding contract keeps an unreachable relay
+ * diagnostic, never fatal. Both bodies are deliberately coarse: booleans and
+ * the binding name, never a host, an error string, or a timestamp.
+ */
 @Controller('health')
 export class HealthController {
-  constructor(private readonly mail: MailService) {}
+  constructor(
+    private readonly mail: MailService,
+    @Inject(DATABASE) private readonly db: Database,
+  ) {}
 
+  @Get('live')
+  liveness(): LivenessView {
+    return { status: 'ok' };
+  }
+
+  @Get('ready')
+  async readiness(@Res({ passthrough: true }) res: Response): Promise<ReadinessView> {
+    const [database, mail] = await Promise.all([this.databaseProbe(), this.mail.health()]);
+    const status = !database.ok ? 'unavailable' : mail.reachable ? 'ok' : 'degraded';
+    if (status === 'unavailable') res.status(503);
+    return { status, checks: { database, mail } };
+  }
+
+  /** The original health path stays as the readiness alias. */
   @Get()
-  async health(): Promise<HealthView> {
-    const mail = await this.mail.health();
-    return { status: mail.reachable ? 'ok' : 'degraded', mail };
+  alias(@Res({ passthrough: true }) res: Response): Promise<ReadinessView> {
+    return this.readiness(res);
+  }
+
+  /** A bounded, uncached connectivity probe — never the schema check. */
+  private async databaseProbe(): Promise<{ ok: boolean }> {
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        this.db.$queryRaw`SELECT 1`,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('database probe timed out')),
+            DATABASE_PROBE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 }

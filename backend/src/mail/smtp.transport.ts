@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { createTransport, type Transporter } from 'nodemailer';
+import { ConfigurationError, instanceConfig } from '../config/instance-config';
 import { MailTransport, MailTransportStatus, OutboundEmail } from './mail-transport';
-import { readSmtpSettings } from './smtp.config';
 
 /** How long a reachability verdict is trusted before the relay is probed again. */
 const STATUS_CACHE_MS = 5_000;
@@ -28,7 +28,12 @@ export class SmtpMailTransport implements MailTransport, OnModuleInit {
   private cached: { at: number; status: MailTransportStatus } | null = null;
 
   constructor() {
-    const settings = readSmtpSettings();
+    const settings = instanceConfig().smtp;
+    if (settings === null) {
+      throw new ConfigurationError(
+        'SMTP settings are required when MAIL_TRANSPORT_BINDING=smtp.',
+      );
+    }
     this.endpoint = `${settings.host}:${settings.port}`;
     this.from = settings.from;
     this.secrets = settings.auth ? [settings.auth.password, settings.auth.user] : [];
