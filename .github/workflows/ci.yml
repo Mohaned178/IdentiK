@@ -56,3 +56,25 @@ jobs:
 
       - name: End-to-end tests
         run: npm run test -w e2e
+
+  image:
+    name: Build image (no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the image without pushing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          sbom: false
+          tags: identik:ci
