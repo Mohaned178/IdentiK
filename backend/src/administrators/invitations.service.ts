@@ -1,8 +1,9 @@
 import { ConflictException, Inject, Injectable } from '@nestjs/common';
-import { hashPassword, hashToken, randomToken } from '../crypto/password';
+import { hashPassword } from '../crypto/password';
 import { parseTtlMs } from '../config/env';
 import { LinkBaseService } from '../config/link-base.service';
 import { normalizeEmail } from '../identities/email';
+import { MailboxProofService } from '../mailbox-proof/mailbox-proof.service';
 import { MailService } from '../mail/mail.service';
 import { Prisma } from '../generated/prisma/client';
 import { recordAuditEvent } from '../storage/audit';
@@ -28,14 +29,6 @@ export type InvitationAcceptance =
     }
   | { ok: false; reason: 'invalid' | 'expired' };
 
-const INVITATION_WITH_ORGANIZATION = {
-  organization: { select: { name: true } },
-} satisfies Prisma.AdministratorInvitationInclude;
-
-type InvitationWithOrganization = Prisma.AdministratorInvitationGetPayload<{
-  include: typeof INVITATION_WITH_ORGANIZATION;
-}>;
-
 /**
  * The Administrator membership lifecycle (ADR-0021) obeying the rules the
  * platform sells: an Owner invites by email, the invitee sets their own
@@ -49,6 +42,7 @@ type InvitationWithOrganization = Prisma.AdministratorInvitationGetPayload<{
 export class InvitationsService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
+    private readonly proofs: MailboxProofService,
     private readonly mail: MailService,
     private readonly links: LinkBaseService,
   ) {}
@@ -80,21 +74,16 @@ export class InvitationsService {
       select: { name: true },
     });
 
-    const invitationId = uuid();
-    const token = randomToken(32);
-    const now = new Date();
-    await this.db.administratorInvitation.create({
-      data: {
-        id: invitationId,
+    const { id: invitationId, token } = await this.proofs.issue(
+      {
+        kind: 'administrator_invitation',
         organizationId: input.organizationId,
         email,
         role: input.role,
-        tokenHash: hashToken(token),
         invitedBy: input.invitedBy,
-        expiresAt: new Date(Date.now() + this.invitationTtlMs()),
-        createdAt: now,
       },
-    });
+      this.invitationTtlMs(),
+    );
 
     await recordAuditEvent(this.db, {
       organizationId: input.organizationId,
@@ -127,17 +116,16 @@ export class InvitationsService {
    * observable, so it is audited here (once) as well as on a direct accept.
    */
   async inspect(token: string): Promise<InvitationInfo> {
-    const row = await this.findByToken(token);
-    if (!row) {
+    const peeked = await this.proofs.peek('administrator_invitation', token);
+    if (peeked.status === 'invalid') {
       return { valid: false, organizationName: '', email: null, role: null };
     }
-    const live = row.consumedAt === null && row.expiresAt.getTime() > Date.now();
-    if (!live && row.consumedAt === null) await this.auditExpiryOnce(row);
+    const live = peeked.status === 'live';
     return {
       valid: live,
-      organizationName: row.organization.name,
-      email: live ? row.email : null,
-      role: live ? row.role : null,
+      organizationName: peeked.payload.organizationName,
+      email: live ? peeked.payload.email : null,
+      role: live ? peeked.payload.role : null,
     };
   }
 
@@ -153,16 +141,11 @@ export class InvitationsService {
     name: string;
     password: string;
   }): Promise<InvitationAcceptance> {
-    const invitation = await this.findByToken(input.token);
-    if (!invitation || invitation.consumedAt !== null) {
-      return { ok: false, reason: 'invalid' };
-    }
-    if (invitation.expiresAt.getTime() <= Date.now()) {
-      await this.auditExpiryOnce(invitation);
-      return { ok: false, reason: 'expired' };
-    }
+    const peeked = await this.proofs.peek('administrator_invitation', input.token);
+    if (peeked.status === 'expired') return { ok: false, reason: 'expired' };
+    if (peeked.status !== 'live') return { ok: false, reason: 'invalid' };
 
-    if (await this.administratorExists(invitation.email)) {
+    if (await this.administratorExists(peeked.payload.email)) {
       return { ok: false, reason: 'invalid' };
     }
 
@@ -174,16 +157,13 @@ export class InvitationsService {
     let consumed: boolean;
     try {
       consumed = await this.db.$transaction(async (tx) => {
-        const claimed = await tx.administratorInvitation.updateMany({
-          where: { id: invitation.id, consumedAt: null, expiresAt: { gt: now } },
-          data: { consumedAt: now },
-        });
-        if (claimed.count !== 1) return false;
+        const claim = await this.proofs.consume('administrator_invitation', input.token, tx);
+        if (claim.status !== 'claimed') return false;
 
         await tx.administrator.create({
           data: {
             id: administratorId,
-            email: invitation.email,
+            email: claim.payload.email,
             name: input.name,
             passwordHash,
             createdAt: now,
@@ -192,21 +172,21 @@ export class InvitationsService {
         await tx.membership.create({
           data: {
             id: membershipId,
-            organizationId: invitation.organizationId,
+            organizationId: claim.payload.organizationId,
             administratorId,
-            role: invitation.role,
+            role: claim.payload.role,
           },
         });
 
         await recordAuditEvent(tx, {
-          organizationId: invitation.organizationId,
+          organizationId: claim.payload.organizationId,
           actor: administratorId,
           kind: 'administrator.invitation.accepted',
           detail: {
-            invitationId: invitation.id,
+            invitationId: claim.payload.id,
             administratorId,
-            email: invitation.email,
-            role: invitation.role,
+            email: claim.payload.email,
+            role: claim.payload.role,
           },
         });
         return true;
@@ -226,10 +206,10 @@ export class InvitationsService {
     return {
       ok: true,
       administratorId,
-      organizationId: invitation.organizationId,
-      organizationName: invitation.organization.name,
-      email: invitation.email,
-      role: invitation.role,
+      organizationId: peeked.payload.organizationId,
+      organizationName: peeked.payload.organizationName,
+      email: peeked.payload.email,
+      role: peeked.payload.role,
     };
   }
 
@@ -243,34 +223,6 @@ export class InvitationsService {
       select: { id: true },
     });
     return administrator !== null;
-  }
-
-  private async findByToken(token: string): Promise<InvitationWithOrganization | null> {
-    return this.db.administratorInvitation.findUnique({
-      where: { tokenHash: hashToken(token) },
-      include: INVITATION_WITH_ORGANIZATION,
-    });
-  }
-
-  /**
-   * Expiry has no scheduler, so it is recorded the first time a dead link is
-   * presented (page load or accept). The guarded UPDATE makes "audit once"
-   * race-free across both paths.
-   */
-  private async auditExpiryOnce(invitation: InvitationWithOrganization): Promise<void> {
-    const now = new Date();
-    const marked = await this.db.administratorInvitation.updateMany({
-      where: { id: invitation.id, expiryAuditedAt: null },
-      data: { expiryAuditedAt: now },
-    });
-    if (marked.count !== 1) return;
-    await recordAuditEvent(this.db, {
-      organizationId: invitation.organizationId,
-      actor: 'instance',
-      kind: 'administrator.invitation.expired',
-      detail: { invitationId: invitation.id, email: invitation.email },
-      occurredAt: now,
-    });
   }
 
   private async sendInvitationEmail(input: {

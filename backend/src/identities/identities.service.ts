@@ -2,12 +2,11 @@ import { ConflictException, Inject, Injectable, NotFoundException, BadRequestExc
 import {
   DUMMY_PASSWORD_HASH,
   hashPassword,
-  hashToken,
-  randomToken,
   verifyPassword,
 } from '../crypto/password';
 import { parseTtlMs } from '../config/env';
 import { LinkBaseService } from '../config/link-base.service';
+import { MailboxProofService } from '../mailbox-proof/mailbox-proof.service';
 import { MailService } from '../mail/mail.service';
 import { SessionsService } from '../sessions/sessions.service';
 import {
@@ -16,7 +15,7 @@ import {
 } from '../settings/organization-settings.service';
 import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
-import { Prisma, type IdentityTokenKind } from '../generated/prisma/client';
+import { Prisma } from '../generated/prisma/client';
 import { uuid } from '../bootstrap/uuid';
 import { normalizeEmail } from './email';
 import { anonymizedHandle, anonymizedPseudonym, identityGate } from './identity-state';
@@ -87,6 +86,7 @@ export type IdentityAuthentication =
 export class IdentitiesService {
   constructor(
     @Inject(DATABASE) private readonly db: Database,
+    private readonly proofs: MailboxProofService,
     private readonly mail: MailService,
     private readonly links: LinkBaseService,
     private readonly sessions: SessionsService,
@@ -162,9 +162,8 @@ export class IdentitiesService {
         kind: 'identity.reservation.created',
         detail: { email },
       });
-      const token = await this.issueToken(
-        reservation.identityId,
-        'email_verification',
+      const { token } = await this.proofs.issue(
+        { kind: 'email_verification', identityId: reservation.identityId },
         this.verificationTtlMs(),
       );
       await this.sendVerificationEmail(email, organization.name, token);
@@ -186,26 +185,24 @@ export class IdentitiesService {
    * without saying whether the token was expired, used, or never existed.
    */
   async verifyEmail(token: string): Promise<boolean> {
-    const identityId = await this.consumeToken('email_verification', token);
-    if (!identityId) return false;
+    const claim = await this.proofs.consume('email_verification', token);
+    if (claim.status !== 'claimed') return false;
 
     const activated = await this.db.identity.updateMany({
-      where: { id: identityId, emailVerified: false, anonymizedAt: null },
+      where: {
+        id: claim.payload.identityId,
+        emailVerified: false,
+        anonymizedAt: null,
+      },
       data: { emailVerified: true },
     });
     if (activated.count !== 1) return false;
 
-    const identity = await this.db.identity.findUnique({
-      where: { id: identityId },
-      select: { organizationId: true, email: true },
-    });
-    if (!identity) return false;
-
     await recordAuditEvent(this.db, {
-      organizationId: identity.organizationId,
+      organizationId: claim.payload.organizationId,
       actor: 'end-user',
       kind: 'identity.verification.completed',
-      detail: { identityId, email: identity.email },
+      detail: { identityId: claim.payload.identityId, email: claim.payload.email },
     });
     return true;
   }
@@ -235,7 +232,10 @@ export class IdentitiesService {
       return;
     }
 
-    const token = await this.issueToken(identity.id, 'password_reset', this.resetTtlMs());
+    const { token } = await this.proofs.issue(
+      { kind: 'password_reset', identityId: identity.id },
+      this.resetTtlMs(),
+    );
     await this.sendPasswordResetEmail(email, organization.name, token);
   }
 
@@ -245,7 +245,8 @@ export class IdentitiesService {
    * token — only completing the reset does.
    */
   async validateResetToken(token: string): Promise<boolean> {
-    return this.peekToken('password_reset', token);
+    const peeked = await this.proofs.peek('password_reset', token);
+    return peeked.status === 'live';
   }
 
   /**
@@ -264,13 +265,15 @@ export class IdentitiesService {
     // the token is consumed, so a weak password does not burn the reset link —
     // the End User can try again with a stronger one.
     const passwordHash = await hashPassword(password);
-    const preview = await this.previewToken('password_reset', token);
-    if (preview) await this.assertPasswordPolicy(preview.organizationId, password);
+    const preview = await this.proofs.peek('password_reset', token);
+    if (preview.status === 'live') {
+      await this.assertPasswordPolicy(preview.payload.organizationId, password);
+    }
 
-    const identityId = await this.consumeToken('password_reset', token);
-    if (!identityId) return false;
+    const claim = await this.proofs.consume('password_reset', token);
+    if (claim.status !== 'claimed') return false;
 
-    const identity = await this.findIdentityById(identityId);
+    const identity = await this.findIdentityById(claim.payload.identityId);
     if (!identity || identity.anonymizedAt !== null) return false;
 
     const now = new Date();
@@ -407,24 +410,16 @@ export class IdentitiesService {
       return;
     }
 
-    // One pending change per Identity: a fresh request invalidates the last.
-    await this.db.emailChangeRequest.deleteMany({
-      where: { identityId: identity.id, consumedAt: null },
-    });
-
-    const token = randomToken(32);
-    const now = new Date();
-    await this.db.emailChangeRequest.create({
-      data: {
-        id: uuid(),
+    // One pending change per Identity: the fresh proof supersedes the last.
+    const { token } = await this.proofs.issue(
+      {
+        kind: 'email_change',
         organizationId: identity.organizationId,
         identityId: identity.id,
         newEmail,
-        tokenHash: hashToken(token),
-        expiresAt: new Date(now.getTime() + this.emailChangeTtlMs()),
-        createdAt: now,
       },
-    });
+      this.emailChangeTtlMs(),
+    );
     await recordAuditEvent(this.db, {
       organizationId: identity.organizationId,
       actor: 'end-user',
@@ -446,25 +441,16 @@ export class IdentitiesService {
    * and the token stays spent. An anonymized Identity has no handle to move.
    */
   async verifyEmailChange(token: string): Promise<boolean> {
-    const now = new Date();
-    const tokenHash = hashToken(token);
-    // The guarded claim is the single-use arbiter; the request is read back
-    // only once it is ours.
-    const claimed = await this.db.emailChangeRequest.updateMany({
-      where: { tokenHash, consumedAt: null, expiresAt: { gt: now } },
-      data: { consumedAt: now },
-    });
-    if (claimed.count !== 1) return false;
-    const request = await this.db.emailChangeRequest.findUnique({ where: { tokenHash } });
-    if (!request) return false;
+    const claim = await this.proofs.consume('email_change', token);
+    if (claim.status !== 'claimed') return false;
 
-    const identity = await this.findIdentityById(request.identityId);
+    const identity = await this.findIdentityById(claim.payload.identityId);
     if (!identity || identity.anonymizedAt !== null) return false;
 
     try {
       const moved = await this.db.identity.updateMany({
         where: { id: identity.id, anonymizedAt: null },
-        data: { email: request.newEmail, emailVerified: true },
+        data: { email: claim.payload.newEmail, emailVerified: true },
       });
       if (moved.count !== 1) return false;
     } catch (error) {
@@ -473,20 +459,20 @@ export class IdentitiesService {
       // transaction (ADR-0027).
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         await recordAuditEvent(this.db, {
-          organizationId: request.organizationId,
+          organizationId: claim.payload.organizationId,
           actor: 'end-user',
           kind: 'identity.email_change.refused',
           detail: {
             identityId: identity.id,
             email: identity.email,
-            newEmail: request.newEmail,
+            newEmail: claim.payload.newEmail,
           },
         });
         // The address was claimed between request and proof: the refusal
         // reaches the mailbox, like every other refusal in this flow.
         await this.sendEmailChangeRefusedEmail(
-          request.newEmail,
-          await this.organizationName(request.organizationId),
+          claim.payload.newEmail,
+          await this.organizationName(claim.payload.organizationId),
         );
         return false;
       }
@@ -494,12 +480,12 @@ export class IdentitiesService {
     }
 
     await recordAuditEvent(this.db, {
-      organizationId: request.organizationId,
+      organizationId: claim.payload.organizationId,
       actor: 'end-user',
       kind: 'identity.email_change.completed',
       detail: {
         identityId: identity.id,
-        email: request.newEmail,
+        email: claim.payload.newEmail,
         previousEmail: identity.email,
       },
     });
@@ -581,7 +567,10 @@ export class IdentitiesService {
       throw new ConflictException('the Identity has no verified email');
     }
 
-    const token = await this.issueToken(identity.id, 'password_reset', this.resetTtlMs());
+    const { token } = await this.proofs.issue(
+      { kind: 'password_reset', identityId: identity.id },
+      this.resetTtlMs(),
+    );
     // The lever's pull is recorded before delivery, like the self-service
     // request: an Administrator's security action must be auditable even when
     // the transport fails afterwards.
@@ -847,27 +836,6 @@ export class IdentitiesService {
     }
   }
 
-  /** A fresh mailbox-proof token for one Identity. */
-  private async issueToken(
-    identityId: string,
-    kind: IdentityTokenKind,
-    ttlMs: number,
-  ): Promise<string> {
-    const token = randomToken(32);
-    const expiresAt = new Date(Date.now() + ttlMs);
-    await this.db.identityToken.create({
-      data: {
-        id: uuid(),
-        identityId,
-        kind,
-        tokenHash: hashToken(token),
-        expiresAt,
-        createdAt: new Date(),
-      },
-    });
-    return token;
-  }
-
   private async findIdentityByEmail(
     organizationId: string,
     email: string,
@@ -899,61 +867,6 @@ export class IdentitiesService {
     });
     if (!row) throw new NotFoundException('no such Identity');
     return row;
-  }
-
-  /**
-   * Consume a live mailbox-proof token of one kind, returning its Identity, or
-   * undefined if it is missing, already used, or expired. The guarded update's
-   * count is the race-free single-use arbiter; the row is read back only after
-   * the claim succeeds.
-   */
-  private async consumeToken(
-    kind: IdentityTokenKind,
-    token: string,
-  ): Promise<string | undefined> {
-    const now = new Date();
-    const tokenHash = hashToken(token);
-    const claimed = await this.db.identityToken.updateMany({
-      where: { tokenHash, kind, consumedAt: null, expiresAt: { gt: now } },
-      data: { consumedAt: now },
-    });
-    if (claimed.count !== 1) return undefined;
-    const row = await this.db.identityToken.findUnique({
-      where: { tokenHash },
-      select: { identityId: true },
-    });
-    return row?.identityId;
-  }
-
-  /** Whether a live mailbox-proof token of one kind exists — without consuming it. */
-  private async peekToken(kind: IdentityTokenKind, token: string): Promise<boolean> {
-    const now = new Date();
-    const row = await this.db.identityToken.findFirst({
-      where: { tokenHash: hashToken(token), kind, consumedAt: null, expiresAt: { gt: now } },
-      select: { id: true },
-    });
-    return row !== null;
-  }
-
-  /**
-   * The Identity and Organization behind a live mailbox-proof token, without
-   * consuming it. Used to resolve the Organization's password policy before
-   * the single-use token is spent.
-   */
-  private async previewToken(
-    kind: IdentityTokenKind,
-    token: string,
-  ): Promise<{ identityId: string; organizationId: string } | undefined> {
-    const now = new Date();
-    const row = await this.db.identityToken.findFirst({
-      where: { tokenHash: hashToken(token), kind, consumedAt: null, expiresAt: { gt: now } },
-      select: {
-        identityId: true,
-        identity: { select: { organizationId: true } },
-      },
-    });
-    if (!row) return undefined;
-    return { identityId: row.identityId, organizationId: row.identity.organizationId };
   }
 
   /** Refuse a password the Organization's policy floors reject (ADR-0022). */

@@ -56,6 +56,10 @@ _Avoid_: Login, Key
 A (provider, subject ID) pair from an external provider, attached to an Identity as a federated credential. Trusted-provider attestation counts as mailbox proof.
 _Avoid_: Social account, Linked account, Provider user
 
+**Mailbox Proof**:
+A single-use, expiring value delivered to an email address; presenting it demonstrates control of that mailbox. Sign-up verification, password reset, email change, and Administrator invitation all rest on it.
+_Avoid_: Verification link, Email token, One-time code
+
 **Session**:
 The durable record of one authentication of one Identity — the signed-in device, surviving browser closes. Parents the SSO cookie and every refresh token minted from it. The revocable anchor of the whole system.
 _Avoid_: Login, Browser state, Token

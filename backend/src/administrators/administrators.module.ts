@@ -9,10 +9,11 @@ import { AuditController } from '../audit/audit.controller';
 import { AuditService } from '../audit/audit.service';
 import { StorageModule } from '../storage/storage.module';
 import { MailModule } from '../mail/mail.module';
+import { MailboxProofModule } from '../mailbox-proof/mailbox-proof.module';
 import { ThrottleModule } from '../throttle/throttle.module';
 
 @Module({
-  imports: [StorageModule, MailModule, ThrottleModule],
+  imports: [StorageModule, MailModule, MailboxProofModule, ThrottleModule],
   controllers: [AdministratorsController, OrganizationController, AuditController],
   providers: [AdministratorsService, AdministratorGuard, OwnerGuard, InvitationsService, AuditService],
   exports: [AdministratorsService, AdministratorGuard, OwnerGuard, AuditService],

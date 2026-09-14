@@ -5,6 +5,7 @@ import { SessionsModule } from '../sessions/sessions.module';
 import { SettingsModule } from '../settings/settings.module';
 import { StorageModule } from '../storage/storage.module';
 import { MailModule } from '../mail/mail.module';
+import { MailboxProofModule } from '../mailbox-proof/mailbox-proof.module';
 import { ThrottleModule } from '../throttle/throttle.module';
 import { IdentitiesService } from './identities.service';
 import { EndUsersController } from './end-users.controller';
@@ -16,6 +17,7 @@ import { IdentityDirectoryService } from './identity-directory.service';
     ConfigModule,
     StorageModule,
     MailModule,
+    MailboxProofModule,
     AdministratorsModule,
     SessionsModule,
     SettingsModule,
