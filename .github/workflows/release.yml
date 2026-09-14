@@ -97,6 +97,32 @@ jobs:
           grep -Eq '(^|[^0-9.])7\.10\.0([^0-9.]|$)' /tmp/prisma-version.txt
           echo "Image assertion passed."
 
+      - name: Smoke the built image (migrate and serve against the job Postgres)
+        run: |
+          set -euo pipefail
+          IMAGE_LOCAL="${IMAGE_NAME}:${GITHUB_REF_NAME}"
+          DB='postgresql://postgres:postgres@127.0.0.1:5432/postgres'
+          docker run --rm --network host -e DATABASE_URL="$DB" "$IMAGE_LOCAL" migrate >/dev/null
+          cid="$(docker run -d --network host \
+            -e DATABASE_URL="$DB" \
+            -e IDENTIK_BASE_URL=http://localhost:3000 \
+            -e IDENTIK_DEV_MODE=1 \
+            -e MAIL_TRANSPORT_BINDING=capture \
+            -e IDENTIK_TRUST_PROXY=false \
+            "$IMAGE_LOCAL" server)"
+          cleanup() { docker rm -f "$cid" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          deadline=$((SECONDS + 90))
+          until curl -fsS http://127.0.0.1:3000/health/live >/dev/null 2>&1; do
+            [ "$SECONDS" -lt "$deadline" ] || { echo "app never became live" >&2; docker logs "$cid" >&2; exit 1; }
+            sleep 2
+          done
+          body="$(curl -fsS http://127.0.0.1:3000/health/ready)"
+          case "$body" in
+            *'"database":{"ok":true}'*) echo "Smoke passed: readiness reports database.ok=true on ${IMAGE_LOCAL}" ;;
+            *) echo "Smoke failed: ${body}" >&2; docker logs "$cid" >&2; exit 1 ;;
+          esac
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -104,18 +130,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push the image
+      - name: Push the asserted image
         id: push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          sbom: false
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
-            ${{ env.IMAGE_NAME }}:sha-${{ steps.tags.outputs.short }}
+        env:
+          SHORT_SHA: ${{ steps.tags.outputs.short }}
+        run: |
+          set -euo pipefail
+          version_tag="${GITHUB_REF_NAME}"
+          docker push "${IMAGE_NAME}:${version_tag}"
+          docker push "${IMAGE_NAME}:sha-${SHORT_SHA}"
+          digest="sha256:$(docker buildx imagetools inspect --raw "${IMAGE_NAME}:${version_tag}" | sha256sum | awk '{print $1}')"
+          test -n "${digest#sha256:}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
@@ -139,6 +165,8 @@ jobs:
           digest="${{ steps.push.outputs.digest }}"
           version_tag="${GITHUB_REF_NAME}"
           image="${IMAGE_NAME}:${version_tag}"
+          tarball="release/identik-backend-${version_tag}.tar.gz"
+          tarball_sha="$(awk '{print $1}' "${tarball}.sha256")"
           echo "${image}@${digest}" > "release/identik-image-${version_tag}.digest"
           sha256sum "release/identik-image-${version_tag}.digest" > "release/identik-image-${version_tag}.digest.sha256"
           gh release create "${version_tag}" \
@@ -150,6 +178,8 @@ jobs:
             printf '%s\n\n' "$body"
             printf '### Container image\n\n'
             printf '```\n%s@%s\n```\n' "$image" "$digest"
-            printf '\nAlso available as `ghcr.io/mohaned178/identik:sha-%s` (same digest).\n' "${{ steps.tags.outputs.short }}"
+            printf '\nAlso available as `%s:sha-%s` (same digest).\n' "${IMAGE_NAME}" "${{ steps.tags.outputs.short }}"
+            printf '\n### Backend tarball\n\n'
+            printf '```\n%s  sha256:%s\n```\n' "$(basename "$tarball")" "$tarball_sha"
           } > /tmp/release-notes.md
           gh release edit "${version_tag}" --notes-file /tmp/release-notes.md
