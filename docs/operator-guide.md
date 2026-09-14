@@ -152,3 +152,5 @@ health check at `/health/ready`.
   ADR-0022 (instance versus Organization settings), and ADR-0026/ADR-0027
   (PostgreSQL and Prisma).
 - Configuration, verbatim: [`.env.example`](../.env.example).
+- The deployment and operations runbook:
+  [`deploy/README.md`](../deploy/README.md).

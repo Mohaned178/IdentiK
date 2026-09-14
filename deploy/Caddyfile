@@ -1,0 +1,8 @@
+# Automatic HTTPS is on: Caddy requests and renews the certificate for the
+# site address and redirects plain HTTP to HTTPS. Forwarded client addresses
+# are appended by reverse_proxy; the app trusts only the stack network, set
+# as IDENTIK_TRUST_PROXY.
+{$IDENTIK_HOSTNAME} {
+	encode zstd gzip
+	reverse_proxy app:3000
+}

@@ -1,0 +1,36 @@
+# Off-host backup configuration for backup.sh.
+#
+#   cp backup.conf.example backup.conf && chown root:root backup.conf && chmod 0600 backup.conf
+#
+# This file is gitignored and is read by root's nightly cron job. Every value
+# is also an environment-variable override, but keeping them here is what makes
+# the cron line a one-liner.
+
+# Where the on-host copies live. Root-owned 0700; created on demand.
+IDENTIK_BACKUP_DIR=/var/backups/identik
+
+# How many dump+env pairs stay on the host.
+IDENTIK_BACKUP_LOCAL_KEEP=7
+
+# Required. Run with the staging directory as $1; exit non-zero on failure.
+# The staged directory contains the artifacts to leave the host (plaintext, or
+# *.age files when IDENTIK_BACKUP_AGE_RECIPIENT is set).
+#
+# rsync to a second machine you control:
+#   IDENTIK_BACKUP_OFFSITE_CMD='rsync -az --partial -e ssh "$1/" backup@backup.example.com:/srv/identik/'
+#   IDENTIK_BACKUP_OFFSITE_PRUNE_CMD='ssh backup@backup.example.com find /srv/identik -maxdepth 1 -type f -mtime +30 -delete'
+#
+# rclone to object storage:
+#   IDENTIK_BACKUP_OFFSITE_CMD='rclone copy "$1" identik-backups:identik'
+#   IDENTIK_BACKUP_OFFSITE_PRUNE_CMD='rclone delete --min-age 30d identik-backups:identik'
+IDENTIK_BACKUP_OFFSITE_CMD=
+
+# Optional. Off-host retention (~30 days). Leave unset only when the
+# destination enforces retention itself (for example a bucket lifecycle rule).
+IDENTIK_BACKUP_OFFSITE_PRUNE_CMD=
+
+# Optional but required whenever the destination is not a private machine you
+# control. With a recipient set, only age-encrypted *.age artifacts are copied
+# off-host; the plaintext stay on the host. Generate a key pair with:
+#   age-keygen -o /root/identik-backup.agekey
+# IDENTIK_BACKUP_AGE_RECIPIENT=age1...
