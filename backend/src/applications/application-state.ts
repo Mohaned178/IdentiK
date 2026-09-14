@@ -3,15 +3,19 @@
  * Disabled Application is a reversible pause; a Deleted Application is the
  * terminal, anonymized shell whose audit history survives. Precedence is
  * deliberate: deletion cannot be undone, so it wins over the pause.
+ *
+ * The authorization and token boundaries ask this one predicate for `active`,
+ * so the state the dashboard displays and the verdict the boundaries enforce
+ * are one computation that cannot drift.
  */
 export type ApplicationState = 'active' | 'disabled' | 'deleted';
 
 export function applicationState(input: {
-  disabled: boolean;
-  deleted: boolean;
+  disabledAt: Date | null;
+  deletedAt: Date | null;
 }): ApplicationState {
-  if (input.deleted) return 'deleted';
-  if (input.disabled) return 'disabled';
+  if (input.deletedAt !== null) return 'deleted';
+  if (input.disabledAt !== null) return 'disabled';
   return 'active';
 }
 

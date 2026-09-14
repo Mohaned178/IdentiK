@@ -231,8 +231,8 @@ export class EnrollmentsService {
       emailVerified: row.identity.emailVerified,
       state: identityState({
         emailVerified: row.identity.emailVerified,
-        suspended: row.identity.suspendedAt !== null,
-        anonymized: row.identity.anonymizedAt !== null,
+        suspendedAt: row.identity.suspendedAt,
+        anonymizedAt: row.identity.anonymizedAt,
       }),
       enrolledAt: row.createdAt.toISOString(),
       suspended: row.suspendedAt !== null,

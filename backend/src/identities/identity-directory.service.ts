@@ -116,8 +116,8 @@ export class IdentityDirectoryService {
       emailVerified: row.emailVerified,
       state: identityState({
         emailVerified: row.emailVerified,
-        suspended: row.suspendedAt !== null,
-        anonymized,
+        suspendedAt: row.suspendedAt,
+        anonymizedAt: row.anonymizedAt,
       }),
       createdAt: row.createdAt.toISOString(),
     };

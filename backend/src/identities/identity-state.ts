@@ -1,39 +1,25 @@
 /**
- * The Administrator-facing authentication state of an Identity (ADR-0008):
- * one derived label from the state columns an Administrator may see. The
- * precedence is deliberate — anonymization is terminal and irreversible
- * (ADR-0007), suspension is the strongest reversible statement, then an
- * unverified reservation (inert until mailbox proof), then a usable Identity.
+ * The authentication state of an Identity (ADR-0008): one derived label from
+ * the state columns an Administrator may see. The precedence is deliberate —
+ * anonymization is terminal and irreversible (ADR-0007), suspension is the
+ * strongest reversible statement, then an unverified reservation (inert until
+ * mailbox proof), then a usable Identity.
+ *
+ * This is also the single liveness gate every authentication path shares
+ * (ADR-0006, ADR-0007, ADR-0011): the credential check, token validation, and
+ * Session resolution all require `active`, so the label the dashboard shows and
+ * the verdict the boundaries enforce are one computation that cannot drift.
  */
 export type IdentityState = 'active' | 'unverified' | 'suspended' | 'anonymized';
 
-export function identityState(input: {
-  emailVerified: boolean;
-  suspended: boolean;
-  anonymized: boolean;
-}): IdentityState {
-  if (input.anonymized) return 'anonymized';
-  if (input.suspended) return 'suspended';
-  return input.emailVerified ? 'active' : 'unverified';
-}
-
-/**
- * The single liveness gate every authentication path shares: an Identity is
- * usable only while verified, not suspended, not anonymized (ADR-0006,
- * ADR-0007, ADR-0011). One predicate keeps the gate from drifting between the
- * credential check, token validation, and Session resolution.
- */
-export type IdentityGate = 'live' | 'unverified' | 'suspended' | 'anonymized';
-
-export function identityGate(state: {
+export function identityState(state: {
   emailVerified: boolean;
   suspendedAt: Date | null;
   anonymizedAt: Date | null;
-}): IdentityGate {
+}): IdentityState {
   if (state.anonymizedAt !== null) return 'anonymized';
   if (state.suspendedAt !== null) return 'suspended';
-  if (!state.emailVerified) return 'unverified';
-  return 'live';
+  return state.emailVerified ? 'active' : 'unverified';
 }
 
 /**

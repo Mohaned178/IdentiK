@@ -3,12 +3,13 @@ import { createHash } from 'node:crypto';
 import { hashToken, randomToken } from '../crypto/password';
 import { parseTtlMs } from '../config/env';
 import { canonicalRedirectUri } from '../applications/redirect-uri';
+import { applicationState } from '../applications/application-state';
 import type { Prisma } from '../generated/prisma/client';
 import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
-import { identityGate } from '../identities/identity-state';
+import { identityState } from '../identities/identity-state';
 import { SessionsService, type LiveSession } from '../sessions/sessions.service';
 import type { AuthenticatedClient } from './client-authentication.service';
 import { IssuerService } from './issuer.service';
@@ -436,7 +437,7 @@ export class TokenService {
       where: { id: input.client.id },
       select: { disabledAt: true, deletedAt: true },
     });
-    if (!application || application.disabledAt !== null || application.deletedAt !== null) {
+    if (!application || applicationState(application) !== 'active') {
       return null;
     }
     await this.db.refreshToken.create({
@@ -582,7 +583,7 @@ export class TokenService {
   /** An Identity is usable only while verified, not suspended, not anonymized
    * (ADR-0006/0011/0007). */
   private isLive(identity: TokenIdentity): boolean {
-    return identityGate(identity) === 'live';
+    return identityState(identity) === 'active';
   }
 
   private accessTtlMs(): number {

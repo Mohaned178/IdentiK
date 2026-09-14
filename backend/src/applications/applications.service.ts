@@ -354,7 +354,7 @@ export class ApplicationsService {
       organizationName: row.organization.name,
       name: row.name,
       type: row.type,
-      enabled: this.isUsable(row),
+      enabled: applicationState(row) === 'active',
       redirectUris: row.redirectUris.map((entry) => entry.uri),
       allowedScopes: splitScope(row.allowedScopes),
     };
@@ -380,7 +380,7 @@ export class ApplicationsService {
       clientId: row.clientId,
       organizationId: row.organizationId,
       type: row.type,
-      enabled: this.isUsable(row),
+      enabled: applicationState(row) === 'active',
       allowedScopes: splitScope(row.allowedScopes),
     };
   }
@@ -729,11 +729,6 @@ export class ApplicationsService {
     };
   }
 
-  /** Whether the Application may mint new authentication and tokens at all. */
-  private isUsable(row: Pick<Application, 'disabledAt' | 'deletedAt'>): boolean {
-    return row.disabledAt === null && row.deletedAt === null;
-  }
-
   private async requireApplication(
     db: Prisma.TransactionClient,
     organizationId: string,
@@ -782,10 +777,7 @@ export class ApplicationsService {
       name: row.name,
       type: row.type,
       clientId: row.clientId,
-      state: applicationState({
-        disabled: row.disabledAt !== null,
-        deleted: row.deletedAt !== null,
-      }),
+      state: applicationState(row),
       createdAt: row.createdAt.toISOString(),
       allowedScopes: splitScope(row.allowedScopes),
       secrets: secrets.map((secret) => ({

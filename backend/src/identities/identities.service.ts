@@ -18,7 +18,7 @@ import { DATABASE, Database } from '../storage/token';
 import { Prisma } from '../generated/prisma/client';
 import { uuid } from '../bootstrap/uuid';
 import { normalizeEmail } from './email';
-import { anonymizedHandle, anonymizedPseudonym, identityGate } from './identity-state';
+import { anonymizedHandle, anonymizedPseudonym, identityState } from './identity-state';
 
 type ReservationInsert = { created: true; identityId: string } | { created: false };
 
@@ -133,9 +133,9 @@ export class IdentitiesService {
     // An anonymized shell is terminal: its destroyed credential can never open
     // it again, whatever was presented. Suspension and an unverified
     // reservation carry their own refusal reasons for the audit trail.
-    const gate = identityGate(row);
-    if (gate !== 'live') {
-      return { ok: false, reason: gate === 'anonymized' ? 'invalid' : gate, identityId: row.id };
+    const state = identityState(row);
+    if (state !== 'active') {
+      return { ok: false, reason: state === 'anonymized' ? 'invalid' : state, identityId: row.id };
     }
     return {
       ok: true,

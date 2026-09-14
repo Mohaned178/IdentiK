@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { hashToken, randomToken } from '../crypto/password';
 import { parseTtlMs } from '../config/env';
-import { identityGate } from '../identities/identity-state';
+import { identityState } from '../identities/identity-state';
 import { OrganizationSettingsService } from '../settings/organization-settings.service';
 import { recordAuditEvent } from '../storage/audit';
 import { DATABASE, Database } from '../storage/token';
@@ -356,7 +356,7 @@ export class SessionsService {
     // The Identity's own gate is shared with the credential and token paths,
     // so suspension, anonymization, and an unverified handle cannot be
     // half-enforced here (ADR-0006/0007/0011).
-    if (identityGate(row.identity) !== 'live') return false;
+    if (identityState(row.identity) !== 'active') return false;
     if (row.identity.sessionsRevokedAt !== null && row.createdAt <= row.identity.sessionsRevokedAt) {
       return false;
     }
