@@ -10,12 +10,12 @@ export interface ClientCredentialsBody {
 /** The client credentials a token-surface request presents, from header or body. */
 export function presentedCredentials(
   req: Request,
-  body: ClientCredentialsBody,
+  body: ClientCredentialsBody | undefined,
 ): PresentedCredentials {
   return {
     authorization: req.headers.authorization,
-    clientId: optionalText(body.client_id),
-    clientSecret: optionalText(body.client_secret),
+    clientId: optionalText(body?.client_id),
+    clientSecret: optionalText(body?.client_secret),
   };
 }
 

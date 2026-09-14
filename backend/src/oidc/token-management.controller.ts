@@ -33,7 +33,7 @@ export class TokenManagementController {
   @HttpCode(200)
   async revoke(
     @Req() req: Request,
-    @Body() body: TokenManagementRequest,
+    @Body() body: TokenManagementRequest | undefined,
     @Res() res: Response,
   ): Promise<void> {
     const result = await this.authenticate(req, body, res);
@@ -46,7 +46,7 @@ export class TokenManagementController {
   @HttpCode(200)
   async introspect(
     @Req() req: Request,
-    @Body() body: TokenManagementRequest,
+    @Body() body: TokenManagementRequest | undefined,
     @Res() res: Response,
   ): Promise<void> {
     const result = await this.authenticate(req, body, res);
@@ -63,7 +63,7 @@ export class TokenManagementController {
    */
   private async authenticate(
     req: Request,
-    body: TokenManagementRequest,
+    body: TokenManagementRequest | undefined,
     res: Response,
   ): Promise<{ client: AuthenticatedClient; token: string } | null> {
     const credentials = presentedCredentials(req, body);
@@ -72,7 +72,7 @@ export class TokenManagementController {
       sendInvalidClient(res, credentials, authentication.description);
       return null;
     }
-    const token = optionalText(body.token);
+    const token = optionalText(body?.token);
     if (!token) {
       res.status(400).json({
         error: 'invalid_request',

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 *.tsbuildinfo
+*.log
 coverage/
 .env
 local/.env

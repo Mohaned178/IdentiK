@@ -1,5 +1,7 @@
 .git
 .env
+**/.env
+**/.env.*
 **/node_modules
 **/dist
 backend/src/generated
@@ -7,5 +9,10 @@ e2e
 .scratch
 docs
 .agents
+.codex
 .github
 deploy
+local
+.vscode
+*.log
+coverage

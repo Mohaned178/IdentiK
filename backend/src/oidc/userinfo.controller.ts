@@ -25,11 +25,11 @@ export class UserInfoController {
   @HttpCode(200)
   async userinfoPost(
     @Req() req: Request,
-    @Body() body: { access_token?: unknown },
+    @Body() body: { access_token?: unknown } | undefined,
     @Res() res: Response,
   ): Promise<void> {
     await this.respond(
-      optionalText(body.access_token) ?? bearerToken(req.headers.authorization),
+      optionalText(body?.access_token) ?? bearerToken(req.headers.authorization),
       res,
     );
   }

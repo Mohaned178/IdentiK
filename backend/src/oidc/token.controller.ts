@@ -24,17 +24,18 @@ export class TokenController {
   @HttpCode(200)
   async token(
     @Req() req: Request,
-    @Body() body: TokenRequest,
+    @Body() body: TokenRequest | undefined,
     @Res() res: Response,
   ): Promise<void> {
-    const credentials = presentedCredentials(req, body);
+    const request = body ?? {};
+    const credentials = presentedCredentials(req, request);
     // The token surface carries no email; throttle against the Identity the
     // grant targets (resolved from the code or refresh token), so guessing a
     // credential is slowed per Identity as well as per source (ADR-0020). An
     // unresolvable grant yields no Identity and only the source applies.
     const subject: ThrottleSubject = {
       source: req.ip ?? null,
-      identity: await this.tokens.identityForGrant(body),
+      identity: await this.tokens.identityForGrant(request),
     };
     await this.throttle.wait('token', subject);
 
@@ -45,7 +46,7 @@ export class TokenController {
       return;
     }
 
-    const result = await this.tokens.handleGrant(authentication.client, body);
+    const result = await this.tokens.handleGrant(authentication.client, request);
     if (result.status !== 200) {
       this.throttle.record('token', subject);
       res.status(result.status).json({
