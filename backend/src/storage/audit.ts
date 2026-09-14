@@ -1,17 +1,16 @@
 import type { Prisma } from '../generated/prisma/client';
-import type { DataHandle } from './data-access';
 import { uuid } from '../bootstrap/uuid';
 
 /**
  * The one way audit events are written (ADR-0023's unified audit surface):
  * every security-relevant action records who/what/when against its
  * Organization. Central here so the shape cannot drift between feature
- * modules. Accepts the injected client or a transaction handle, so a write
- * inside a unit of work stays in it. Since ticket 15 the detail is stored as
- * native JSONB and the instant is a native date.
+ * modules. Accepts the injected client or an interactive transaction client,
+ * so a write inside a unit of work stays in it. The detail is stored as native
+ * JSONB and the instant as a native date.
  */
 export async function recordAuditEvent(
-  db: DataHandle,
+  db: Prisma.TransactionClient,
   event: {
     organizationId: string;
     actor: string;

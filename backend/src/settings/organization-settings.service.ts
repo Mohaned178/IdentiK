@@ -193,7 +193,7 @@ export class OrganizationSettingsService {
     if (updates.length === 0) return current;
 
     const now = new Date();
-    await this.db.transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       for (const update of updates) {
         const data = {
           value: JSON.stringify(update.value),

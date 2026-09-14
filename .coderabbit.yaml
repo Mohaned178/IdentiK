@@ -56,14 +56,37 @@ reviews:
         - Access tokens are for platform endpoints only; the boundary is
           "we authenticate, you authorize".
         - Redirect URIs match exactly on scheme, host, port, and path.
+        - PostgreSQL 18 via Prisma is the data layer (ADR-0026, ADR-0027):
+          typed models, `$transaction`, and P2002 for unique arbitration. Never
+          catch a unique-constraint violation inside an interactive
+          transaction — PostgreSQL aborts it after any failed statement.
 
         Flag any new endpoint that is not covered by an end-to-end test at the
         HTTP seam.
     - path: 'backend/src/storage/**/*.ts'
       instructions: |
-        Storage is SQLite. Migrations must be additive and must never destroy
-        data. Every child record inherits the Organization scope of its parent
+        The system of record is PostgreSQL 18, reached through Prisma's typed
+        models over the injected client (ADR-0026, ADR-0027). Raw SQL is
+        allowed only for the two documented exception classes — JSONB detail
+        scrubbing and the dynamic audit list query — plus the startup schema
+        probe; each site stays parameterized and annotated in place.
+
+        Never catch a unique-constraint violation (P2002) inside an interactive
+        transaction: PostgreSQL aborts the transaction after any failed
+        statement. Arbitrate inside a transaction with a duplicate-skipping
+        insert or a row-count branch, and catch P2002 only outside it — at the
+        transaction boundary or a standalone statement's boundary.
+
+        Every child record inherits the Organization scope of its parent
         (ADR-0025).
+    - path: 'backend/prisma/**'
+      instructions: |
+        Prisma Migrate is the only migration mechanism, and migrations are an
+        explicit deploy step (`prisma migrate deploy`), never applied at boot.
+        Hand-written schema objects Prisma cannot express — the email
+        normalization CHECKs — live in committed migrations. Review every
+        generated migration for destructive drift (dropped columns, dropped
+        CHECKs) before merge, and never edit a migration after it is committed.
     - path: 'e2e/src/**/*.ts'
       instructions: |
         These are black-box end-to-end tests: they drive a live Instance over

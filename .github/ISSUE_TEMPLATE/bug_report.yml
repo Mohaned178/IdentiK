@@ -53,7 +53,7 @@ body:
     attributes:
       label: Environment
       description: Node version, OS, and any relevant deployment configuration.
-      placeholder: Node 24, Ubuntu 24.04, self-hosted, SQLite
+      placeholder: Node 24, Ubuntu 24.04, self-hosted, PostgreSQL 18
     validations:
       required: false
 

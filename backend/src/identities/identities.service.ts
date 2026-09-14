@@ -15,9 +15,8 @@ import {
   firstPasswordProblem,
 } from '../settings/organization-settings.service';
 import { recordAuditEvent } from '../storage/audit';
-import { isUniqueViolation } from '../storage/postgres';
 import { DATABASE, Database } from '../storage/token';
-import type { IdentityTokenKind } from '../generated/prisma/client';
+import { Prisma, type IdentityTokenKind } from '../generated/prisma/client';
 import { uuid } from '../bootstrap/uuid';
 import { normalizeEmail } from './email';
 import { anonymizedHandle, anonymizedPseudonym, identityGate } from './identity-state';
@@ -469,7 +468,10 @@ export class IdentitiesService {
       });
       if (moved.count !== 1) return false;
     } catch (error) {
-      if (isUniqueViolation(error)) {
+      // The unique (organization, email) constraint is the race-free arbiter
+      // for the email move; caught at the statement boundary, never inside a
+      // transaction (ADR-0027).
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         await recordAuditEvent(this.db, {
           organizationId: request.organizationId,
           actor: 'end-user',
@@ -705,7 +707,7 @@ export class IdentitiesService {
     // pseudonymization of the surviving trail are one unit. `anonymized_at IS
     // NULL` is the race-free arbiter: a concurrent second anonymize commits
     // without duplicating the event.
-    await this.db.transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       const marked = await tx.identity.updateMany({
         where: { id: identity.id, anonymizedAt: null },
         data: {
@@ -740,55 +742,48 @@ export class IdentitiesService {
       // the person. Scoped to this Identity's events and the End-User
       // lifecycle kinds that carry only an email, so an Administrator
       // invitation mentioning the same address is never rewritten.
-      await tx.run(
-        `UPDATE audit_events
-            SET detail = jsonb_set(detail, '{email}', to_jsonb(?::text))
-          WHERE organization_id = ?
-            AND (detail ->> 'email') = ?
-            AND ((detail ->> 'identityId') = ?
-                 OR kind LIKE 'identity.%' OR kind LIKE 'enrollment.%')`,
-        [pseudonym, identity.organizationId, identity.email, identity.id],
-      );
+      await tx.$executeRaw`
+        UPDATE audit_events
+            SET detail = jsonb_set(detail, '{email}', to_jsonb(${pseudonym}::text))
+          WHERE organization_id = ${identity.organizationId}
+            AND (detail ->> 'email') = ${identity.email}
+            AND ((detail ->> 'identityId') = ${identity.id}
+                 OR kind LIKE 'identity.%' OR kind LIKE 'enrollment.%')`;
       // An email-change trail names the requested (`newEmail`) and previous
       // (`previousEmail`) addresses, and its own `email` may not equal the
       // Identity's current handle; rewrite all three so no address survives
       // (ADR-0007).
-      await tx.run(
-        `UPDATE audit_events
-            SET detail = jsonb_set(detail, '{email}', to_jsonb(?::text))
-          WHERE organization_id = ? AND (detail ->> 'identityId') = ?
-            AND kind LIKE 'identity.email_change.%'`,
-        [pseudonym, identity.organizationId, identity.id],
-      );
-      await tx.run(
-        `UPDATE audit_events
-            SET detail = jsonb_set(detail, '{newEmail}', to_jsonb(?::text))
-          WHERE organization_id = ? AND (detail ->> 'newEmail') IS NOT NULL
-            AND (detail ->> 'identityId') = ?`,
-        [pseudonym, identity.organizationId, identity.id],
-      );
-      await tx.run(
-        `UPDATE audit_events
-            SET detail = jsonb_set(detail, '{previousEmail}', to_jsonb(?::text))
-          WHERE organization_id = ? AND (detail ->> 'previousEmail') IS NOT NULL
-            AND (detail ->> 'identityId') = ?`,
-        [pseudonym, identity.organizationId, identity.id],
-      );
+      await tx.$executeRaw`
+        UPDATE audit_events
+            SET detail = jsonb_set(detail, '{email}', to_jsonb(${pseudonym}::text))
+          WHERE organization_id = ${identity.organizationId}
+            AND (detail ->> 'identityId') = ${identity.id}
+            AND kind LIKE 'identity.email_change.%'`;
+      await tx.$executeRaw`
+        UPDATE audit_events
+            SET detail = jsonb_set(detail, '{newEmail}', to_jsonb(${pseudonym}::text))
+          WHERE organization_id = ${identity.organizationId}
+            AND (detail ->> 'newEmail') IS NOT NULL
+            AND (detail ->> 'identityId') = ${identity.id}`;
+      await tx.$executeRaw`
+        UPDATE audit_events
+            SET detail = jsonb_set(detail, '{previousEmail}', to_jsonb(${pseudonym}::text))
+          WHERE organization_id = ${identity.organizationId}
+            AND (detail ->> 'previousEmail') IS NOT NULL
+            AND (detail ->> 'identityId') = ${identity.id}`;
       // The freed address may also appear as some *other* Identity's requested
       // or previous address; destroy it there too so deletion leaves no trace
       // of the person (ADR-0007).
-      await tx.run(
-        `UPDATE audit_events
-            SET detail = jsonb_set(detail, '{newEmail}', to_jsonb(?::text))
-          WHERE organization_id = ? AND (detail ->> 'newEmail') = ?`,
-        [pseudonym, identity.organizationId, identity.email],
-      );
-      await tx.run(
-        `UPDATE audit_events
-            SET detail = jsonb_set(detail, '{previousEmail}', to_jsonb(?::text))
-          WHERE organization_id = ? AND (detail ->> 'previousEmail') = ?`,
-        [pseudonym, identity.organizationId, identity.email],
-      );
+      await tx.$executeRaw`
+        UPDATE audit_events
+            SET detail = jsonb_set(detail, '{newEmail}', to_jsonb(${pseudonym}::text))
+          WHERE organization_id = ${identity.organizationId}
+            AND (detail ->> 'newEmail') = ${identity.email}`;
+      await tx.$executeRaw`
+        UPDATE audit_events
+            SET detail = jsonb_set(detail, '{previousEmail}', to_jsonb(${pseudonym}::text))
+          WHERE organization_id = ${identity.organizationId}
+            AND (detail ->> 'previousEmail') = ${identity.email}`;
       await recordAuditEvent(tx, {
         organizationId: identity.organizationId,
         actor: input.actor,
@@ -843,8 +838,12 @@ export class IdentitiesService {
       });
       return { created: true, identityId };
     } catch (error) {
-      if (!isUniqueViolation(error)) throw error;
-      return { created: false };
+      // The unique (organization, email) constraint is the race-free arbiter;
+      // a lost race surfaces as P2002 at the statement boundary (ADR-0027).
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        return { created: false };
+      }
+      throw error;
     }
   }
 

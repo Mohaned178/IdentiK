@@ -1,6 +1,7 @@
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { isISO8601 } from 'class-validator';
 import { optionalText } from '../common/text';
+import { Prisma } from '../generated/prisma/client';
 import { DATABASE, Database } from '../storage/token';
 
 export interface AuditEventView {
@@ -68,43 +69,36 @@ export class AuditService {
       throw new BadRequestException('from must not be after to');
     }
 
-    const conditions = ['e.organization_id = ?'];
-    const params: (string | number | Date)[] = [organizationId];
-    const add = (clause: string, value: string | Date | undefined): void => {
-      if (value === undefined) return;
-      conditions.push(clause);
-      params.push(value);
-    };
+    const conditions: Prisma.Sql[] = [Prisma.sql`e.organization_id = ${organizationId}`];
     if (actor !== undefined) {
       // An Administrator can be named by id or by the email the surface
       // displays; the pseudo-actors match on their raw value.
-      conditions.push('(e.actor = ? OR a.email = ?)');
-      params.push(actor, actor);
+      conditions.push(Prisma.sql`(e.actor = ${actor} OR a.email = ${actor})`);
     }
-    add('e.kind = ?', kind);
+    if (kind !== undefined) conditions.push(Prisma.sql`e.kind = ${kind}`);
     // Identity linkage lives in the event detail; the durable key is the
     // identityId, never the email (which anonymization destroys and reuse
     // recycles — ADR-0007).
-    add("(e.detail ->> 'identityId') = ?", identityId);
-    add('e.occurred_at >= ?', from);
-    add('e.occurred_at <= ?', to);
-    if (filters.limit !== undefined) params.push(filters.limit);
+    if (identityId !== undefined) {
+      conditions.push(Prisma.sql`(e.detail ->> 'identityId') = ${identityId}`);
+    }
+    if (from !== undefined) conditions.push(Prisma.sql`e.occurred_at >= ${from}`);
+    if (to !== undefined) conditions.push(Prisma.sql`e.occurred_at <= ${to}`);
 
     // Deliberate raw-SQL exception (ADR-0027): the actor join, the JSONB
     // identity filter, and the optional limit are one dynamic query typed
-    // reads cannot express. Conditions and values are parameterized.
-    const rows = await this.db.all<AuditEventRow>(
-      `SELECT e.id, e.kind, e.actor, e.detail, e.occurred_at,
-              a.name AS actor_name, a.email AS actor_email
-       FROM audit_events e
-       LEFT JOIN memberships m
-         ON m.organization_id = e.organization_id AND m.administrator_id = e.actor
-       LEFT JOIN administrators a ON a.id = m.administrator_id
-       WHERE ${conditions.join(' AND ')}
-       ORDER BY e.occurred_at DESC, e.seq DESC
-       ${filters.limit === undefined ? '' : 'LIMIT ?'}`,
-      params,
-    );
+    // reads cannot express. Every value is parameterized by the SQL tag.
+    const rows = await this.db.$queryRaw<AuditEventRow[]>(Prisma.sql`
+      SELECT e.id, e.kind, e.actor, e.detail, e.occurred_at,
+             a.name AS actor_name, a.email AS actor_email
+      FROM audit_events e
+      LEFT JOIN memberships m
+        ON m.organization_id = e.organization_id AND m.administrator_id = e.actor
+      LEFT JOIN administrators a ON a.id = m.administrator_id
+      WHERE ${Prisma.join(conditions, ' AND ')}
+      ORDER BY e.occurred_at DESC, e.seq DESC
+      ${filters.limit === undefined ? Prisma.empty : Prisma.sql`LIMIT ${filters.limit}`}
+    `);
 
     return rows.map((row) => ({
       id: row.id,

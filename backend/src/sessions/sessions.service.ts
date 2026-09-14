@@ -4,7 +4,6 @@ import { parseTtlMs } from '../config/env';
 import { identityGate } from '../identities/identity-state';
 import { OrganizationSettingsService } from '../settings/organization-settings.service';
 import { recordAuditEvent } from '../storage/audit';
-import type { DataHandle } from '../storage/data-access';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import type { Prisma } from '../generated/prisma/client';
@@ -198,7 +197,7 @@ export class SessionsService {
     if (!row) return false;
     if (row.revokedAt !== null) return true;
 
-    await this.db.transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       await this.revokeRow(tx, row, input.reason, 'end-user');
     });
     return true;
@@ -248,7 +247,10 @@ export class SessionsService {
    * Application deletion. Takes the caller's client so it can compose into
    * their transaction; idempotent by the `revokedAt: null` guard.
    */
-  async revokeRefreshTokensForApplication(db: DataHandle, applicationId: string): Promise<number> {
+  async revokeRefreshTokensForApplication(
+    db: Prisma.TransactionClient,
+    applicationId: string,
+  ): Promise<number> {
     const changed = await db.refreshToken.updateMany({
       where: { applicationId, revokedAt: null },
       data: { revokedAt: new Date() },
@@ -258,7 +260,7 @@ export class SessionsService {
 
   /** One revoke-many unit: every row dies, one collection audit event lives. */
   private async revokeRows(rows: SessionRef[], input: RevokeManyInput): Promise<number> {
-    await this.db.transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       for (const row of rows) {
         await this.revokeRow(tx, row, input.reason, input.actor);
       }
@@ -278,7 +280,7 @@ export class SessionsService {
    * tokens outlive it. Callers own the transaction.
    */
   private async revokeRow(
-    db: DataHandle,
+    db: Prisma.TransactionClient,
     row: SessionRef,
     reason: SessionRevocationReason,
     actor: string,

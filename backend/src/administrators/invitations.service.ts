@@ -4,9 +4,8 @@ import { parseTtlMs } from '../config/env';
 import { LinkBaseService } from '../config/link-base.service';
 import { normalizeEmail } from '../identities/email';
 import { MailService } from '../mail/mail.service';
-import type { Prisma } from '../generated/prisma/client';
+import { Prisma } from '../generated/prisma/client';
 import { recordAuditEvent } from '../storage/audit';
-import { isUniqueViolation } from '../storage/postgres';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import type { AdministratorRole } from './administrators.service';
@@ -174,7 +173,7 @@ export class InvitationsService {
 
     let consumed: boolean;
     try {
-      consumed = await this.db.transaction(async (tx) => {
+      consumed = await this.db.$transaction(async (tx) => {
         const claimed = await tx.administratorInvitation.updateMany({
           where: { id: invitation.id, consumedAt: null, expiresAt: { gt: now } },
           data: { consumedAt: now },
@@ -213,9 +212,13 @@ export class InvitationsService {
         return true;
       });
     } catch (error) {
-      // A lost email race surfaces as a unique violation out of the rolled-back
-      // transaction; the caller sees the same refusal as an unknown link.
-      if (isUniqueViolation(error)) return { ok: false, reason: 'invalid' };
+      // A lost email race surfaces as P2002 out of the rolled-back
+      // transaction; the caller sees the same refusal as an unknown link. Never
+      // caught inside the transaction: PostgreSQL aborts it after any failure
+      // (ADR-0027).
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        return { ok: false, reason: 'invalid' };
+      }
       throw error;
     }
     if (!consumed) return { ok: false, reason: 'invalid' };

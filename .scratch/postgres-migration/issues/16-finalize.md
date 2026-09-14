@@ -4,11 +4,25 @@
 
 **Blocked by:** 15 (native PostgreSQL types)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The facade and the legacy uniqueness helper are gone, with no remaining imports
-- [ ] Raw SQL usage is exactly the two documented exception classes and is grep-verifiable
-- [ ] No repository layer exists
-- [ ] Review guidance describes PostgreSQL plus the ORM, the raw exceptions, and the no-unique-catch-inside-transactions rule
-- [ ] The bug report template no longer claims SQLite storage
-- [ ] `npm run verify` is green
+- [x] The facade and the legacy uniqueness helper are gone, with no remaining imports
+- [x] Raw SQL usage is exactly the two documented exception classes and is grep-verifiable
+- [x] No repository layer exists
+- [x] Review guidance describes PostgreSQL plus the ORM, the raw exceptions, and the no-unique-catch-inside-transactions rule
+- [x] The bug report template no longer claims SQLite storage
+- [x] `npm run verify` is green
+
+## Comments
+
+One raw-SQL site survives outside the two data-access exception classes: the
+startup schema probe in `storage/prisma.service.ts`. `_prisma_migrations` has
+no Prisma model, and the startup contract requires the check, so it stays raw,
+is annotated in place as infrastructure, and is named in the review guidance.
+A `grep -rn '\$queryRaw\|\$executeRaw' backend/src` therefore returns the two
+exception classes (7 JSONB scrubs + 1 dynamic audit list) plus that one
+documented probe.
+
+The Stage 1 facade's generous interactive-transaction budget (10s wait, 30s
+timeout) moves to the client constructor's `transactionOptions`, preserving the
+policy for every `$transaction` call without keeping a facade-style wrapper.

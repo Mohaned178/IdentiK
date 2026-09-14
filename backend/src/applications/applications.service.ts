@@ -9,9 +9,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { hashToken, randomToken } from '../crypto/password';
 import { EnrollmentsService } from '../enrollments/enrollments.service';
 import { SessionsService } from '../sessions/sessions.service';
-import type { Application, RedirectUri } from '../generated/prisma/client';
+import type { Application, Prisma, RedirectUri } from '../generated/prisma/client';
 import { recordAuditEvent } from '../storage/audit';
-import type { DataHandle } from '../storage/data-access';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 import {
@@ -116,7 +115,7 @@ export class ApplicationsService {
     // Registration and the confidential client's first secret are one unit:
     // a Web Application must never exist without the credential that makes it
     // useful, and a failed issuance must not leave a half-registered row.
-    const clientSecret = await this.db.transaction(async (tx) => {
+    const clientSecret = await this.db.$transaction(async (tx) => {
       await tx.application.create({
         data: {
           id,
@@ -191,7 +190,7 @@ export class ApplicationsService {
     // State change, revocation, and audit are one unit: a paused Application
     // whose app-minted tokens outlive the pause is the lie disable exists to
     // prevent.
-    await this.db.transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       const changed = await tx.application.updateMany({
         where: { id: application.id, disabledAt: null, deletedAt: null },
         data: { disabledAt: now },
@@ -273,7 +272,7 @@ export class ApplicationsService {
     const now = new Date();
     const pseudonym = deletedApplicationPseudonym(application.id);
 
-    await this.db.transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       // The terminal marker is the race-free arbiter: a concurrent second
       // delete commits without duplicating the event or re-pseudonymizing.
       // Prisma cannot express COALESCE in an update, so an Application that
@@ -307,14 +306,12 @@ export class ApplicationsService {
       // Parameterized, never interpolated. The durable key is the
       // applicationId; the human-facing name in historical details is PII, so
       // the trail is re-attributed to the pseudonymous shell.
-      await tx.run(
-        `UPDATE audit_events
-            SET detail = jsonb_set(detail, '{name}', to_jsonb(?::text))
-          WHERE organization_id = ?
-            AND (detail ->> 'applicationId') = ?
-            AND (detail ->> 'name') IS NOT NULL`,
-        [pseudonym, input.organizationId, application.id],
-      );
+      await tx.$executeRaw`
+        UPDATE audit_events
+            SET detail = jsonb_set(detail, '{name}', to_jsonb(${pseudonym}::text))
+          WHERE organization_id = ${input.organizationId}
+            AND (detail ->> 'applicationId') = ${application.id}
+            AND (detail ->> 'name') IS NOT NULL`;
       await recordAuditEvent(tx, {
         organizationId: input.organizationId,
         actor: input.actor,
@@ -425,7 +422,7 @@ export class ApplicationsService {
    * first secret inside its own transaction.
    */
   private async issueSecretWith(
-    db: DataHandle,
+    db: Prisma.TransactionClient,
     input: {
       organizationId: string;
       applicationId: string;
@@ -549,7 +546,7 @@ export class ApplicationsService {
     // The change and its audit event are one unit: a persisted redirect URI
     // with no event beside it is the silent code-interception primitive
     // ADR-0010 exists to prevent.
-    await this.db.transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       await tx.redirectUri.create({
         data: {
           id,
@@ -596,7 +593,7 @@ export class ApplicationsService {
 
     await this.refuseDuplicateRedirectUri(this.db, application.id, uri, row.id);
     const now = new Date();
-    await this.db.transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       // updateMany, not update: a concurrently removed row must keep the old
       // statement's silent no-op instead of failing the transaction.
       await tx.redirectUri.updateMany({
@@ -631,7 +628,7 @@ export class ApplicationsService {
       input.applicationId,
     );
     const row = await this.requireRedirectUri(this.db, application.id, input.uriId);
-    await this.db.transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       await tx.redirectUri.deleteMany({
         where: { id: row.id, applicationId: application.id },
       });
@@ -677,7 +674,7 @@ export class ApplicationsService {
     const previous = splitScope(application.allowedScopes);
     if (previous.join(' ') === scopes.join(' ')) return this.toView(this.db, application);
 
-    await this.db.transaction(async (tx) => {
+    await this.db.$transaction(async (tx) => {
       await tx.application.update({
         where: { id: application.id },
         data: { allowedScopes: scopes.join(' ') },
@@ -697,7 +694,7 @@ export class ApplicationsService {
   }
 
   private async requireRedirectUri(
-    db: DataHandle,
+    db: Prisma.TransactionClient,
     applicationId: string,
     uriId: string,
   ): Promise<RedirectUri> {
@@ -709,7 +706,7 @@ export class ApplicationsService {
   }
 
   private async refuseDuplicateRedirectUri(
-    db: DataHandle,
+    db: Prisma.TransactionClient,
     applicationId: string,
     uri: string,
     exceptId?: string,
@@ -738,7 +735,7 @@ export class ApplicationsService {
   }
 
   private async requireApplication(
-    db: DataHandle,
+    db: Prisma.TransactionClient,
     organizationId: string,
     id: string,
   ): Promise<Application> {
@@ -756,7 +753,7 @@ export class ApplicationsService {
    * cannot be undone by minting a replacement after deletion (ADR-0007).
    */
   private async requireMutableApplication(
-    db: DataHandle,
+    db: Prisma.TransactionClient,
     organizationId: string,
     id: string,
   ): Promise<Application> {
@@ -767,11 +764,11 @@ export class ApplicationsService {
     return application;
   }
 
-  private async view(db: DataHandle, organizationId: string, id: string): Promise<ApplicationView> {
+  private async view(db: Prisma.TransactionClient, organizationId: string, id: string): Promise<ApplicationView> {
     return this.toView(db, await this.requireApplication(db, organizationId, id));
   }
 
-  private async toView(db: DataHandle, row: Application): Promise<ApplicationView> {
+  private async toView(db: Prisma.TransactionClient, row: Application): Promise<ApplicationView> {
     const secrets = await db.clientSecret.findMany({
       where: { applicationId: row.id },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],

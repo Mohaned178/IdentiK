@@ -1,10 +1,8 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { identityState, type IdentityState } from '../identities/identity-state';
-import type { Prisma } from '../generated/prisma/client';
+import { Prisma } from '../generated/prisma/client';
 import { SessionsService } from '../sessions/sessions.service';
 import { recordAuditEvent } from '../storage/audit';
-import type { DataHandle } from '../storage/data-access';
-import { isUniqueViolation } from '../storage/postgres';
 import { DATABASE, Database } from '../storage/token';
 import { uuid } from '../bootstrap/uuid';
 
@@ -74,10 +72,15 @@ export class EnrollmentsService {
         },
       });
     } catch (error) {
-      if (!isUniqueViolation(error)) throw error;
-      const raced = await this.find(input.identityId, input.applicationId);
-      if (!raced) throw error;
-      return this.gate(raced);
+      // The unique (identity, application) constraint is the race-free
+      // arbiter; a lost race surfaces as P2002. Caught at the statement
+      // boundary, never inside a transaction (ADR-0027).
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const raced = await this.find(input.identityId, input.applicationId);
+        if (!raced) throw error;
+        return this.gate(raced);
+      }
+      throw error;
     }
 
     await recordAuditEvent(this.db, {
@@ -122,7 +125,10 @@ export class EnrollmentsService {
    * Enrollments were removed. There is no per-Enrollment audit event — the
    * deletion event records the collection effect.
    */
-  async removeAllForApplication(db: DataHandle, applicationId: string): Promise<number> {
+  async removeAllForApplication(
+    db: Prisma.TransactionClient,
+    applicationId: string,
+  ): Promise<number> {
     const removed = await db.enrollment.deleteMany({ where: { applicationId } });
     return removed.count;
   }

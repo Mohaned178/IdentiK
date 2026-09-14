@@ -120,7 +120,7 @@ export class BootstrapService implements OnModuleInit {
     // count of one completes the ceremony, and every duplicate skip loses. The
     // duplicate-skipping insert has no error path, so the aborted-transaction
     // rule is never in play.
-    const claimed = await this.db.transaction(async (tx) => {
+    const claimed = await this.db.$transaction(async (tx) => {
       const { count } = await tx.instanceState.createMany({
         data: [{ key: BOOTSTRAP_KEY, value: BOOTSTRAP_COMPLETED }],
         skipDuplicates: true,
