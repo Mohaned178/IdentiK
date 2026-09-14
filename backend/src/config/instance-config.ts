@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import type { MailBinding } from '../mail/mail-transport';
 import { readSmtpSettings, type SmtpSettings } from '../mail/smtp.config';
 import { optionalEnv } from './env-var';
@@ -13,6 +14,12 @@ import { optionalEnv } from './env-var';
  */
 export class ConfigurationError extends Error {}
 
+/**
+ * Which proxies may assert a client's address (`app.set('trust proxy', …)`):
+ * off, a hop count, or an Express-style list of names/IPs/CIDRs.
+ */
+export type TrustProxy = false | number | string;
+
 export interface InstanceConfiguration {
   readonly devMode: boolean;
   readonly port: number;
@@ -22,6 +29,8 @@ export interface InstanceConfiguration {
   readonly mailBinding: MailBinding;
   readonly signingJwks: string | null;
   readonly smtp: SmtpSettings | null;
+  /** Off unless the operator names the proxies whose forwarded headers to trust. */
+  readonly trustProxy: TrustProxy;
   /** Present-and-validated durations by variable name; absent names keep call-site defaults. */
   readonly durations: ReadonlyMap<string, number>;
   /** Present-and-validated counts by variable name; absent names keep call-site defaults. */
@@ -70,6 +79,7 @@ export function loadInstanceConfiguration(env: NodeJS.ProcessEnv): InstanceConfi
   const databaseUrl = parseDatabaseUrl(env);
   const baseUrl = parseBaseUrl(env);
   const mailBinding = parseMailBinding(env);
+  const trustProxy = parseTrustProxy(env);
 
   if (mailBinding === 'capture' && !devMode) {
     throw new ConfigurationError(
@@ -93,6 +103,7 @@ export function loadInstanceConfiguration(env: NodeJS.ProcessEnv): InstanceConfi
     baseUrl,
     mailBinding,
     signingJwks,
+    trustProxy,
     smtp: mailBinding === 'smtp' ? readSmtpSettings(env) : null,
     durations: numbers(env, DURATION_NAMES, parseDuration),
     counts: numbers(env, COUNT_NAMES, parseCount),
@@ -175,6 +186,53 @@ function parseMailBinding(env: NodeJS.ProcessEnv): MailBinding {
     );
   }
   return raw;
+}
+
+/**
+ * The operator's proxy trust, in Express terms — and never "trust everything":
+ * `true` would let any client forge the source that throttling and the audit
+ * surface depend on, so it is refused with the safe alternatives named.
+ */
+function parseTrustProxy(env: NodeJS.ProcessEnv): TrustProxy {
+  const raw = optionalEnv(env, 'IDENTIK_TRUST_PROXY');
+  if (raw === null || raw === 'false') return false;
+  if (raw === 'true') {
+    throw new ConfigurationError(
+      'IDENTIK_TRUST_PROXY "true" would trust a forwarded header from any client; use ' +
+        '"loopback", a hop count, or an IP/CIDR list that matches your proxy layout.',
+    );
+  }
+  if (/^\d+$/.test(raw)) {
+    const hops = Number(raw);
+    if (!Number.isSafeInteger(hops)) {
+      throw new ConfigurationError(`IDENTIK_TRUST_PROXY "${raw}" is not a usable hop count.`);
+    }
+    return hops;
+  }
+  for (const token of raw.split(',')) {
+    if (!isTrustedProxyToken(token.trim())) {
+      throw new ConfigurationError(
+        `IDENTIK_TRUST_PROXY "${raw}" is not valid; expected "loopback", a hop count, ` +
+          'or an IP/CIDR list (e.g. "10.0.0.0/8,172.16.0.0/12"). A 0-length prefix is ' +
+          'refused because it trusts every client.',
+      );
+    }
+  }
+  return raw;
+}
+
+/** One entry of an Express trust-proxy list: `loopback`, an IP, or a CIDR. */
+function isTrustedProxyToken(token: string): boolean {
+  if (token === 'loopback') return true;
+  const [address, prefix, ...rest] = token.split('/');
+  if (rest.length > 0 || address === undefined) return false;
+  const family = isIP(address);
+  if (family === 0) return false;
+  if (prefix === undefined) return true;
+  if (!/^\d+$/.test(prefix)) return false;
+  const bits = Number(prefix);
+  if (bits === 0) return false;
+  return family === 4 ? bits <= 32 : bits <= 128;
 }
 
 function numbers(
