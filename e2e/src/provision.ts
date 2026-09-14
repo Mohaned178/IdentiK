@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { cpSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from 'pg';
@@ -83,30 +85,100 @@ function dropIfExists(client: Client, database: string): Promise<unknown> {
 }
 
 /**
+ * The one-off deploy step, run the way an operator runs it: `prisma migrate
+ * deploy` from a directory that carries `prisma.config.ts` and its
+ * `prisma/migrations` tree. The server itself never migrates.
+ */
+export function migrateWithArtifact(artifactRoot: string, database: string): void {
+  try {
+    execFileSync(process.execPath, [PRISMA_CLI, 'migrate', 'deploy'], {
+      cwd: artifactRoot,
+      env: { ...process.env, DATABASE_URL: databaseUrl(database) },
+      stdio: 'pipe',
+    });
+  } catch (error) {
+    const stderr = (error as { stderr?: Buffer }).stderr?.toString().trim();
+    throw new Error(
+      `"prisma migrate deploy" failed for database ${database}` + (stderr ? `:\n${stderr}` : ''),
+      { cause: error },
+    );
+  }
+}
+
+/** The migration names the built backend ships, oldest first, newest last. */
+export function shippedMigrationNames(): string[] {
+  return readdirSync(join(BACKEND_DIR, 'prisma', 'migrations'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+
+/**
  * Build this run's migrated template: a fresh database brought up by the one
  * documented command. Instances clone it, so each starts already migrated
  * without paying a migration, exactly as a fresh state directory used to.
  */
 export async function provisionTemplateDatabase(): Promise<void> {
   const template = templateDatabase();
-  await withAdminClient(async (client) => {
-    await dropIfExists(client, template);
-    await client.query(`CREATE DATABASE ${quoteIdentifier(template)}`);
-  });
-  try {
-    execFileSync(process.execPath, [PRISMA_CLI, 'migrate', 'deploy'], {
-      cwd: BACKEND_DIR,
-      env: { ...process.env, DATABASE_URL: databaseUrl(template) },
-      stdio: 'pipe',
-    });
-  } catch (error) {
-    const stderr = (error as { stderr?: Buffer }).stderr?.toString().trim();
-    throw new Error(
-      `"prisma migrate deploy" failed while building the test template database` +
-        (stderr ? `:\n${stderr}` : ''),
-      { cause: error },
-    );
+  await recreateDatabase(template);
+  migrateWithArtifact(BACKEND_DIR, template);
+}
+
+/**
+ * A release artifact laid out the way the tarball is: the compiled server in
+ * `dist/` beside the `prisma/` tree the startup migration gate reads.
+ */
+export interface ReleaseArtifact {
+  readonly root: string;
+  readonly dist: string;
+}
+
+/**
+ * Copies the built backend into a throwaway directory so a test can hand the
+ * Instance an older or broken release without touching the working tree.
+ * `omitMigrations` makes the artifact older than a database provisioned from
+ * the full set; `withoutMigrations` models a release that shipped without its
+ * migrations directory. The workspace's installed dependencies are linked in,
+ * the role `npm ci --omit=dev` plays for a deployed install.
+ */
+export function copyReleaseArtifact(
+  options: { omitMigrations?: readonly string[]; withoutMigrations?: boolean } = {},
+): ReleaseArtifact {
+  const root = mkdtempSync(join(tmpdir(), 'identik-artifact-'));
+  cpSync(join(BACKEND_DIR, 'dist'), join(root, 'dist'), { recursive: true });
+  cpSync(join(BACKEND_DIR, 'prisma'), join(root, 'prisma'), { recursive: true });
+  cpSync(join(BACKEND_DIR, 'prisma.config.ts'), join(root, 'prisma.config.ts'));
+  cpSync(join(BACKEND_DIR, 'package.json'), join(root, 'package.json'));
+  symlinkSync(join(WORKSPACE_ROOT, 'node_modules'), join(root, 'node_modules'), 'junction');
+  const migrations = join(root, 'prisma', 'migrations');
+  if (options.withoutMigrations) {
+    rmSync(migrations, { recursive: true, force: true });
+  } else {
+    for (const name of options.omitMigrations ?? []) {
+      rmSync(join(migrations, name), { recursive: true, force: true });
+    }
   }
+  return { root, dist: join(root, 'dist') };
+}
+
+export function disposeReleaseArtifact(artifact: ReleaseArtifact): void {
+  rmSync(artifact.root, { recursive: true, force: true });
+}
+
+/** Drops any database of this name and creates a fresh, empty one. */
+async function recreateDatabase(database: string): Promise<void> {
+  await withAdminClient(async (client) => {
+    await dropIfExists(client, database);
+    await client.query(`CREATE DATABASE ${quoteIdentifier(database)}`);
+  });
+}
+
+/**
+ * A fresh, empty database — the state before the first migration. Used to
+ * provision an earlier migration state through the one-off deploy step.
+ */
+export async function createEmptyDatabase(database: string): Promise<void> {
+  await recreateDatabase(database);
 }
 
 export async function dropTemplateDatabase(): Promise<void> {

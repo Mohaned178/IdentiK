@@ -4,11 +4,11 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Against a database provisioned to an earlier migration state, startup refuses with the migration command in the message.
-- [ ] Against a database carrying an applied migration unknown to the artifact, startup succeeds.
-- [ ] An artifact without its migrations directory fails startup loudly.
-- [ ] The CLI ships as a production dependency exact-pinned to the runtime client's version; the tarball's pinned `npx` fallback stays documented.
-- [ ] No boot-time migration exists; concurrent migration attempts rely on the migration tool's advisory lock.
-- [ ] Provisioning-based e2e scenarios cover the refusals; the full suite stays green.
+- [x] Against a database provisioned to an earlier migration state, startup refuses with the migration command in the message.
+- [x] Against a database carrying an applied migration unknown to the artifact, startup succeeds.
+- [x] An artifact without its migrations directory fails startup loudly.
+- [x] The CLI ships as a production dependency exact-pinned to the runtime client's version; the tarball's pinned `npx` fallback stays documented.
+- [x] No boot-time migration exists; concurrent migration attempts rely on the migration tool's advisory lock.
+- [x] Provisioning-based e2e scenarios cover the refusals; the full suite stays green.

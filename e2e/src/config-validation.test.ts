@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { exportJWK, generateKeyPair } from 'jose';
-import { backendDistFromWorkspaceRoot, Instance, WORKSPACE_ROOT } from './instance';
+import {
+  backendDistFromWorkspaceRoot,
+  Instance,
+  startupRefusal,
+  WORKSPACE_ROOT,
+} from './instance';
 
 const BACKEND_DIST = backendDistFromWorkspaceRoot(WORKSPACE_ROOT);
 
@@ -21,15 +26,7 @@ async function expectStartupRefusal(
   env: Record<string, string>,
   pattern: RegExp,
 ): Promise<void> {
-  let started: Instance | undefined;
-  try {
-    started = await Instance.start(BACKEND_DIST, env);
-  } catch (error) {
-    expect(String(error)).toMatch(pattern);
-    return;
-  }
-  await started.stop();
-  throw new Error('expected the Instance to refuse to start, but it served traffic');
+  expect(await startupRefusal(Instance.start(BACKEND_DIST, env))).toMatch(pattern);
 }
 
 async function expectBoots(env: Record<string, string>): Promise<void> {

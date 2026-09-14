@@ -35,9 +35,11 @@ cd backend
 DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/identik npx prisma migrate deploy
 ```
 
-Starting against an unmigrated database fails fast and names that command.
-When migrating from a release artifact — which ships `prisma/` without
-`node_modules` — use the pinned CLI: `npx prisma@7.10.0 migrate deploy`.
+Concurrent deploy attempts serialize on Prisma's advisory lock. Starting
+against a database behind this release fails fast and names the command. The backend carries the Prisma CLI as an exact-pinned production
+dependency; the release tarball ships `prisma/` without `node_modules`, so
+migrating straight from the tarball uses the pinned CLI:
+`npx prisma@7.10.0 migrate deploy`.
 
 ## Repository layout
 
