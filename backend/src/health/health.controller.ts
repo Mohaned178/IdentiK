@@ -1,4 +1,5 @@
 import { Controller, Get, Inject, Res } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { MailHealth } from '../mail/mail-transport';
 import { MailService } from '../mail/mail.service';
@@ -31,6 +32,7 @@ export interface ReadinessView {
  * deliberately coarse: booleans and the binding name, never a host, an error
  * string, or a timestamp.
  */
+@ApiTags('Health')
 @Controller('health')
 export class HealthController {
   constructor(

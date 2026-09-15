@@ -13,6 +13,7 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { IsEmail, IsIn, IsOptional, IsString, MinLength } from 'class-validator';
 import { ADMIN_SESSION_TTL_MS, AdministratorsService } from './administrators.service';
@@ -78,6 +79,7 @@ export function requireAdministratorSession(
   return session;
 }
 
+@ApiTags('Administrators')
 @Controller('api/administrators')
 export class AdministratorsController {
   constructor(

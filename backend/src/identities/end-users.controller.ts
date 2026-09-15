@@ -10,6 +10,7 @@ import {
   Res,
   Body,
 } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { IsEmail, IsString, MinLength } from 'class-validator';
 import { ThrottleService, type ThrottleScope, type ThrottleSubject } from '../throttle/throttle.service';
@@ -51,6 +52,7 @@ class ResetPasswordBody {
  * shape, and timing — the accepted/refused distinction travels to the
  * mailbox, never the HTTP layer.
  */
+@ApiTags('End users')
 @Controller('api/end-users')
 export class EndUsersController {
   private readonly logger = new Logger(EndUsersController.name);

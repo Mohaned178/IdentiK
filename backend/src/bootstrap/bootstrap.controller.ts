@@ -1,4 +1,5 @@
 import { ConflictException, ForbiddenException, Get, HttpCode, Post, Query, Body, Controller } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { IsEmail, IsString, MinLength } from 'class-validator';
 import { BootstrapService, CeremonyRefusedReason } from './bootstrap.service';
 
@@ -19,6 +20,7 @@ class CompleteBootstrapBody {
   name!: string;
 }
 
+@ApiTags('Setup')
 @Controller('api/setup')
 export class BootstrapController {
   constructor(private readonly bootstrap: BootstrapService) {}

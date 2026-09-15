@@ -12,6 +12,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { IsArray, IsIn, IsString, MinLength } from 'class-validator';
 import { AdministratorGuard } from '../administrators/administrator.guard';
 import { assertOwner, OwnerGuard } from '../administrators/owner.guard';
@@ -66,6 +67,7 @@ class ConfigureScopesBody {
  * secret at registration, so registering one is an Owner action too — a
  * Member registers SPA/Mobile Applications, which never hold a secret.
  */
+@ApiTags('Applications')
 @Controller('api/applications')
 @UseGuards(AdministratorGuard)
 export class ApplicationsController {

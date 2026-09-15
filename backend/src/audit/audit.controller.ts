@@ -6,6 +6,7 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { IsOptional, IsString } from 'class-validator';
 import { AdministratorGuard } from '../administrators/administrator.guard';
 import type { AdministratorRequest } from '../administrators/administrators.controller';
@@ -35,6 +36,7 @@ class AuditQuery implements AuditFilters {
  * Filters are optional and combine; nothing here is Owner-only, because
  * seeing the record is not a destructive act.
  */
+@ApiTags('Audit')
 @Controller('api/audit')
 @UseGuards(AdministratorGuard)
 export class AuditController {

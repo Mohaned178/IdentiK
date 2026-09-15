@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { IsEmail, IsString, MinLength } from 'class-validator';
 import { InMemoryMailTransport } from './in-memory-mail.transport';
 import { MailService } from './mail.service';
@@ -23,6 +24,7 @@ class SendDevMailBody {
   body!: string;
 }
 
+@ApiTags('Development')
 @Controller('dev/mail')
 export class DevMailController {
   constructor(

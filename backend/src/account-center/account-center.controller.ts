@@ -12,6 +12,7 @@ import {
   UnauthorizedException,
   UseGuards,
 } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { IsEmail, IsString, MinLength } from 'class-validator';
 import type { Request, Response } from 'express';
 import { sessionCookieOptions } from '../config/cookies';
@@ -48,6 +49,7 @@ class ChangeEmailBody {
  * same story with one exception: the Session where the change happens
  * survives (ADR-0013).
  */
+@ApiTags('Account Center')
 @Controller('api/account-center')
 export class AccountCenterController {
   constructor(

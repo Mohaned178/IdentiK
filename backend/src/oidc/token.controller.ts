@@ -1,4 +1,5 @@
 import { Body, Controller, HttpCode, Post, Req, Res } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { ThrottleService, type ThrottleSubject } from '../throttle/throttle.service';
 import { ClientAuthenticationService } from './client-authentication.service';
@@ -12,6 +13,7 @@ import { TokenRequest, TokenService } from './token.service';
  * OAuth-shaped JSON, not the platform's exception envelope, because this is
  * protocol.
  */
+@ApiTags('OIDC')
 @Controller('api/oidc')
 export class TokenController {
   constructor(

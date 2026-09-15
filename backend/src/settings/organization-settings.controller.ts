@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Put, Req, UseGuards } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { AdministratorGuard } from '../administrators/administrator.guard';
 import { OwnerGuard } from '../administrators/owner.guard';
 import {
@@ -17,6 +18,7 @@ import {
  * the trust fabric (SMTP, signing keys) is not addressable from this API at
  * all.
  */
+@ApiTags('Organization')
 @Controller('api/organization')
 @UseGuards(AdministratorGuard)
 export class OrganizationSettingsController {

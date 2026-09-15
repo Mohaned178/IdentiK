@@ -9,6 +9,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { AdministratorGuard } from '../administrators/administrator.guard';
 import {
   requireAdministratorSession,
@@ -28,6 +29,7 @@ import {
  * sets or reveals a credential. The dashboard consumes exactly these routes —
  * there is no dashboard-only back door.
  */
+@ApiTags('Identities')
 @Controller('api/identities')
 @UseGuards(AdministratorGuard)
 export class IdentitiesController {

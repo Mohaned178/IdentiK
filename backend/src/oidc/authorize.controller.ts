@@ -1,4 +1,5 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { IsEmail, IsString, MinLength } from 'class-validator';
 import { LinkBaseService } from '../config/link-base.service';
@@ -29,6 +30,7 @@ class SignInBody {
  * target. This controller owns the response deliberately: an authorization
  * endpoint's status and Location are protocol, not decoration.
  */
+@ApiTags('OIDC')
 @Controller('api/oidc')
 export class AuthorizeController {
   constructor(

@@ -1,4 +1,5 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { optionalText } from '../common/text';
 import { TokenService } from './token.service';
@@ -12,6 +13,7 @@ import { TokenService } from './token.service';
  * verification state, `profile` adds the handle. A token for a suspended or
  * anonymized Identity is refused at ask-time.
  */
+@ApiTags('OIDC')
 @Controller('api/oidc')
 export class UserInfoController {
   constructor(private readonly tokens: TokenService) {}

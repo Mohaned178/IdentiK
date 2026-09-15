@@ -1,4 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import type { JWK } from 'jose';
 import { IssuerService } from './issuer.service';
 import { SigningKeysService } from './signing-keys.service';
@@ -9,6 +10,7 @@ import { SigningKeysService } from './signing-keys.service';
  * an Application fetches the public keys once and verifies assertions without
  * asking the platform on every request (ADR-0015).
  */
+@ApiTags('OIDC')
 @Controller()
 export class DiscoveryController {
   constructor(

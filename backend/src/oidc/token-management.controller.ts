@@ -1,4 +1,5 @@
 import { Body, Controller, HttpCode, Post, Req, Res } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import {
   ClientAuthenticationService,
@@ -22,6 +23,7 @@ interface TokenManagementRequest {
  * uniformly whatever it was handed — an unknown token is not an error and
  * reveals nothing.
  */
+@ApiTags('OIDC')
 @Controller('api/oidc')
 export class TokenManagementController {
   constructor(

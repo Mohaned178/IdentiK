@@ -1,9 +1,11 @@
 import { Controller, Get, Inject, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
 import { AdministratorGuard } from './administrator.guard';
 import type { AdministratorRequest } from './administrators.controller';
 import { DATABASE, Database } from '../storage/token';
 
 /** The Management API's minimal Organization view for the dashboard shell. */
+@ApiTags('Organization')
 @Controller('api/organization')
 @UseGuards(AdministratorGuard)
 export class OrganizationController {
