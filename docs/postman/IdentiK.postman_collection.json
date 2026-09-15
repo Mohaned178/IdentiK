@@ -1,0 +1,2336 @@
+{
+  "event": [],
+  "info": {
+    "_postman_id": "identik-local-dev-collection",
+    "description": "IdentiK identity-provider API (local development).\n\nStart here on a fresh database: run the Health folder, then Bootstrap / Setup (paste the one-time setup token from the server log into `setupToken`), then work top to bottom. Administrator routes authenticate with the `identik_admin_session` cookie that Sign In sets — Postman's cookie jar sends it automatically, so no manual header is needed. End-user routes (Account Center) use the `identik_sso_session` cookie set by the OIDC authorize sign-in. OIDC client authentication is HTTP Basic (`client_id:client_secret`) or `client_id`/`client_secret` form fields; public (SPA) clients send `client_id` only and must use PKCE.\n\nVocabulary follows CONTEXT.md: Organization, Administrator (Owner/Member), Identity/End User, Application (web/spa), Enrollment, Session, Mailbox Proof, Scope.",
+    "name": "IdentiK",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "description": "Process liveness and dependency readiness. No authentication. Run these first against any Instance.",
+      "item": [
+        {
+          "description": "Process-only liveness probe. Answers 200 {status:'ok'} whenever the Node process is up, even if PostgreSQL or the mail relay is down. Use it for container liveness / load-balancer checks. No authentication. Failure to get 200 means the Instance itself is down or draining.",
+          "name": "Liveness",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health",
+                "live"
+              ],
+              "raw": "{{baseUrl}}/health/live"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Dependency readiness probe. Returns 200 {status:'ok'|'degraded', checks:{database:{ok}, mail:{binding, reachable}}} when the database probe passes (503 {status:'unavailable'} when it does not; an unreachable mail relay only degrades). Also answers draining Instances with unavailable at once. Use it for readiness gates and smoke tests. No authentication.",
+          "name": "Readiness",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health",
+                "ready"
+              ],
+              "raw": "{{baseUrl}}/health/ready"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Alias of Readiness kept as the original health path: GET /health behaves exactly like GET /health/ready (same body, same 503 semantics). No authentication.",
+          "name": "Health (readiness alias)",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ],
+              "raw": "{{baseUrl}}/health"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "Health"
+    },
+    {
+      "description": "The one-time Bootstrap Ceremony (CONTEXT.md): establishes the default Organization and its first Owner. Public (no authentication). After completion the ceremony is gone forever — further calls fail with 409.",
+      "item": [
+        {
+          "description": "Checks whether the one-time Bootstrap Ceremony is still available. Before bootstrap this returns completed=false and available=true (within the expiry window); after the first Owner is created it returns completed=true and available=false. Public, no authentication. Run this before attempting Bootstrap Complete.",
+          "name": "Setup status",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "setup",
+                "status"
+              ],
+              "raw": "{{baseUrl}}/api/setup/status"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Completes the Bootstrap Ceremony: creates the default Organization and its first Owner (role owner) in one atomic claim. Query param `token` is the one-time setup token printed at first boot (paste it into `setupToken`). Body: organizationName (min 2 chars), Owner email, Owner password (min 8 chars, checked against the default password policy), Owner display name. Success is 201 {administratorId, organizationId, organizationName} — note: no session is created, sign in next. Failures: 403 when the token is missing, wrong, or expired; 409 when the ceremony is already completed (the losing side of a concurrent claim also gets 409).",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.organizationId) pm.environment.set('organizationId', b.organizationId);",
+                  "if (b.administratorId) pm.environment.set('ownerAdministratorId', b.administratorId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Bootstrap complete",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"organizationName\": \"{{organizationName}}\",\n  \"email\": \"{{ownerEmail}}\",\n  \"password\": \"{{ownerPassword}}\",\n  \"name\": \"{{ownerName}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "setup"
+              ],
+              "query": [
+                {
+                  "key": "token",
+                  "value": "{{setupToken}}"
+                }
+              ],
+              "raw": "{{baseUrl}}/api/setup?token={{setupToken}}"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "Bootstrap / Setup"
+    },
+    {
+      "description": "Administrator sessions (cookie `identik_admin_session`, set by Sign In and sent automatically by Postman's cookie jar) plus the Owner-only invitation flow. Administrators and End Users are separate populations with separate credentials (CONTEXT.md) — these routes never touch Identity credentials.",
+      "item": [
+        {
+          "description": "Administrator sign-in. Body: email and password of an Administrator (the Owner created at bootstrap, or an invited Member/Owner). Success is 200 {administratorId, organizationName, role} plus the `identik_admin_session` cookie, which Postman stores and sends on later requests automatically. Failures: 401 for unknown email or wrong password (identical response either way; failures are throttled and audited). Run this before any Management API route.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.administratorId) pm.environment.set('ownerAdministratorId', b.administratorId);",
+                  "if (b.organizationName) pm.environment.set('organizationName', b.organizationName);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Sign in (Administrator)",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"email\": \"{{ownerEmail}}\",\n  \"password\": \"{{ownerPassword}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "administrators",
+                "sign-in"
+              ],
+              "raw": "{{baseUrl}}/api/administrators/sign-in"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Administrator sign-out. Revokes the presented session server-side (if any) and clears the cookie. Always answers 204 with an empty body — uniform whether or not a live session was presented, so a stale cookie cannot linger. No failure cases.",
+          "name": "Sign out (Administrator)",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "administrators",
+                "sign-out"
+              ],
+              "raw": "{{baseUrl}}/api/administrators/sign-out"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Returns the current Administrator session (membershipId, role, organizationId, organizationName, administratorId) resolved from the session cookie. Requires the Administrator cookie; without a live session it answers 401. Use it to confirm who you are signed in as and which role gates Owner-only routes.",
+          "name": "Current session",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "administrators",
+                "session"
+              ],
+              "raw": "{{baseUrl}}/api/administrators/session"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Owner-only: invite an Administrator by email. Body: email (required) and role owner|member (optional, defaults to member). The request carries a role but never a credential — the invitee sets their own password via the invitation link, which is mailed to them (see Development / List captured mail in dev). Success returns {invitationId, email, role}. Requires the Administrator cookie of an Owner; Members get 403. The invitationId is captured to the environment for reference.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.invitationId) pm.environment.set('invitationId', b.invitationId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Invite administrator (Owner)",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"email\": \"{{memberEmail}}\",\n  \"role\": \"member\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "administrators",
+                "invitations"
+              ],
+              "raw": "{{baseUrl}}/api/administrators/invitations"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Invitation-link preview for the hosted acceptance page: given ?token=, reports {organizationName, valid, email, role} without consuming the token. Public, no authentication. valid=false means the link is unknown, already consumed, or expired. Use it to check a link before accepting.",
+          "name": "Invitation info",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "administrators",
+                "invitations"
+              ],
+              "query": [
+                {
+                  "key": "token",
+                  "value": "{{invitationToken}}"
+                }
+              ],
+              "raw": "{{baseUrl}}/api/administrators/invitations?token={{invitationToken}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Accept an invitation: the invitee sets their own display name and password (min 8 chars) and receives the Organization-scoped Membership with the invited role. Body: token (from the mailed link — copy it into `invitationToken`, or extract it from the captured dev mail), name, password. Success returns {administratorId, organizationName, email, role} with a 201 status. The only failure is a dead link (invalid, consumed, or expired) → 400. Public, no authentication.",
+          "name": "Accept invitation",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"token\": \"{{invitationToken}}\",\n  \"name\": \"{{memberName}}\",\n  \"password\": \"{{memberPassword}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "administrators",
+                "invitations",
+                "accept"
+              ],
+              "raw": "{{baseUrl}}/api/administrators/invitations/accept"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "Administrators & Invitations"
+    },
+    {
+      "description": "The Organization trust boundary (CONTEXT.md): exactly one Organization per Instance today. Reading is every Administrator's right; writing settings is Owner-only. Authenticate with the Administrator cookie first.",
+      "item": [
+        {
+          "description": "Minimal Organization view for the dashboard shell: {id, name} of the caller's Organization, scoped from the session — the request names nothing. Requires the Administrator cookie (401 without it).",
+          "name": "Get organization",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organization"
+              ],
+              "raw": "{{baseUrl}}/api/organization"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Reads the effective Organization settings: {branding {name, logoUrl, primaryColor, secondaryColor}, passwordPolicy {minLength, requireUppercase, requireLowercase, requireDigit, requireSymbol}, sessionPolicy {idleTimeoutMs}}. Every Administrator may read. Requires the Administrator cookie.",
+          "name": "Get organization settings",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organization",
+                "settings"
+              ],
+              "raw": "{{baseUrl}}/api/organization/settings"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Owner-only: updates Organization settings. Body carries any subset of the branding, passwordPolicy, and sessionPolicy sections (unknown fields are rejected; colors must be #rgb/#rrggbb; idle timeout is bounded). The trust fabric (SMTP, signing keys) is not addressable here at all. Returns the effective view. Requires an Owner cookie — Members get 403.",
+          "name": "Update organization settings (Owner)",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"branding\": {\n    \"name\": \"{{organizationName}}\",\n    \"logoUrl\": null,\n    \"primaryColor\": \"#2563eb\",\n    \"secondaryColor\": \"#1e40af\"\n  },\n  \"passwordPolicy\": {\n    \"minLength\": 10,\n    \"requireUppercase\": false,\n    \"requireLowercase\": false,\n    \"requireDigit\": true,\n    \"requireSymbol\": false\n  },\n  \"sessionPolicy\": {\n    \"idleTimeoutMs\": 2592000000\n  }\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "organization",
+                "settings"
+              ],
+              "raw": "{{baseUrl}}/api/organization/settings"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "Organization"
+    },
+    {
+      "description": "Management API for Applications (OAuth clients) and their credentials. Registration is Administrator-accessible, but anything issuing a Client Secret — registering a Web Application, issuing/revoking secrets, managing redirect URIs — is Owner-only; SPA/Mobile Applications never hold a secret. Authenticate with the Administrator cookie. IDs and secrets are captured to the environment automatically.",
+      "item": [
+        {
+          "description": "Registers an Application: {name, type} where type is web (confidential, authorization-code flow) or spa (public, PKCE). Registering a Web Application mints its first Client Secret atomically, so it is Owner-only; Members may only register spa Applications. Success is 201 {application {id, name, type, clientId, state, allowedScopes, secrets, redirectUris}, clientSecret} — clientSecret is the plaintext secret shown exactly once for web, null for spa. applicationId, clientId and (for web) clientSecret are captured to the environment.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.application) {",
+                  "pm.environment.set('applicationId', b.application.id);",
+                  "pm.environment.set('clientId', b.application.clientId);",
+                  "}",
+                  "if (b.clientSecret) pm.environment.set('clientSecret', b.clientSecret);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Register Web application (Owner)",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"name\": \"{{applicationName}}\",\n  \"type\": \"web\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications"
+              ],
+              "raw": "{{baseUrl}}/api/applications"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Registers a public SPA/Mobile Application ({name, type:'spa'}). Members may do this — no secret is ever issued for spa, under any circumstance. Success is 201 with clientSecret null; applicationId/clientId are captured (overwriting the web app's — rename the variables if you keep both). PKCE does the secret's job at the token endpoint.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.application) {",
+                  "pm.environment.set('spaApplicationId', b.application.id);",
+                  "pm.environment.set('spaClientId', b.application.clientId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Register SPA application",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"name\": \"{{spaApplicationName}}\",\n  \"type\": \"spa\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications"
+              ],
+              "raw": "{{baseUrl}}/api/applications"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Lists every Application in the caller's Organization: [{id, name, type, clientId, state, allowedScopes, secrets[], redirectUris[]}]. Secrets appear as metadata only (id, label, createdAt, revokedAt) — never plaintext. Requires the Administrator cookie. Use it to confirm registration and to pick up IDs.",
+          "name": "List applications",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications"
+              ],
+              "raw": "{{baseUrl}}/api/applications"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Fetches one Application by its internal id (path param, not the client_id): {application}. Requires the Administrator cookie. Only unknown or foreign ids answer 404 — a deleted Application stays readable as a terminal shell with state 'deleted'.",
+          "name": "Get application",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Configures the scopes an Application may request (openid, email, profile subset). openid is always required; requesting an unconfigured scope later fails the authorization with invalid_scope instead of being silently dropped. Members may do this — scopes govern token contents, not permissions. Body: {scopes: [...]}. Requires the Administrator cookie. Run this before the OIDC flow (the flow requests `{{scopes}}`).",
+          "name": "Configure scopes",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"scopes\": [\"openid\", \"email\", \"profile\"]\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "scopes"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/scopes"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Owner-only: adds an allowed redirect URI ({uri}) to the Application. Matching is exact on scheme, host, port, and path — no wildcards, no trailing-slash forgiveness. Success is 201 {redirectUri {id, uri, createdAt, updatedAt}}; the uri id is captured to `redirectUriId`. Invalid or duplicate URIs are rejected with 400. Register `{{redirectUri}}` before running the OIDC flow.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.redirectUri) pm.environment.set('redirectUriId', b.redirectUri.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Add redirect URI (Owner)",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"uri\": \"{{redirectUri}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "redirect-uris"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/redirect-uris"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Owner-only: replaces one redirect URI ({uri}) by its uri id, under the same exact-match rules as adding. Returns the updated view. Requires the Administrator cookie of an Owner.",
+          "name": "Update redirect URI (Owner)",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"uri\": \"{{redirectUri}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PATCH",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "redirect-uris",
+                "{{redirectUriId}}"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/redirect-uris/{{redirectUriId}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Owner-only: removes one redirect URI by its uri id. Removing the last URI blocks new authorizations (every authorization request must exactly match a registered URI). Returns the removed view. Requires an Owner cookie.",
+          "name": "Remove redirect URI (Owner)",
+          "request": {
+            "header": [],
+            "method": "DELETE",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "redirect-uris",
+                "{{redirectUriId}}"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/redirect-uris/{{redirectUriId}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Owner-only: issues an additional labeled Client Secret ({label}) for zero-downtime rotation — several concurrent secrets may be live, each individually revocable. Success is 201 {secret {id, label, createdAt, revokedAt}, clientSecret} where clientSecret is the plaintext shown exactly once; it is captured to the environment (overwriting the registration secret — update your client). Requires an Owner cookie.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.secret) pm.environment.set('secretId', b.secret.id);",
+                  "if (b.clientSecret) pm.environment.set('clientSecret', b.clientSecret);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Issue client secret (Owner)",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"label\": \"rotation-2\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "secrets"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/secrets"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Owner-only: revokes one Client Secret by its id (from the secrets list or the issue response). Revocation is immediate for future token use; already-minted access tokens live out their short TTL. Returns the revoked secret view. Requires an Owner cookie.",
+          "name": "Revoke client secret (Owner)",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "secrets",
+                "{{secretId}}",
+                "revoke"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/secrets/{{secretId}}/revoke"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Disables the Application (reversible pause): new authentication is refused and its refresh tokens are revoked immediately, while existing Sessions survive. Members may do this. Returns the updated Application (state disabled). Requires the Administrator cookie.",
+          "name": "Disable application",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "disable"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/disable"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Re-enables a disabled Application: new authentication is accepted again. Returns the updated Application (state active). Requires the Administrator cookie.",
+          "name": "Enable application",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "enable"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/enable"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Lists this Application's Enrollments only (per-Application view): the Identities enrolled here with their state. Requires the Administrator cookie. Enrollments are created silently at first authentication — empty until someone signs in through this Application.",
+          "name": "List enrollments",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "enrollments"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/enrollments"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Suspends one Enrollment: the Identity loses this Application but nothing else — Organization-wide access is untouched. Returns the updated enrollment. Requires the Administrator cookie. Use it to cut off a single integration without suspending the person.",
+          "name": "Suspend enrollment",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "enrollments",
+                "{{identityId}}",
+                "suspend"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/enrollments/{{identityId}}/suspend"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Lifts an Enrollment suspension: the Identity may use this Application again. Returns the updated enrollment. Requires the Administrator cookie.",
+          "name": "Unsuspend enrollment",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}",
+                "enrollments",
+                "{{identityId}}",
+                "unsuspend"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}/enrollments/{{identityId}}/unsuspend"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Owner-only, irreversible: deletes the Application, removes its Enrollments, and revokes its credentials; Identities survive. The caller must send {confirm:true} — without it the API answers 400 restating the irreversibility. Returns the pseudonymous shell the audit trail stays attributed to; the shell stays readable via Get application (state 'deleted'). Afterwards, secret/redirect-URI/scope mutations are refused with 409, while disable/enable/delete stay idempotent no-ops returning the shell. Requires an Owner cookie. Prefer Disable for routine pauses.",
+          "name": "Delete application (Owner)",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"confirm\": true\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "DELETE",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "applications",
+                "{{applicationId}}"
+              ],
+              "raw": "{{baseUrl}}/api/applications/{{applicationId}}"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "Applications"
+    },
+    {
+      "description": "Management API directory and state levers for Identities (one person per Organization). Every Administrator can read and pull the levers; nothing here sets or reveals a credential — password work always goes through the mailbox. Authenticate with the Administrator cookie.",
+      "item": [
+        {
+          "description": "Lists every Identity in the Organization: [{id, email, emailVerified, state, createdAt}] — never a credential. `state` is the derived liveness label (active | unverified | suspended | anonymized); an anonymized row shows an id-derived pseudonym instead of the destroyed email. Requires the Administrator cookie. The first entry's id is captured to `identityId` for the lever requests below.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.identities && b.identities.length) pm.environment.set('identityId', b.identities[0].id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "List identities",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "identities"
+              ],
+              "raw": "{{baseUrl}}/api/identities"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Full Identity detail: directory fields ({id, email, emailVerified, state, createdAt}) plus enrollments, live Sessions, and recent audit activity. Requires the Administrator cookie. Unknown or foreign id answers 404.",
+          "name": "Get identity",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "identities",
+                "{{identityId}}"
+              ],
+              "raw": "{{baseUrl}}/api/identities/{{identityId}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Suspends the Identity Organization-wide and kills every Session immediately: authentication, refresh, and userinfo all refuse from this point. Returns the updated detail with state 'suspended'. Requires the Administrator cookie. Reversible with Unsuspend (killed Sessions stay dead).",
+          "name": "Suspend identity",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "identities",
+                "{{identityId}}",
+                "suspend"
+              ],
+              "raw": "{{baseUrl}}/api/identities/{{identityId}}/suspend"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Lifts an Identity suspension: authentication returns at once (state back to active for a verified Identity); Sessions killed by the suspension are not resurrected — the person signs in again. Returns the updated detail. Requires the Administrator cookie.",
+          "name": "Unsuspend identity",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "identities",
+                "{{identityId}}",
+                "unsuspend"
+              ],
+              "raw": "{{baseUrl}}/api/identities/{{identityId}}/unsuspend"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Revokes every Session of the Identity at once (all devices), e.g. after credential compromise. Returns {revoked: <count>}. Requires the Administrator cookie. The person stays otherwise untouched — also suspend first if authentication itself must stop.",
+          "name": "Revoke all sessions",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "identities",
+                "{{identityId}}",
+                "sessions",
+                "revoke-all"
+              ],
+              "raw": "{{baseUrl}}/api/identities/{{identityId}}/sessions/revoke-all"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Force password reset: mails the Identity a reset link and kills every Session now. The Administrator never sets, reads, or sees a credential — the mailbox proves control and chooses the password. Returns {status:'reset-sent'}. Requires the Administrator cookie. In dev, read the link from List captured mail.",
+          "name": "Force password reset",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "identities",
+                "{{identityId}}",
+                "force-password-reset"
+              ],
+              "raw": "{{baseUrl}}/api/identities/{{identityId}}/force-password-reset"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Anonymizes the Identity — the irreversible platform delete: email, credentials, Sessions, and Enrollments are destroyed, audit history stays against a pseudonymous shell, and the old email is immediately reusable by a fresh Identity. The caller must send {confirm:true}; without it the API answers 400. Returns the shell detail (state 'anonymized', id-derived display email). Requires the Administrator cookie. There is no undo.",
+          "name": "Anonymize identity",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"confirm\": true\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "identities",
+                "{{identityId}}",
+                "anonymize"
+              ],
+              "raw": "{{baseUrl}}/api/identities/{{identityId}}/anonymize"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "Identities (Management)"
+    },
+    {
+      "description": "Public End-User boundary: sign-up, mailbox proof (Mailbox Proof in CONTEXT.md), and password reset. Responses are deliberately uniform — accepted/refused travels to the mailbox, never the HTTP layer — and initiating endpoints are throttled. No authentication. In dev, links arrive in List captured mail.",
+      "item": [
+        {
+          "description": "Sign-up page data for the hosted page: {organizationName, branding}. Public. Use it to confirm the Instance identity before posting the form.",
+          "name": "Sign-up page info",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "end-users",
+                "sign-up"
+              ],
+              "raw": "{{baseUrl}}/api/end-users/sign-up"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "End-User sign-up: {email, password (min 8 chars, Organization policy applies)}. Always answers 201 {status:'check-your-mailbox'} with identical shape and timing whether the address is new, already verified, or pre-claimed — the outcome travels to the mailbox. A new address becomes an Unverified Reservation until the mailed link is clicked. Throttled per email; no authentication.",
+          "name": "Sign up",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"email\": \"{{endUserEmail}}\",\n  \"password\": \"{{endUserPassword}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "end-users",
+                "sign-up"
+              ],
+              "raw": "{{baseUrl}}/api/end-users/sign-up"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Mailbox-proof click for sign-up verification. Opened from a mail client (copy ?token= from the captured dev mail into `mailboxToken`), it consumes the single-use link and 302-redirects to the hosted result path with ?outcome=verified (or invalid for dead links). Turn off automatic redirect following for this request to inspect the 302 Location. Consuming the proof activates the Identity. Public.",
+          "name": "Verify email (link click)",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "end-users",
+                "verify-email"
+              ],
+              "query": [
+                {
+                  "key": "token",
+                  "value": "{{mailboxToken}}"
+                }
+              ],
+              "raw": "{{baseUrl}}/api/end-users/verify-email?token={{mailboxToken}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Result-page data for the hosted verification page: ?outcome=verified|invalid returns {outcome, organizationName, branding}; anything else is 400. Public. This is what the redirect from the verify click lands on.",
+          "name": "Verify email result info",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "end-users",
+                "verify-email",
+                "result"
+              ],
+              "query": [
+                {
+                  "key": "outcome",
+                  "value": "verified"
+                }
+              ],
+              "raw": "{{baseUrl}}/api/end-users/verify-email/result?outcome=verified"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Mailbox-proof click for a verified email change (requested in Account Center). Same redirect posture as sign-up verification: 302 to the hosted change-email result path with ?outcome=changed (or invalid). The change applies only while the single-use link is live, with no session required. Public.",
+          "name": "Confirm email change (link click)",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "end-users",
+                "change-email"
+              ],
+              "query": [
+                {
+                  "key": "token",
+                  "value": "{{mailboxToken}}"
+                }
+              ],
+              "raw": "{{baseUrl}}/api/end-users/change-email?token={{mailboxToken}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Result-page data for the hosted email-change page: ?outcome=changed|invalid returns {outcome, organizationName, branding}; anything else is 400. Public.",
+          "name": "Email change result info",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "end-users",
+                "change-email",
+                "result"
+              ],
+              "query": [
+                {
+                  "key": "outcome",
+                  "value": "changed"
+                }
+              ],
+              "raw": "{{baseUrl}}/api/end-users/change-email/result?outcome=changed"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Forgot-password page data: {organizationName, branding} for the hosted page. Public, no authentication. The form posts to Forgot password; the uniform 202 response never reveals whether the address exists.",
+          "name": "Forgot password page info",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "end-users",
+                "forgot-password"
+              ],
+              "raw": "{{baseUrl}}/api/end-users/forgot-password"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Forgot-password form target: {email}. Always answers 202 {status:'check-your-mailbox'} whether or not the address exists — the reset link (or nothing) travels to the mailbox only. Throttled per email. Public. In dev, read the link from List captured mail, then check it with Reset password page info.",
+          "name": "Forgot password",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"email\": \"{{endUserEmail}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "end-users",
+                "forgot-password"
+              ],
+              "raw": "{{baseUrl}}/api/end-users/forgot-password"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Reset-link preview: ?token= reports {organizationName, valid, branding} without consuming the link. Public. valid=false means unknown, consumed, or expired — check this before posting the new password.",
+          "name": "Reset password page info",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "end-users",
+                "reset-password"
+              ],
+              "query": [
+                {
+                  "key": "token",
+                  "value": "{{mailboxToken}}"
+                }
+              ],
+              "raw": "{{baseUrl}}/api/end-users/reset-password?token={{mailboxToken}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Completes a password reset: {token, password (min 8 chars, Organization policy applies)}. Sets the new password, proves mailbox control, and revokes every Session of the Identity. Success is 200 {status:'password-reset'}; a dead token is 400. Public. Copy the token from the captured dev mail into `mailboxToken`.",
+          "name": "Reset password",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"token\": \"{{mailboxToken}}\",\n  \"password\": \"{{endUserPassword}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "end-users",
+                "reset-password"
+              ],
+              "raw": "{{baseUrl}}/api/end-users/reset-password"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "End Users (Sign-up, Verify, Reset)"
+    },
+    {
+      "description": "Self-service for the signed-in End User, scoped to the SSO Session (`identik_sso_session` cookie from the OIDC authorize sign-in — Postman's jar sends it automatically). The request never names whose data to touch. 401 without a live session (revoked, expired, suspended, or password-reset).",
+      "item": [
+        {
+          "description": "Account Center view for the current Session's Identity: {organizationName, branding, identity {email}, pendingEmail, currentSessionId, sessions[], connectedApplications[]}. Requires the SSO cookie. Use currentSessionId to revoke exactly this device, and a connected application's data to find IDs.",
+          "name": "Get account center",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "account-center"
+              ],
+              "raw": "{{baseUrl}}/api/account-center"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Changes the Identity's own password: {currentPassword, newPassword (min 8 chars, Organization policy applies)}. The current credential proves ownership; the device that changed it stays signed in while every other Session (and its refresh lineage) is evicted. Success is 200 {status:'password-changed'}; a wrong current password is a clean 403 that changes nothing. Requires the SSO cookie.",
+          "name": "Change password",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"currentPassword\": \"{{endUserPassword}}\",\n  \"newPassword\": \"{{endUserNewPassword}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "account-center",
+                "password"
+              ],
+              "raw": "{{baseUrl}}/api/account-center/password"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Requests a verified email change: {newEmail}. Always answers 202 {status:'check-your-mailbox'} whether the address is free or claimed — the verification link or the refusal travels to the requested mailbox only, and the handle is untouched until the mailed link is clicked. Throttled. Requires the SSO cookie. In dev, complete it with Confirm email change.",
+          "name": "Request email change",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"newEmail\": \"{{endUserNewEmail}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "account-center",
+                "email"
+              ],
+              "raw": "{{baseUrl}}/api/account-center/email"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Revokes one of the Identity's own Sessions by id (see Get account center for the list). A foreign or unknown id is 404 — callers learn nothing about other people's devices. Revoking the current Session also clears the browser cookie, i.e. signs this client out. Idempotent: repeating changes nothing. Success is 200 {status:'revoked'}. Requires the SSO cookie.",
+          "name": "Revoke own session",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "account-center",
+                "sessions",
+                "{{endUserSessionId}}",
+                "revoke"
+              ],
+              "raw": "{{baseUrl}}/api/account-center/sessions/{{endUserSessionId}}/revoke"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "End-User sign-out: revokes the current Session and clears the cookie. Always 204 with an empty body, uniform whether or not a live Session was presented. No failure cases.",
+          "name": "Sign out (End user)",
+          "request": {
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "account-center",
+                "sign-out"
+              ],
+              "raw": "{{baseUrl}}/api/account-center/sign-out"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "Account Center"
+    },
+    {
+      "description": "Self-describing OIDC metadata for stock clients. Public, no authentication. Read these before the authorization flow — the endpoints, supported scopes, and signing keys all come from here.",
+      "item": [
+        {
+          "description": "OIDC Discovery 1.0 document: issuer, authorization/token/userinfo/jwks/revocation/introspection endpoints, supported response types, scopes, and signing algorithms. Together with JWKS it lets any stock OIDC client integrate without IdentiK-specific knowledge. Public.",
+          "name": "Discovery document",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                ".well-known",
+                "openid-configuration"
+              ],
+              "raw": "{{baseUrl}}/.well-known/openid-configuration"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "JSON Web Key Set: the public verification keys ({keys[]}), including retired signing keys so tokens they signed stay verifiable until expiry. Clients fetch this once and verify assertions offline. Public. The `kid` here matches the `kid` header of minted tokens.",
+          "name": "JWKS",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "oidc",
+                "jwks"
+              ],
+              "raw": "{{baseUrl}}/api/oidc/jwks"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "OIDC Discovery & JWKS"
+    },
+    {
+      "description": "Standard authorization-code flow against a registered Application (response_type=code only). Run Configure scopes and Add redirect URI first: scope must include openid within the Application's allowedScopes, and redirect_uri must exactly match a registered URI. Web (confidential) clients authenticate with HTTP Basic; SPA (public) clients send client_id only with PKCE (S256) — a secret on a public client is refused. Authorization codes are single-use, short-lived, and bound to the Session that authorized them.",
+      "item": [
+        {
+          "description": "Begins the authorization: validates client_id, redirect_uri (exact match), response_type=code, scope (must include openid, only openid/email/profile, within the Application's allowedScopes), state passthrough, and PKCE (required for spa: code_challenge + code_challenge_method=S256; optional for web). With a live SSO Session it 302-redirects straight back with ?code= (capture it from the Location header with redirects off — the script below does that into `authorizationCode`); without one it returns 200 page JSON {organizationName, applicationName, branding, request} for the hosted sign-in page. Protocol errors travel as redirects (?error=) when the client/URI are known, else as JSON error pages. Public.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const loc = pm.response.headers.get('Location');",
+                  "if (loc) {",
+                  "const m = loc.match(/[?&]code=([^&]+)/);",
+                  "if (m) pm.environment.set('authorizationCode', decodeURIComponent(m[1]));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Authorize (GET)",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "oidc",
+                "authorize"
+              ],
+              "query": [
+                {
+                  "key": "client_id",
+                  "value": "{{clientId}}"
+                },
+                {
+                  "key": "redirect_uri",
+                  "value": "{{redirectUri}}"
+                },
+                {
+                  "key": "response_type",
+                  "value": "code"
+                },
+                {
+                  "key": "scope",
+                  "value": "{{scopes}}"
+                },
+                {
+                  "key": "state",
+                  "value": "{{oauthState}}"
+                },
+                {
+                  "key": "nonce",
+                  "value": "{{oauthNonce}}"
+                }
+              ],
+              "raw": "{{baseUrl}}/api/oidc/authorize?client_id={{clientId}}&redirect_uri={{redirectUri}}&response_type=code&scope={{scopes}}&state={{oauthState}}&nonce={{oauthNonce}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Hosted sign-in form target: same query as Authorize GET plus JSON body {email, password} of a verified, live Identity. Success sets the `identik_sso_session` cookie (Postman's jar keeps it for Account Center) and 302-redirects with ?code= — captured to `authorizationCode` by the script (turn off automatic redirect following to read it). Wrong credentials answer 401 {error:'invalid_credentials'} (throttled, audited); suspended or unverified Identities cannot complete. Also creates the silent Enrollment on first authentication. Public.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const loc = pm.response.headers.get('Location');",
+                  "if (loc) {",
+                  "const m = loc.match(/[?&]code=([^&]+)/);",
+                  "if (m) pm.environment.set('authorizationCode', decodeURIComponent(m[1]));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Authorize sign-in (POST)",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"email\": \"{{endUserEmail}}\",\n  \"password\": \"{{endUserPassword}}\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "oidc",
+                "authorize"
+              ],
+              "query": [
+                {
+                  "key": "client_id",
+                  "value": "{{clientId}}"
+                },
+                {
+                  "key": "redirect_uri",
+                  "value": "{{redirectUri}}"
+                },
+                {
+                  "key": "response_type",
+                  "value": "code"
+                },
+                {
+                  "key": "scope",
+                  "value": "{{scopes}}"
+                },
+                {
+                  "key": "state",
+                  "value": "{{oauthState}}"
+                },
+                {
+                  "key": "nonce",
+                  "value": "{{oauthNonce}}"
+                }
+              ],
+              "raw": "{{baseUrl}}/api/oidc/authorize?client_id={{clientId}}&redirect_uri={{redirectUri}}&response_type=code&scope={{scopes}}&state={{oauthState}}&nonce={{oauthNonce}}"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Exchanges the authorization code for tokens (confidential Web client). Form-encoded (OAuth standard): grant_type=authorization_code, code from the redirect, redirect_uri identical to the authorize request. Client authentication is HTTP Basic with client_id as username and the current Client Secret as password (client_secret_post also works). Success is 200 {access_token, token_type:'Bearer', expires_in, id_token, refresh_token, scope} with no-store caching — all three tokens are captured. Codes are single-use and short-lived: reuse or expiry is invalid_grant; unknown client is 401 invalid_client.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.access_token) pm.environment.set('accessToken', b.access_token);",
+                  "if (b.refresh_token) pm.environment.set('refreshToken', b.refresh_token);",
+                  "if (b.id_token) pm.environment.set('idToken', b.id_token);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Token: exchange code (confidential)",
+          "request": {
+            "auth": {
+              "basic": [
+                {
+                  "key": "password",
+                  "type": "string",
+                  "value": "{{clientSecret}}"
+                },
+                {
+                  "key": "username",
+                  "type": "string",
+                  "value": "{{clientId}}"
+                }
+              ],
+              "type": "basic"
+            },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "grant_type",
+                  "type": "text",
+                  "value": "authorization_code"
+                },
+                {
+                  "key": "code",
+                  "type": "text",
+                  "value": "{{authorizationCode}}"
+                },
+                {
+                  "key": "redirect_uri",
+                  "type": "text",
+                  "value": "{{redirectUri}}"
+                }
+              ]
+            },
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "oidc",
+                "token"
+              ],
+              "raw": "{{baseUrl}}/api/oidc/token"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Exchanges the authorization code for tokens (public SPA client): no secret ever — authentication is client_id in the form plus the PKCE code_verifier matching the authorize challenge. The pre-request script mints a fresh S256 verifier/challenge pair per run (CryptoJS is built into Postman). Same 200 token body and capture as the confidential variant. Presenting any secret here is refused with invalid_client.",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "function rand(n) { const c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'; let s = ''; for (let i = 0; i < n; i++) s += c[Math.floor(Math.random() * c.length)]; return s; }",
+                  "const verifier = rand(64);",
+                  "const challenge = CryptoJS.enc.Base64.stringify(CryptoJS.SHA256(verifier)).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');",
+                  "pm.environment.set('codeVerifier', verifier);",
+                  "pm.environment.set('codeChallenge', challenge);"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.access_token) pm.environment.set('accessToken', b.access_token);",
+                  "if (b.refresh_token) pm.environment.set('refreshToken', b.refresh_token);",
+                  "if (b.id_token) pm.environment.set('idToken', b.id_token);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Token: exchange code (public SPA)",
+          "request": {
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "grant_type",
+                  "type": "text",
+                  "value": "authorization_code"
+                },
+                {
+                  "key": "code",
+                  "type": "text",
+                  "value": "{{authorizationCode}}"
+                },
+                {
+                  "key": "redirect_uri",
+                  "type": "text",
+                  "value": "{{redirectUri}}"
+                },
+                {
+                  "key": "client_id",
+                  "type": "text",
+                  "value": "{{spaClientId}}"
+                },
+                {
+                  "key": "code_verifier",
+                  "type": "text",
+                  "value": "{{codeVerifier}}"
+                }
+              ]
+            },
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "oidc",
+                "token"
+              ],
+              "raw": "{{baseUrl}}/api/oidc/token"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Rotates a refresh token: grant_type=refresh_token with the current refresh_token, same client authentication as the exchange. Returns a fresh token set and invalidates the presented refresh token (rotation with reuse detection — replaying an old one burns the lineage). The script overwrites accessToken/refreshToken/idToken. A revoked, expired, or foreign refresh token is invalid_grant.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.access_token) pm.environment.set('accessToken', b.access_token);",
+                  "if (b.refresh_token) pm.environment.set('refreshToken', b.refresh_token);",
+                  "if (b.id_token) pm.environment.set('idToken', b.id_token);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "Token: refresh",
+          "request": {
+            "auth": {
+              "basic": [
+                {
+                  "key": "password",
+                  "type": "string",
+                  "value": "{{clientSecret}}"
+                },
+                {
+                  "key": "username",
+                  "type": "string",
+                  "value": "{{clientId}}"
+                }
+              ],
+              "type": "basic"
+            },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "grant_type",
+                  "type": "text",
+                  "value": "refresh_token"
+                },
+                {
+                  "key": "refresh_token",
+                  "type": "text",
+                  "value": "{{refreshToken}}"
+                }
+              ]
+            },
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "oidc",
+                "token"
+              ],
+              "raw": "{{baseUrl}}/api/oidc/token"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Userinfo (OIDC Core 5.3) via GET: the platform endpoint access tokens are actually for. Send the access token as `Authorization: Bearer {{accessToken}}`. Returns the claims for the token's scopes (openid → sub; email → address + verification state; profile → handle) with no-store caching. A missing, expired, or revoked token — or a suspended/anonymized Identity — answers 401 invalid_token with a Bearer challenge. No client authentication needed.",
+          "name": "Userinfo (GET, Bearer)",
+          "request": {
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "oidc",
+                "userinfo"
+              ],
+              "raw": "{{baseUrl}}/api/oidc/userinfo"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Userinfo via POST: same claims contract as the GET variant. The token may arrive as the Bearer header or as the `access_token` form field (header wins when both are present). Same 401 semantics. Use this variant when the caller cannot set headers.",
+          "name": "Userinfo (POST, form)",
+          "request": {
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "access_token",
+                  "type": "text",
+                  "value": "{{accessToken}}"
+                }
+              ]
+            },
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "oidc",
+                "userinfo"
+              ],
+              "raw": "{{baseUrl}}/api/oidc/userinfo"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Token introspection (RFC 7662) for the client: form fields token (required) plus client authentication (Basic shown here; public clients identify with client_id alone). Success is 200 {active:true, scope, client_id, sub, exp, iat, iss, aud, jti, token_type} for a live token, or {active:false} for anything dead — never an error for the token itself. Missing token is 400; bad client auth is 401.",
+          "name": "Introspect token",
+          "request": {
+            "auth": {
+              "basic": [
+                {
+                  "key": "password",
+                  "type": "string",
+                  "value": "{{clientSecret}}"
+                },
+                {
+                  "key": "username",
+                  "type": "string",
+                  "value": "{{clientId}}"
+                }
+              ],
+              "type": "basic"
+            },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "token",
+                  "type": "text",
+                  "value": "{{refreshToken}}"
+                }
+              ]
+            },
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "oidc",
+                "introspect"
+              ],
+              "raw": "{{baseUrl}}/api/oidc/introspect"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Token revocation (RFC 7009): form fields token (required) plus client authentication. Revokes the token and, for refresh tokens, its lineage. Answers 200 with an empty body uniformly — an unknown token is not an error and reveals nothing. Missing token is 400; bad client auth is 401.",
+          "name": "Revoke token",
+          "request": {
+            "auth": {
+              "basic": [
+                {
+                  "key": "password",
+                  "type": "string",
+                  "value": "{{clientSecret}}"
+                },
+                {
+                  "key": "username",
+                  "type": "string",
+                  "value": "{{clientId}}"
+                }
+              ],
+              "type": "basic"
+            },
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "token",
+                  "type": "text",
+                  "value": "{{refreshToken}}"
+                }
+              ]
+            },
+            "header": [],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "oidc",
+                "revoke"
+              ],
+              "raw": "{{baseUrl}}/api/oidc/revoke"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "OIDC Authorization Code Flow"
+    },
+    {
+      "description": "Unified, Organization-scoped audit list — every Administrator can read it. Filters are optional query params and combine: actor (substring), kind (event kind, e.g. bootstrap.completed), from/to (ISO datetimes bounding occurrence). Requires the Administrator cookie. Nothing here is Owner-only: seeing the record is not a destructive act.",
+      "item": [
+        {
+          "description": "Lists audit events for the Organization, newest behavior per the active filters: try ?kind=bootstrap.completed right after setup, or ?actor=<administratorId> to follow one actor. Optional query params actor, kind, from, to (combine freely; omit all for the full list). Requires the Administrator cookie. Returns {events[]}.",
+          "name": "List audit events",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "audit"
+              ],
+              "query": [
+                {
+                  "key": "kind",
+                  "value": ""
+                },
+                {
+                  "key": "actor",
+                  "value": ""
+                },
+                {
+                  "key": "from",
+                  "value": ""
+                },
+                {
+                  "key": "to",
+                  "value": ""
+                }
+              ],
+              "raw": "{{baseUrl}}/api/audit?kind=&actor=&from=&to="
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "Audit"
+    },
+    {
+      "description": "Harness-only surfaces backed by the in-memory mail transport. Mounted only when MAIL_TRANSPORT_BINDING=capture (development): in SMTP mode these routes do not exist. Use them to read the links that sign-up, reset, invitation, and email-change flows mail out.",
+      "item": [
+        {
+          "description": "Lists every email the Instance has captured: {emails[{to, subject, body, sentAt, ...}]}. Requires the capture binding (404 otherwise). The helper script finds the newest mail to `endUserEmail` and captures the first token= link parameter into `mailboxToken` for the verify/reset/confirm requests. No authentication.",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+"const res = pm.response.json();",
+"const mine = (res.emails || []).filter(e => e.to === pm.environment.get('endUserEmail'));",
+"const withToken = mine.filter(e => /token=[A-Za-z0-9\\-_]/.test(JSON.stringify(e)));",
+"if (withToken.length) {",
+"const m = JSON.stringify(withToken[withToken.length - 1]).match(/token=([A-Za-z0-9\\-_]+)/);",
+                  "if (m) pm.environment.set('mailboxToken', m[1]);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "name": "List captured mail",
+          "request": {
+            "header": [],
+            "method": "GET",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "dev",
+                "mail"
+              ],
+              "raw": "{{baseUrl}}/dev/mail"
+            }
+          },
+          "response": []
+        },
+        {
+          "description": "Sends a synthetic mail through the capture transport ({to, subject, body}) so the outbound boundary is observable end-to-end (walking-skeleton seam). Answers {sent:true}. Capture binding only. Product flows are the real senders — this route exists for harness verification, not for application use.",
+          "name": "Send dev mail",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"to\": \"{{endUserEmail}}\",\n  \"subject\": \"hello\",\n  \"body\": \"world\"\n}"
+            },
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "POST",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "dev",
+                "mail"
+              ],
+              "raw": "{{baseUrl}}/dev/mail"
+            }
+          },
+          "response": []
+        }
+      ],
+      "name": "Development"
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000"
+    },
+    {
+      "key": "setupToken",
+      "value": ""
+    },
+    {
+      "key": "organizationName",
+      "value": "Acme Corp"
+    },
+    {
+      "key": "ownerName",
+      "value": "Ada Owner"
+    },
+    {
+      "key": "ownerEmail",
+      "value": "owner@example.com"
+    },
+    {
+      "key": "ownerPassword",
+      "value": "ChangeMe123!"
+    },
+    {
+      "key": "ownerAdministratorId",
+      "value": ""
+    },
+    {
+      "key": "organizationId",
+      "value": ""
+    },
+    {
+      "key": "memberName",
+      "value": "Moe Member"
+    },
+    {
+      "key": "memberEmail",
+      "value": "member@example.com"
+    },
+    {
+      "key": "memberPassword",
+      "value": "ChangeMe123!"
+    },
+    {
+      "key": "invitationId",
+      "value": ""
+    },
+    {
+      "key": "invitationToken",
+      "value": ""
+    },
+    {
+      "key": "applicationName",
+      "value": "Demo Web App"
+    },
+    {
+      "key": "spaApplicationName",
+      "value": "Demo SPA"
+    },
+    {
+      "key": "applicationId",
+      "value": ""
+    },
+    {
+      "key": "clientId",
+      "value": ""
+    },
+    {
+      "key": "clientSecret",
+      "value": ""
+    },
+    {
+      "key": "spaApplicationId",
+      "value": ""
+    },
+    {
+      "key": "spaClientId",
+      "value": ""
+    },
+    {
+      "key": "redirectUri",
+      "value": "https://oauth.pstmn.io/v1/callback"
+    },
+    {
+      "key": "redirectUriId",
+      "value": ""
+    },
+    {
+      "key": "secretId",
+      "value": ""
+    },
+    {
+      "key": "scopes",
+      "value": "openid email profile"
+    },
+    {
+      "key": "oauthState",
+      "value": "postman-state-123"
+    },
+    {
+      "key": "oauthNonce",
+      "value": "postman-nonce-456"
+    },
+    {
+      "key": "endUserEmail",
+      "value": "enduser@example.com"
+    },
+    {
+      "key": "endUserPassword",
+      "value": "ChangeMe123!"
+    },
+    {
+      "key": "endUserNewPassword",
+      "value": "ChangeMe456!"
+    },
+    {
+      "key": "endUserNewEmail",
+      "value": "enduser.new@example.com"
+    },
+    {
+      "key": "endUserSessionId",
+      "value": ""
+    },
+    {
+      "key": "identityId",
+      "value": ""
+    },
+    {
+      "key": "authorizationCode",
+      "value": ""
+    },
+    {
+      "key": "codeVerifier",
+      "value": ""
+    },
+    {
+      "key": "codeChallenge",
+      "value": ""
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "refreshToken",
+      "value": ""
+    },
+    {
+      "key": "idToken",
+      "value": ""
+    },
+    {
+      "key": "mailboxToken",
+      "value": ""
+    }
+  ]
+}

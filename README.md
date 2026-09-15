@@ -29,11 +29,16 @@ cd backend && npx prisma migrate deploy && cd ..
 npm run dev
 ```
 
-Then complete the Bootstrap Ceremony with the setup token printed to the console — it creates your Organization and its first Owner:
+The server prints a one-time setup token at first boot. Complete the Bootstrap Ceremony with it — that creates your Organization and its first Owner:
 
 ```sh
 curl http://localhost:3000/health/ready
 # {"status":"ok","checks":{"database":{"ok":true},...}}
+
+curl -X POST "http://localhost:3000/api/setup?token=$SETUP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"organizationName":"Acme","email":"owner@example.com","password":"ChangeMe123!","name":"Ada Owner"}'
+# 201: the Organization and its first Owner; replay is refused from then on
 ```
 
 > [!NOTE]
@@ -98,6 +103,12 @@ npm run test -w e2e # black-box suite: real backend + real PostgreSQL + captured
 npm run verify      # typecheck + build + e2e (what CI runs)
 ```
 
+### API clients
+
+- Interactive docs (dev mode only): `/api/docs` on a running Instance.
+- Postman: [`docs/postman/`](docs/postman/) holds an import-ready collection
+  plus a local environment covering all 63 operations in golden-path order.
+
 ### Production deployment
 
 High level — details in [`deploy/README.md`](deploy/README.md):
@@ -132,7 +143,7 @@ Dashboard ─────────────────▶ Management API 
 |---|---|
 | Runtime | Node.js 24 (see `.nvmrc`) |
 | API framework | NestJS 11, Express |
-| Language | TypeScript 5.7 |
+| Language | TypeScript 5.9 (`^5.7`) |
 | Database | PostgreSQL 18 (only supported server version) |
 | Data access | Prisma 7.10 (`@prisma/client` + `prisma` CLI) |
 | Tokens | `jose` (JWKS, JWT verification) |
@@ -152,6 +163,7 @@ Dashboard ─────────────────▶ Management API 
 ├── local/                 # Docker Desktop development stack
 ├── docs/
 │   ├── adr/               # architecture decision records
+│   ├── postman/           # import-ready API collection + local environment
 │   └── operator-guide.md  # supported deployment envelope
 ├── .github/workflows/     # CI (typecheck+build+e2e, image build) and release
 ├── Dockerfile             # production image build
