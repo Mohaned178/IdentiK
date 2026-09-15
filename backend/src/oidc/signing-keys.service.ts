@@ -9,7 +9,7 @@ import {
   SignJWT,
   type JWK,
   type JWTPayload,
-  type KeyLike,
+  type KeyInput,
 } from 'jose';
 import { IssuerService } from './issuer.service';
 import { instanceConfig } from '../config/instance-config';
@@ -24,7 +24,7 @@ export interface AccessTokenClaims extends JWTPayload {
 
 interface LoadedKey {
   kid: string;
-  privateKey?: KeyLike | Uint8Array;
+  privateKey?: KeyInput;
   publicJwk: JWK;
 }
 
