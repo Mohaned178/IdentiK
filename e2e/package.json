@@ -18,6 +18,6 @@
     "prisma": "^7.10.0",
     "smtp-server": "^3.19.11",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^5.0.1"
   }
 }
